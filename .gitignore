@@ -1,0 +1,39 @@
+# Android / Gradle build outputs
+**/build/
+.gradle/
+**/.gradle/
+*.apk
+*.aab
+local.properties
+.idea/
+*.iml
+.cxx/
+# Rust
+**/target/
+# large native libs (keep source only)
+**/jniLibs/**/*.so
+
+# Reference messenger repos & local archives (NOT part of AlphaMessenger)
+Messengers/
+*.rar
+History/
+
+# Exchange archives / external agent workspaces
+*.zip
+AlphaMessenger_WIP_full-with-git/
+
+# Release signing secrets
+keystore.properties
+*.jks
+*.keystore
+
+# Local tool state / crash dumps
+.claude/
+.dbg/
+hs_err_pid*.log
+
+# Alpha feed signing key (owner only)
+alpha-feed-key.txt
+
+# Working notes, audits and decisions (kept locally, never published)
+notes/

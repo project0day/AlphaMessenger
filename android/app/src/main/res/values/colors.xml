@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="teal_primary">#FF10B981</color>
+    <color name="teal_primary_dark">#FF059669</color>
+    <color name="teal_accent">#FF34D399</color>
+    <color name="midnight_purple">#FF1E1B4B</color>
+    <color name="surface_light">#F0FFFFFF</color>
+    <color name="surface_dark">#B01E1E2E</color>
+    <color name="surface_midnight">#B00F0A1E</color>
+
+    <!-- Splash / theme colors -->
+    <color name="accent_teal">#FF14B8A6</color>
+    <color name="bg_dark">#FF0A0E1A</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>

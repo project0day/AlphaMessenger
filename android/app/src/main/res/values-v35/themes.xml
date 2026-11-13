@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- targetSdk 35 forces edge-to-edge on Android 15+. The app already draws
+         behind transparent bars and paints them itself (Theme.kt), so the
+         system's forced mode must not change insets under it. -->
+    <style name="Theme.AlphaMessenger" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/accent_teal</item>
+        <item name="colorPrimaryDark">@color/midnight_purple</item>
+        <item name="colorAccent">@color/teal_accent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+
+    <!-- The cropper's toolbar would slide under the status bar otherwise. -->
+    <style name="Theme.AlphaMessenger.Crop" parent="Theme.AppCompat.Light.DarkActionBar">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+</resources>

@@ -1,0 +1,966 @@
+package com.alphamessenger.ui.media.send
+
+import android.content.Context
+import com.alphamessenger.R
+import com.alphamessenger.data.AlphaCoreRepository
+import com.alphamessenger.transfer.TransferAction
+import com.alphamessenger.transfer.TransferEngine
+import com.alphamessenger.transfer.TransferKey
+import com.alphamessenger.ui.chat.AlbumItemMetadata
+import com.alphamessenger.ui.media.draft.MediaDraftItem
+import com.alphamessenger.ui.media.export.MediaTrace
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * Media send queue — ONE state machine for all attachments.
+ *
+ * The message is created FIRST, before any processing. It then lives in the
+ * DB, and file preparation, upload and publish are its states — not
+ * something the "send" button waits for:
+ *
+ * ```
+ *   tap ─► job on disk ─► message in DB ─► bubble on screen
+ *                             │
+ *                             └─► QUEUED ─► PROCESSING ─► UPLOADING ─► SENT
+ * ```
+ *
+ * --- Guarantees ---
+ *
+ * 1. **The source never disappears.** The job TAKES our temp copies for
+ *    itself at submit time (instant rename). The hourly draft sweep can no
+ *    longer reach them: a file's age must not decide whether a message
+ *    arrives.
+ * 2. **No "message exists, job doesn't" state.** The job is written BEFORE
+ *    the message, and a message already created after a crash is found by
+ *    its file path: it contains the job id. So a retry never creates a
+ *    second message.
+ * 3. **A blob is never uploaded twice.** The uploaded-blob ref is written to
+ *    the job immediately, so resuming after process death uploads only what
+ *    is still missing.
+ * 4. **Cancelled work stays cancelled.** Every state write passes through an
+ *    in-memory guard set synchronously with the ✕ tap.
+ * 5. **A network drop is not a failure.** Preparation runs to the end
+ *    locally, upload waits for the network and resumes on its own. The red
+ *    "retry" stays for real failures, not for the subway.
+ *
+ * What the queue does NOT do: it does not run while the app is closed or the
+ * DB is locked. Not an omission but a consequence of the model: the DB is
+ * encrypted and opens only at login, so a background process has nothing to
+ * publish with. Resume happens right after the DB opens.
+ */
+@Singleton
+class MediaSendQueue @Inject constructor(
+    @ApplicationContext private val context: Context,
+    private val repository: AlphaCoreRepository,
+    private val transfers: TransferEngine,
+    private val network: com.alphamessenger.data.NetworkMonitor,
+) {
+
+    private val store = MediaSendStore(context)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Transcoding — strictly one at a time for the whole app.
+     *
+     * A hardware limit, not an architectural one: the phone has one encoder,
+     * and two clips in parallel slow both down and heat the device.
+     */
+    private val encoderSlot = Semaphore(1)
+
+    /**
+     * How many sends run at once.
+     *
+     * Two, not "as many as possible": while the first uploads bytes, the
+     * second has time to prepare, so network and encoder work in parallel
+     * instead of queueing. More than two is pointless — the same two
+     * resources become the bottleneck.
+     */
+    private val messageSlots = Semaphore(2)
+
+    // No network-wide upload counter here — on purpose. A file-level permit
+    // would hold a slot for the whole file while the line idles between
+    // chunks. The limit lives where the real request happens: in the core,
+    // around ONE chunk upload (GLOBAL_UPLOAD_SLOTS in
+    // alpha-media/pipeline.rs). A permit lasts the milliseconds of a
+    // request, not the minutes of a file, and is not taken during
+    // transcoding, between chunks, on a retry pause, or at publish. One
+    // limit per process also means limits do not multiply: four files with
+    // four chunks each are four requests in flight, not sixteen.
+
+    /** Job writes during parallel uploads: updates are serialized. */
+    private val writeLock = Mutex()
+
+    /** What is running now: lets ✕ abort the work itself, not just the spinner. */
+    private val running = ConcurrentHashMap<String, Job>()
+
+
+    /**
+     * Cancelled ids — in memory and SYNCHRONOUSLY with the ✕ tap.
+     *
+     * On-disk state alone is not enough: the work may have passed its check
+     * and be about to write the next step. Such a write would resurrect the
+     * cancelled send — the job file would reappear and the queue would
+     * dutifully finish what the user just cancelled. This set is the only
+     * guard EVERY job write passes through.
+     */
+    private val canceled = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    /** Chat whose messages changed. The screen reloads the list on this signal. */
+    private val _changed = MutableSharedFlow<String>(replay = 0, extraBufferCapacity = 32)
+    val changed: SharedFlow<String> = _changed.asSharedFlow()
+
+    /**
+     * What went wrong — in words, to show to the user.
+     *
+     * Deliberately separate from [changed]: reloading the list and saying
+     * "upload failed, no network" are different events, and a silent ↻ was
+     * exactly what was missing. The bubble stays in place: a failure is not
+     * a reason to hide it.
+     */
+    data class Problem(val chatId: String, val messageId: String, val text: String)
+
+    private val _problems = MutableSharedFlow<Problem>(replay = 0, extraBufferCapacity = 16)
+    val problems: SharedFlow<Problem> = _problems.asSharedFlow()
+
+    /**
+     * Job state per message — in memory.
+     *
+     * The UI asks for this on every menu open and action render, i.e. from
+     * the main thread. Going to disk and parsing JSON there is exactly how
+     * "just read a file" becomes list jank. Disk stays the source of truth
+     * and is read at startup; the map is its reflection.
+     */
+    private val states = ConcurrentHashMap<String, MediaSendState>()
+
+    /** Job state for a message — for the UI: offer ✕ or ↻. */
+    fun stateOf(messageId: String): MediaSendState? = states[messageId]
+
+    fun failureOf(messageId: String): MediaSendFailure? = store.find(messageId)?.failure
+
+    init {
+        watchNetwork()
+    }
+
+    // --- Public entry points ---
+
+    /**
+     * Queue a set for sending and return the created message id.
+     *
+     * The step order is the desync protection: first the INTENT lands on
+     * disk (a job without a message), only then is the message itself
+     * created. The reverse order would leave, after a crash, a message
+     * nobody knows about — an eternal clock bubble.
+     */
+    suspend fun submit(
+        chatId: String,
+        drafts: List<MediaDraftItem>,
+        caption: String?,
+        ttlSecs: Int,
+        photoMaxEdge: Int,
+        photoQuality: Int,
+        alsoTo: List<String>,
+        thread: String? = null,
+        replyTo: String? = null,
+        hd: Boolean = true,
+        videoEdge: Int = com.alphamessenger.ui.media.export.MediaQuality.ORIGINAL,
+        /** A timed view: [drafts] must be one photo or video. */
+        glanceSecs: Int? = null,
+    ): String? {
+        if (chatId.isBlank() || drafts.isEmpty()) return null
+        val sendId = java.util.UUID.randomUUID().toString()
+        MediaTrace.event(sendId, null, MediaTrace.SEND_TAP, "items" to drafts.size)
+        val items = claimSources(sendId, drafts, photoMaxEdge, photoQuality)
+        if (items.isEmpty()) return null
+
+        var job = MediaSendJob(
+            sendId = sendId,
+            chatId = chatId,
+            thread = thread,
+            replyTo = replyTo,
+            messageId = "",
+            caption = caption,
+            ttlSecs = ttlSecs,
+            glanceSecs = glanceSecs?.takeIf { drafts.size == 1 },
+            photoMaxEdge = photoMaxEdge,
+            photoQuality = photoQuality,
+            hd = hd,
+            videoEdge = videoEdge,
+            alsoTo = alsoTo.filter { it.isNotBlank() && it != chatId }.distinct(),
+            state = MediaSendState.QUEUED,
+            items = items,
+            echoJson = "",
+        )
+        persist(job)
+
+        job = createMessage(job) ?: run {
+            store.delete(job)
+            _problems.tryEmit(Problem(chatId, "", context.getString(MediaSendFailure.MESSAGE_FAILED.messageRes)))
+            return null
+        }
+        markInFlight(job)
+        // The message is in the DB and the spinner is up: from this second
+        // the bubble is on screen. Everything between SEND_TAP and this
+        // event is what the user waits for after pressing "send" — the very
+        // quantity this pipeline minimizes.
+        MediaTrace.event(sendId, null, MediaTrace.BUBBLE_VISIBLE, "items" to items.size)
+        pump()
+        return job.messageId
+    }
+
+    /** Do we own work for this message (otherwise cancel/retry goes the legacy path). */
+    fun owns(messageId: String): Boolean =
+        messageId.isNotBlank() && states.containsKey(messageId)
+
+    /** App start: finish whatever survived the previous process life. */
+    fun resume() {
+        scope.launch {
+            runCatching { store.sweep() }
+            val all = store.all().filter { it.state != MediaSendState.SENT }
+            // The state map is restored FIRST: what the UI offers on the
+            // bubble — cancel, retry or the plain menu — depends on it.
+            all.forEach { if (it.messageId.isNotBlank()) states[it.messageId] = it.state }
+            if (all.isEmpty()) return@launch
+
+            // FAILED jobs are registered too — not to run, but so the "retry"
+            // button has something to work with. Otherwise a restart left
+            // the album without a single transfer member, the ↻ send was cut
+            // off by the "is this even our upload?" check, and the tap did
+            // nothing — silently.
+            val failed = all.filter { it.state == MediaSendState.FAILED }
+            failed.forEach { job ->
+                markInFlight(job)
+                transfers.onUploadFailed(job.messageId, job.failure?.let { context.getString(it.messageRes) }.orEmpty())
+                job.items.forEach { transfers.onUploadFailed(job.opId(it.index)) }
+                android.util.Log.i(
+                    TAG, "${job.sendId}: отказ восстановлен (${job.failure ?: "причина не записана"})",
+                )
+            }
+
+            val left = all.filter {
+                it.state == MediaSendState.QUEUED ||
+                    it.state == MediaSendState.PROCESSING ||
+                    it.state == MediaSendState.UPLOADING
+            }
+            if (left.isEmpty()) return@launch
+            android.util.Log.i(TAG, "возобновляем ${left.size} незаконченных отправок")
+            for (job in left) {
+                // A job without a message: the crash happened between writing
+                // the intent and creating the message. Create it now — or find
+                // the already-created one by its file path; no duplicate.
+                val ready = if (job.messageId.isBlank()) createMessage(job) else job
+                if (ready == null) {
+                    android.util.Log.w(TAG, "${job.sendId}: сообщение создать не удалось, задание оставлено")
+                    continue
+                }
+                // The spinner must appear on the bubble at once, not after the first byte.
+                markInFlight(ready)
+            }
+            pump()
+        }
+    }
+
+    /**
+     * User cancel (✕ on the bubble). Terminal: the work is aborted, files
+     * are deleted, the message is removed — as if the send never happened.
+     */
+    fun cancel(messageId: String) {
+        val job = store.find(messageId) ?: return
+        android.util.Log.i(TAG, "отмена ${job.sendId} (${job.messageId})")
+        canceled.add(job.sendId)
+        // The core checks its flag between chunks — otherwise bytes would keep flowing.
+        runCatching { repository.cancelMediaUpload(messageId) }
+        val work = running.remove(job.sendId)
+        work?.cancel()
+        transfers.dispatch(TransferKey.upload(messageId), TransferAction.Cancel)
+        job.items.forEach { transfers.dispatch(TransferKey.upload(job.opId(it.index)), TransferAction.Cancel) }
+        scope.launch {
+            // Files are deleted ONLY after the work has actually stopped.
+            // Otherwise a transcode that finished in time would drop its
+            // output into an already-deleted directory, forever dangling.
+            runCatching { work?.join() }
+            runCatching { repository.deletePendingMedia(messageId) }
+            runCatching { repository.deleteMessageLocal(messageId) }
+            // A cancelled send must clean up its transfer group too:
+            // otherwise the engine would keep a transfer with no bubble
+            // corresponding to it.
+            transfers.removeGroup(messageId)
+            store.delete(job)
+            forget(messageId)
+            _changed.tryEmit(job.chatId)
+        }
+    }
+
+    /** Retry after failure (↻ on the bubble). Finished files and refs are reused. */
+    fun retry(messageId: String) {
+        val job = store.find(messageId) ?: return
+        if (running.containsKey(job.sendId)) {
+            // The button was tapped while the work is already running. Silence
+            // is not an option: a silent button looks exactly like a broken one.
+            _problems.tryEmit(
+                Problem(
+                    job.chatId, messageId,
+                    if (!hasNetwork()) context.getString(R.string.send_waiting_offline)
+                    else context.getString(R.string.send_already_running),
+                ),
+            )
+            return
+        }
+        android.util.Log.i(TAG, "повтор ${job.sendId} (${job.messageId})")
+        canceled.remove(job.sendId)
+        persist(job.withState(MediaSendState.QUEUED))
+        markInFlight(job)
+        pump()
+    }
+
+    /**
+     * The single job-state write. Cancelled work is never written — see
+     * [canceled]. Returns false if the job no longer exists: to the worker
+     * that means "stop".
+     */
+    private fun persist(job: MediaSendJob): Boolean {
+        if (job.sendId in canceled) return false
+        store.save(job)
+        // The state map mirrors the disk and is updated ONLY here: one
+        // write, one place — nothing can diverge.
+        if (job.messageId.isNotBlank()) states[job.messageId] = job.state
+        return true
+    }
+
+    /** No job left for the message: cancelled or delivered. */
+    private fun forget(messageId: String) {
+        if (messageId.isNotBlank()) states.remove(messageId)
+    }
+
+    // --- Message creation ---
+
+    /**
+     * Create a message for the job — or pick up an already created one.
+     *
+     * The second case is not theoretical: the process may have died between
+     * inserting the message and writing its id into the job. The message is
+     * identified by its file path — it contains the job id, so correlating
+     * needs neither an extra DB field nor core changes.
+     */
+    private suspend fun createMessage(job: MediaSendJob): MediaSendJob? {
+        val echo = job.echoJson.takeIf { it.isNotBlank() } ?: echoManifest(context, job.items)
+        existingMessageFor(job)?.let { found ->
+            android.util.Log.i(TAG, "${job.sendId}: сообщение $found уже создано — второе не создаём")
+            markReply(job, found)
+            markGlance(job, found)
+            return job.copy(messageId = found, echoJson = echo).also { persist(it) }
+        }
+        val msgId = runCatching {
+            repository.persistOutgoingAlbum(job.chatId, echo, job.caption, job.ttl, thread = job.thread)
+        }.getOrNull() ?: return null
+        markReply(job, msgId)
+        markGlance(job, msgId)
+        return job.copy(messageId = msgId, echoJson = echo).also { persist(it) }
+    }
+
+    /** Before any publish, so the peer gets the quote with the media. */
+    private suspend fun markReply(job: MediaSendJob, messageId: String) {
+        job.replyTo?.let { repository.setMediaReply(messageId, it) }
+    }
+
+    /** Before any publish: the core then sends it as a timed view, never as a plain photo. */
+    private suspend fun markGlance(job: MediaSendJob, messageId: String) {
+        val secs = job.glanceSecs ?: return
+        val kind = if (job.items.firstOrNull()?.isVideo == true) "video" else "image"
+        repository.whisperMarkOutgoing(job.chatId, messageId, kind, secs, glance = true)
+    }
+
+    /** Find our message by the job id embedded in the file path. */
+    private suspend fun existingMessageFor(job: MediaSendJob): String? = runCatching {
+        val marker = "/${job.sendId}/"
+        (if (job.thread != null) repository.getThread(job.chatId, job.thread, limit = 60u)
+            else repository.getMessages(job.chatId, limit = 60u))
+            .firstOrNull { it.mediaRef?.contains(marker) == true }
+            ?.id
+    }.getOrNull()
+
+    // --- Execution ---
+
+    private enum class Outcome { DONE, FAILED, WAIT_NETWORK, STOPPED }
+
+    /**
+     * Start work on every send that has something to do.
+     *
+     * No global lock over the whole path. One mutex around all of `execute`
+     * (prep + upload + publish) would let a message block the next from
+     * starting ANYTHING; serialization is only needed for the encoder, not
+     * for upload and publish.
+     *
+     * Each RESOURCE is limited separately now:
+     *  - [encoderSlot] — transcoding, strictly one;
+     *  - [messageSlots] — how many sends run at once;
+     *  - network — a shared counter in the core, around a single chunk.
+     *
+     * The network limit lives in the core because only there the real
+     * request boundary is visible; at file level a permit would be held for
+     * the whole upload and a big clip would hog the channel. Publish takes
+     * no slot — it touches neither encoder nor bandwidth.
+     */
+    private fun pump() {
+        scope.launch {
+            // FAILED and CANCELED are deliberately excluded: the former
+            // waits for ↻, the latter is terminal.
+            val actionable = store.all().filter {
+                it.messageId.isNotBlank() && it.sendId !in canceled && (
+                    it.state == MediaSendState.QUEUED ||
+                        it.state == MediaSendState.PROCESSING ||
+                        it.state == MediaSendState.UPLOADING
+                    )
+            }
+            for (job in actionable) {
+                // Already running — do not start twice.
+                if (running.containsKey(job.sendId)) continue
+                val work = scope.launch {
+                    // A slot is held for ONE send and released right after
+                    // it, not after the whole queue is published.
+                    messageSlots.withPermit {
+                        // Re-encoding, upload and publish: the CPU must not sleep through it.
+                        repository.keepAwake.during { runCatching { execute(job) } }
+                            .onFailure { android.util.Log.e(TAG, "работа ${job.sendId} сорвалась", it) }
+                    }
+                }
+                running[job.sendId] = work
+                work.invokeOnCompletion { running.remove(job.sendId) }
+            }
+        }
+    }
+
+    private suspend fun execute(initial: MediaSendJob): Outcome {
+        var job = initial
+        android.util.Log.i(TAG, "старт ${job.sendId}: ${job.items.size} элем., состояние ${job.state}")
+
+        // --- PROCESSING + UPLOADING: one pipeline per item ---
+        // Items are encoded one at a time (encoder slot) and each goes up as soon as
+        // it is ready — a re-encoded video already while it is being encoded. So the
+        // next item's encode overlaps this one's upload, and the album's tiles finish
+        // one after another instead of all waiting for the last encode.
+        job = job.withState(MediaSendState.PROCESSING)
+        if (!persist(job)) return Outcome.STOPPED
+        // Denominators known now; a video still to be re-encoded reports its own as it goes.
+        val sizes = job.items.map { runCatching { File(it.outputPath).length() }.getOrDefault(0L) }
+        transfers.registerGroup(
+            job.messageId,
+            job.items.map { TransferKey.upload(job.opId(it.index)) },
+            immediate = true,
+            memberSizes = sizes,
+        )
+        MediaTrace.event(job.sendId, null, MediaTrace.UPLOAD_FIRST_BYTE, "items" to sizes.size)
+        // Album tiles waiting their turn read "0%", not a spinner that suggests work.
+        if (job.items.size > 1) job.items.forEachIndexed { i, item ->
+            if (item.uploadedRef == null) transfers.onUploadBytes(job.opId(item.index), 0L, sizes[i].coerceAtLeast(1L))
+        }
+
+        val running = job
+        val results = try {
+            kotlinx.coroutines.coroutineScope {
+                // In the order picked: item i is encoded after item i-1 and finishes its
+                // upload after it, so the tiles complete left to right.
+                val gates = running.items.map { ItemGates() }
+                running.items.mapIndexed { i, item ->
+                    async { sendItem(running, item, gates[i], gates.getOrNull(i - 1)) }
+                }.awaitAll()
+            }
+        } catch (stop: ItemStop) {
+            val reason = stop.reason
+            if (reason == null || running.sendId in canceled) return Outcome.STOPPED
+            fail(running, reason)
+            return Outcome.FAILED
+        }
+
+        if (job.sendId in canceled) return Outcome.STOPPED
+        val okRefs = results.sortedBy { it.first }.mapNotNull { it.second }
+        MediaTrace.event(
+            job.sendId, null, MediaTrace.UPLOAD_END,
+            "ok" to okRefs.size, "total" to job.items.size,
+        )
+        // ALL OR NOTHING. An album is one message; publishing it without part
+        // of the attachments means silently losing what the user sent.
+        //
+        // Uploaded blobs are not lost either way: their refs are written to
+        // the job, and the next attempt uploads only what is missing.
+        if (okRefs.size < job.items.size) {
+            if (!hasNetwork()) {
+                android.util.Log.i(
+                    TAG,
+                    "${job.sendId}: загружено ${okRefs.size} из ${job.items.size}, сети нет — ждём подключения",
+                )
+                persist(job.withState(MediaSendState.UPLOADING))
+                return Outcome.WAIT_NETWORK
+            }
+            android.util.Log.e(TAG, "${job.sendId}: загружено только ${okRefs.size} из ${job.items.size}")
+            fail(job, MediaSendFailure.UPLOAD_FAILED)
+            return Outcome.FAILED
+        }
+        job = job.withState(MediaSendState.UPLOADING)
+
+        // --- Publish ---
+        // The bytes are done but the work is not. Next come steps the byte
+        // counter does not see: the large ref moves to a separate encrypted
+        // manifest (yet ANOTHER upload), the message is MLS-encrypted and
+        // published to the relay with confirmation. Without surfacing this,
+        // the spinner sat at "25 of 26 MB" with an ✕ and looked stuck —
+        // though work was going on.
+        //
+        // The engine's "publishing" state exists for this; it is set here,
+        // and the trace measures how long this tail really takes — instead
+        // of "about a minute".
+        transfers.onUploadPublishing(job.messageId)
+        job.items.forEach { transfers.onUploadPublishing(job.opId(it.index)) }
+        MediaTrace.event(job.sendId, null, "PUBLISH_START", "refs" to okRefs.size)
+
+        val refsJson = "[" + okRefs.joinToString(",") + "]"
+        var ok = false
+        var attempt = 0
+        while (!ok && attempt < 5) {
+            if (job.sendId in canceled) return Outcome.STOPPED
+            // sendAlbum fuses: manifest upload (for a large ref this is yet
+            // ANOTHER upload), MLS encryption and relay confirmation.
+            // Measured, this tail takes 0.5–3.3 s — the time the bubble
+            // spends in "sending" after the last byte.
+            ok = repository.sendAlbum(job.chatId, job.messageId, refsJson, job.caption, job.ttl)
+            if (!ok) { attempt++; delay(500L * attempt) }
+        }
+        if (!ok) {
+            if (!hasNetwork()) {
+                android.util.Log.i(TAG, "${job.sendId}: публикация не прошла, сети нет — ждём подключения")
+                return Outcome.WAIT_NETWORK
+            }
+            android.util.Log.e(TAG, "${job.sendId}: публикация не удалась")
+            fail(job, MediaSendFailure.PUBLISH_FAILED)
+            return Outcome.FAILED
+        }
+        runCatching { repository.deletePendingMedia(job.messageId) }
+        job.items.forEach { transfers.onUploadSent(job.opId(it.index)) }
+        // Publish confirmed — the work is over, and the transfer group must
+        // disappear with it. HERE, not after the last byte: until confirmed,
+        // publish can still fail and the retry needs the group.
+        //
+        // Otherwise the group would live forever: members done, numerator
+        // zero, denominator still there — a spinner with ✕ and "0 B / N MB"
+        // after successful delivery.
+        //
+        // There is ONE end for all senders — see the primitive's docs.
+        transfers.onOutgoingTransferPublished(job.messageId)
+        persist(job.withState(MediaSendState.SENT))
+        _changed.tryEmit(job.chatId)
+        MediaTrace.event(job.sendId, null, MediaTrace.MESSAGE_PUBLISH, "refs" to okRefs.size)
+        MediaTrace.finish(job.sendId)
+        android.util.Log.i(TAG, "${job.sendId}: доставлено")
+
+        // Other Share recipients: same blobs, no second upload.
+        fanOut(job, refsJson)
+
+        // The files are no longer needed as "work", but the sender's bubble
+        // renders from them — so only the job record is removed, not the dir.
+        store.deleteRecord(job)
+        // They also become cache entries: the sweep a day later leaves the sender
+        // with their own attachment on the phone, not a download from storage.
+        scope.launch {
+            results.forEach { (index, ref) ->
+                val item = job.items.firstOrNull { it.index == index } ?: return@forEach
+                if (ref != null) repository.adoptSentFile(item.outputPath, ref)
+            }
+        }
+        forget(job.messageId)
+        return Outcome.DONE
+    }
+
+    /** Stops the whole send from inside one item: [reason] null = cancelled, not a failure. */
+    private class ItemStop(val reason: MediaSendFailure?) : Exception()
+
+    /**
+     * One item: prepare (if needed), then upload. Returns its ref, or null when
+     * the upload could not finish (no network / storage refused) — the job then
+     * waits or fails as a whole. A preparation problem stops the send ([ItemStop]).
+     */
+    private suspend fun sendItem(job: MediaSendJob, item: MediaSendItem, own: ItemGates, prev: ItemGates?): Pair<Int, String?> =
+        try { sendItemInOrder(job, item, own, prev) } finally { own.encoded.complete(Unit); own.uploaded.complete(Unit) }
+
+    /** Per-item order marks: the next item waits on them, never on this item's success. */
+    private class ItemGates {
+        val encoded = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val uploaded = kotlinx.coroutines.CompletableDeferred<Unit>()
+    }
+
+    private suspend fun sendItemInOrder(job: MediaSendJob, item: MediaSendItem, own: ItemGates, prev: ItemGates?): Pair<Int, String?> {
+        // Already-uploaded items are not uploaded again — the double-send protection after a restart.
+        item.uploadedRef?.let { return item.index to it }
+        val opId = job.opId(item.index)
+        if (File(item.outputPath).length() <= 0L) {
+            prev?.encoded?.await()
+            prepare(job, item, opId)
+        }
+        own.encoded.complete(Unit)
+        // Its early upload ran while it was encoded; the rest goes after the previous item's.
+        prev?.uploaded?.await()
+        if (job.sendId in canceled) throw ItemStop(null)
+        // Retrying over a dead network only burns the attempt budget: the queue
+        // waits for the network itself (WAIT_NETWORK) and connectivity wakes it.
+        if (!hasNetwork()) return item.index to null
+        // No network permit here: the shared limit lives in the core, around ONE
+        // chunk, so files start at once and share the line by chunk.
+        transfers.onUploadEncrypting(opId)
+        val meta = measured(item)
+        var ref: String? = null
+        var attempt = 0
+        while (ref == null && attempt < 3 && job.sendId !in canceled) {
+            if (!hasNetwork()) {
+                android.util.Log.i(TAG, "${job.sendId}#${item.index}: повтор пропущен — сети нет (попытка ${attempt + 1})")
+                break
+            }
+            ref = repository.uploadBlobRefOnly(
+                item.outputPath, item.mediaType, meta?.poster?.takeIf { it.isNotBlank() }, opId,
+            )
+            if (ref == null) { attempt++; delay(400L * attempt) }
+        }
+        if (job.sendId in canceled) throw ItemStop(null)
+        // Uploaded, not yet sent: the album goes out as one message once every item is up.
+        if (ref != null) transfers.onUploadPublishing(opId) else transfers.onUploadFailed(opId)
+        val merged = ref?.let { mergeMeta(it, meta) }
+        // The ref goes to disk IMMEDIATELY: otherwise process death would force
+        // the same bytes to be re-uploaded.
+        if (merged != null) rememberRef(job.sendId, item.index, merged)
+        return item.index to merged
+    }
+
+    /** Produce the item's file. A re-encoded video starts going up while it is written. */
+    private suspend fun prepare(job: MediaSendJob, item: MediaSendItem, opId: String) {
+        // Checks BEFORE the work: each says in words why there is no point starting —
+        // free space or resend the file are different answers.
+        if (!sourceReadable(item)) {
+            android.util.Log.e(TAG, "${job.sendId} элемент ${item.index}: исходник недоступен")
+            throw ItemStop(MediaSendFailure.SOURCE_UNAVAILABLE)
+        }
+        if (!enoughDiskFor(item)) {
+            android.util.Log.e(TAG, "${job.sendId} элемент ${item.index}: мало места на диске")
+            throw ItemStop(MediaSendFailure.NO_DISK_SPACE)
+        }
+        val target = File(item.outputPath)
+        val produced = kotlinx.coroutines.coroutineScope {
+            var early: kotlinx.coroutines.Job? = null
+            // Preparation runs under the ENCODER slot, not a global send lock: while
+            // this item transcodes, the network stays free for others' bytes.
+            // The core's early upload blocks until it is told the encode ended — on every path.
+            val file = try { encoderSlot.withPermit {
+                MediaOutputFactory.produce(
+                    context, item, job.photoMaxEdge, job.photoQuality, job.sendId,
+                    // A video at its chosen quality; a photo by SD/HD (its edge and quality ride in the job).
+                    policy = if (item.isVideo) com.alphamessenger.ui.media.export.MediaQuality.videoPolicy(job.videoEdge)
+                        else com.alphamessenger.ui.media.export.MediaQuality.policy(job.hd),
+                    // Told only before a re-encode: its output goes up while it is encoded,
+                    // so there is no separate "compressing" phase.
+                    onEstimate = { est ->
+                        if (hasNetwork()) {
+                            transfers.onUploadEncrypting(opId)
+                            early = launch(Dispatchers.IO) {
+                                repository.preuploadGrowing(opId, "${target.path}.part", target.path, est)
+                            }
+                        }
+                    },
+                ) { percent ->
+                    if (percent % 20 == 0) android.util.Log.i(TAG, "${job.sendId} элемент ${item.index}: подготовка $percent%")
+                }
+            } } finally { repository.endPreupload(opId) }
+            early?.join()
+            file
+        }
+        if (produced == null) {
+            // A cancel during preparation looks like a failure — but work interrupted on request is not one.
+            if (job.sendId in canceled) throw ItemStop(null)
+            android.util.Log.e(TAG, "${job.sendId} элемент ${item.index}: файл не получен")
+            // The source may have vanished mid-work — then "retry" is pointless.
+            throw ItemStop(if (!sourceReadable(item)) MediaSendFailure.SOURCE_UNAVAILABLE else MediaSendFailure.ENCODE_FAILED)
+        }
+        markReady(job.sendId, item.index)
+    }
+
+    private suspend fun markReady(sendId: String, index: Int) {
+        writeLock.withLock {
+            val fresh = store.all().firstOrNull { it.sendId == sendId } ?: return
+            persist(fresh.withItem(index) { it.copy(ready = true) })
+        }
+    }
+
+    /** Write a ref into the job. Under a lock: uploads run in parallel. */
+    private suspend fun rememberRef(sendId: String, index: Int, ref: String) {
+        writeLock.withLock {
+            val fresh = store.all().firstOrNull { it.sendId == sendId } ?: return
+            persist(fresh.withItem(index) { it.copy(uploadedRef = ref, ready = true) })
+        }
+    }
+
+    /** Fan out to other Share recipients — by refs to already uploaded blobs. */
+    private fun fanOut(job: MediaSendJob, refsJson: String) {
+        val extras = job.alsoTo.filter { it.isNotBlank() && it != job.chatId }.distinct()
+        if (extras.isEmpty()) return
+        scope.launch {
+            android.util.Log.i(TAG, "рассылка ${job.sendId}: ${extras.size} получателей")
+            for (target in extras) {
+                val id = runCatching {
+                    publishAlbumRefs(target, refsJson, job.echoJson, job.caption, job.ttl)
+                }.getOrNull()
+                android.util.Log.i(TAG, "рассылка → $target: ${id ?: "не удалось"}")
+            }
+        }
+    }
+
+    /**
+     * Publish ALREADY uploaded album refs to chat [target].
+     *
+     * The app's only implementation: forwarding and Share go through it too.
+     * The file is not read, there is no second upload — the echo is built
+     * straight from the refs, so the recipient's bubble is final at once.
+     */
+    suspend fun publishAlbumRefs(
+        target: String,
+        refsJson: String,
+        echoJson: String,
+        caption: String?,
+        ttl: UInt,
+    ): String? {
+        val msgId = runCatching {
+            repository.persistOutgoingAlbum(target, echoJson, caption, ttl)
+        }.getOrNull() ?: return null
+        transfers.onUploadPublishing(msgId)
+        _changed.tryEmit(target)
+        repository.runDetached {
+            var ok = false
+            var attempt = 0
+            while (!ok && attempt < 5) {
+                ok = repository.sendAlbum(target, msgId, refsJson, caption, ttl)
+                if (!ok) { attempt++; delay(500L * attempt) }
+            }
+            if (ok) {
+                runCatching { repository.deletePendingMedia(msgId) }
+                transfers.onUploadSent(msgId)
+            } else {
+                transfers.onUploadFailed(msgId)
+            }
+            _changed.tryEmit(target)
+        }
+        return msgId
+    }
+
+    // --- Network ---
+
+    private fun hasNetwork(): Boolean = network.isOnline
+
+    /**
+     * Network is back — continue what was waiting.
+     *
+     * Without this, "connection dropped" and "broken file" would be treated
+     * the same: a red mark and a plea to press ↻. The app can wait for the
+     * network by itself.
+     */
+    private fun watchNetwork() {
+        scope.launch {
+            var wasOnline = network.isOnline
+            network.online.collect { online ->
+                if (online && !wasOnline) {
+                    android.util.Log.i(TAG, "сеть появилась — продолжаем отправки")
+                    pump()
+                }
+                wasOnline = online
+            }
+        }
+    }
+
+    // --- Execution details ---
+
+    private fun fail(job: MediaSendJob, reason: MediaSendFailure) {
+        persist(job.failedWith(reason))
+        job.items.forEach { transfers.onUploadFailed(job.opId(it.index)) }
+        transfers.onUploadFailed(job.messageId, context.getString(reason.messageRes))
+        _changed.tryEmit(job.chatId)
+        // The bubble stays in place — the reason goes to the screen in words.
+        _problems.tryEmit(Problem(job.chatId, job.messageId, context.getString(reason.messageRes)))
+        MediaTrace.event(job.sendId, null, "FAILED", "reason" to reason.name)
+    }
+
+    /**
+     * Whether the source is USABLE, not merely openable.
+     *
+     * A must after a restart: permissions on a foreign `content://` live
+     * only as long as the process, and the gallery file may be deleted. A
+     * stream-open check alone let an empty file through, so a dead source
+     * (a half-written draft copy) reached preparation, produced a 0×0 image
+     * and failed as "encoder error" — with a retry offered that could never
+     * work.
+     *
+     * The first byte is enough: proving there is something to read does not
+     * require reading a hundred megabytes.
+     */
+    private fun sourceReadable(item: MediaSendItem): Boolean = runCatching {
+        context.contentResolver.openInputStream(item.draft.uri)?.use { it.read() >= 0 } ?: false
+    }.getOrDefault(false)
+
+    /**
+     * Whether there is room for the output.
+     *
+     * With a 1.5× margin: preparation writes a temp file next to the target,
+     * and the export library may keep its own intermediate. Disk running out
+     * mid-way through a 300 MB album otherwise looks like an unexplained
+     * encoder failure.
+     */
+    private fun enoughDiskFor(item: MediaSendItem): Boolean = runCatching {
+        val need = (item.draft.sizeBytes.coerceAtLeast(0L) * 3) / 2
+        if (need <= 0L) return true
+        val free = File(item.outputPath).parentFile?.usableSpace ?: return true
+        (free > need).also {
+            if (!it) android.util.Log.e(TAG, "нужно $need Б, свободно $free Б")
+        }
+    }.getOrDefault(true)
+
+    /**
+     * Show that work is going on: the bubble's spinner appears BEFORE the
+     * first byte.
+     *
+     * NO NUMBERS. There are no finished files yet, hence no weight of what
+     * will travel. Substituting the sources' weight is wrong: that is how
+     * "0 / 350 MB" turned into "0 / 65 MB" half a minute later — the
+     * denominator visibly changed because it first showed one quantity, then
+     * another. Until a weight exists the spinner runs without a caption —
+     * honest, and nothing to re-explain later.
+     */
+    private fun markInFlight(job: MediaSendJob) {
+        if (job.messageId.isBlank()) return
+        // Already-finished items (retry, resume after restart) do have a
+        // weight — it is measured. The denominator appears when ALL items
+        // have one: a partial sum would be a third number in the same spot.
+        val measured = job.items.map { runCatching { File(it.outputPath).length() }.getOrDefault(0L) }
+        val allReady = measured.all { it > 0L }
+        job.items.forEach { transfers.onUploadEncrypting(job.opId(it.index)) }
+        transfers.registerGroup(
+            job.messageId,
+            job.items.map { TransferKey.upload(job.opId(it.index)) },
+            totalBytes = if (allReady) measured.sum() else 0L,
+            immediate = true,
+            memberSizes = if (allReady) measured else emptyList(),
+        )
+    }
+
+    /** Measured metadata of the FINISHED file — what the recipient gets. */
+    private fun measured(item: MediaSendItem): AlbumItemMetadata? =
+        if (item.isVideo) AlbumItemMetadata.extract(item.outputPath, "video")
+        else AlbumItemMetadata.extractImage(item.outputPath)
+
+    private fun mergeMeta(ref: String, meta: AlbumItemMetadata?): String {
+        if (meta == null) return ref
+        return runCatching {
+            val o = JSONObject(ref)
+            val m = meta.toJson()
+            m.keys().forEach { k -> if (!o.has(k)) o.put(k, m.get(k)) }
+            o.toString()
+        }.getOrDefault(ref)
+    }
+
+    /** Manifest for the core queue: finished-file paths and measured metadata. */
+    private fun manifestOf(job: MediaSendJob): String =
+        JSONArray().apply {
+            job.items.forEach { item ->
+                put(JSONObject().apply {
+                    put("local_path", item.outputPath)
+                    put("media_type", item.mediaType)
+                    measured(item)?.toJson()?.let { m -> m.keys().forEach { put(it, m.get(it)) } }
+                })
+            }
+        }.toString()
+
+    /**
+     * Take ownership of the sources and lay out the output paths.
+     *
+     * Our temp copies MOVE into the job directory. Not an optimization but
+     * correctness: draft copies are swept by age, and an active send would
+     * lose its only source merely because an hour passed. Renaming is
+     * instant — the file stays on the same partition.
+     *
+     * Foreign sources (gallery, `content://`) are left alone: they are not
+     * ours, and our sweep cannot reach them anyway.
+     */
+    private fun claimSources(
+        sendId: String,
+        drafts: List<MediaDraftItem>,
+        photoMaxEdge: Int,
+        photoQuality: Int,
+    ): List<MediaSendItem> {
+        val dir = store.workDir(sendId)
+        val cacheRoot = context.cacheDir.absolutePath
+        return drafts.mapIndexed { i, draft ->
+            val owned = draft.takeIf { it.deleteAfterUse }
+                ?.uri?.takeIf { it.scheme == "file" }
+                ?.path?.let(::File)
+                ?.takeIf { it.absolutePath.startsWith(cacheRoot) && it.exists() }
+            val claimed = if (owned == null) draft else {
+                val target = File(dir, "src_$i.${owned.extension.ifBlank { "bin" }}")
+                val moved = runCatching { owned.renameTo(target) }.getOrDefault(false) ||
+                    runCatching { owned.copyTo(target, overwrite = true); owned.delete(); true }
+                        .getOrDefault(false)
+                if (moved) draft.copy(uri = android.net.Uri.fromFile(target)) else draft
+            }
+            val revision = MediaSendJob.revisionOf(claimed, photoMaxEdge, photoQuality)
+            val ext = if (claimed.isVideo) "mp4" else "jpg"
+            MediaSendItem(
+                index = i,
+                draft = claimed,
+                outputPath = File(dir, "$i.r$revision.$ext").absolutePath,
+                editRevision = revision,
+            )
+        }
+    }
+
+    companion object {
+        private const val TAG = "AlphaSendQueue"
+
+        /**
+         * Local-echo manifest — what the bubble is drawn from IMMEDIATELY.
+         *
+         * `local_path` points to a file that does not exist yet, and that is
+         * not an error: the core takes only the name from it, and the bubble
+         * picture comes from the poster. When the file appears, the finished
+         * attachment lands at the same path — no second DB write needed.
+         *
+         * Posters are taken in parallel: ten clips would otherwise delay the
+         * bubble by the sum of their reads.
+         */
+        suspend fun echoManifest(context: Context, items: List<MediaSendItem>): String =
+            kotlinx.coroutines.coroutineScope {
+                val described = items.map { item ->
+                    async(Dispatchers.IO) {
+                        val poster = MediaSendPreview.poster(context, item.draft)
+                        val meta = MediaSendPreview.metadata(context, item.draft, poster)
+                        JSONObject().apply {
+                            put("local_path", item.outputPath)
+                            put("media_type", item.mediaType)
+                            meta.toJson().let { m -> m.keys().forEach { put(it, m.get(it)) } }
+                        }
+                    }
+                }.awaitAll()
+                JSONArray().apply { described.forEach { put(it) } }.toString()
+            }
+    }
+}

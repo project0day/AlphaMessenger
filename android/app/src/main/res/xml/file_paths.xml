@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only folders made to be handed out: named copies for sharing and opening,
+     and notification thumbnails. Nothing else in the app's storage gets a URI. -->
+<paths>
+    <cache-path name="share" path="share/" />
+    <cache-path name="notif_thumbs" path="notif_thumbs/" />
+</paths>

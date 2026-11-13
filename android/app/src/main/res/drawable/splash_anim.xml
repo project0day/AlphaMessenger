@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- classic splash: the ghost scales up briefly, then the app opens. -->
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/splash_ghost">
+    <target android:name="ghost">
+        <aapt:attr xmlns:aapt="http://schemas.android.com/aapt"
+            name="android:animation">
+            <set>
+                <objectAnimator
+                    android:propertyName="scaleX"
+                    android:valueFrom="0.45"
+                    android:valueTo="1.0"
+                    android:duration="500"
+                    android:interpolator="@android:interpolator/overshoot" />
+                <objectAnimator
+                    android:propertyName="scaleY"
+                    android:valueFrom="0.45"
+                    android:valueTo="1.0"
+                    android:duration="500"
+                    android:interpolator="@android:interpolator/overshoot" />
+            </set>
+        </aapt:attr>
+    </target>
+</animated-vector>

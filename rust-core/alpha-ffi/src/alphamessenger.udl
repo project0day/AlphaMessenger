@@ -1,0 +1,871 @@
+namespace alphamessenger {
+    // C2 Stage 3: derive the 32-byte MasterDataKey from a password using the
+    // PUBLIC KDF material (salt/params/verifier JSON mirrored outside the DB by
+    // RecoveryKdfPublicStore). No database access — used on the cold-start /
+    // onboarding password path before the DB can be opened. Verifies the password
+    // against the stored verifier; throws on a wrong password.
+    [Throws=MessengerError]
+    sequence<u8> derive_master_key_from_public(string password, string public_kdf_json);
+
+    // Secret phrase (BIP-39, NIP-06): 12 words that ARE the account. The
+    // Nostr key derives from them, so any NIP-06 client restores the same npub.
+    string mnemonic_generate();
+    // Throws on a wrong word or a bad checksum (typo detection).
+    [Throws=MessengerError]
+    string mnemonic_to_nsec(string words);
+    // The 2048 English BIP-39 words, for input suggestions.
+    sequence<string> mnemonic_wordlist();
+    // Held core locks with holder site and thread. Never blocks on a core lock.
+    string lock_report();
+};
+
+// Error type for all fallible operations
+// NOTE: field is named "description" not "message" to avoid
+// conflict with Kotlin's Throwable.message property.
+
+// ── T3: репликация транспортного объекта ────────────────────────────────
+//
+// Kotlin оркеструет, ядро выполняет. Наружу НЕ выходят: ключ, шифротекст,
+// конверт, путь в файловой системе и адрес хранилища. Снаружи приходит только
+// идентичность отправки и идентификатор хранилища из настроенной топологии —
+// произвольный путь или URL передать нельзя по устройству API.
+enum ReplicationOutcome {
+    "Confirmed",
+    "IdentityMismatch",
+    "EndpointUnavailable",
+    "NetworkError",
+    "CapabilityUnsupported",
+    "SourceMissing",
+    "KeyMissing",
+};
+
+dictionary ReplicationObjectSpec {
+    string send_id;
+    u32 item_index;
+    u64 revision;
+    u32 object_index;
+    u32 object_total;
+    string output_path;
+    string expected_id;
+};
+
+[Error]
+interface MessengerError {
+    InternalError(string description);
+    InvalidArgument(string description);
+    DatabaseError(string description);
+    CryptoError(string description);
+    NetworkError(string description);
+    KeyPackageExhausted(string peer);
+};
+
+// Callback interface for receiving events from Rust
+// BLOCK K — Unified Event Dispatcher. ONE type for every high-frequency signal;
+// delivered coalesced in a batch (on_events_batch). Struct-variant fields match
+// alpha-ffi/src/events.rs::CoreEvent exactly.
+[Enum]
+interface CoreEvent {
+    MediaProgress(string op_id, u64 downloaded, u64 total, boolean terminal);
+    ChatState(string chat_id, string sender_id, string state);
+    DeliveryUpdate(string message_id, string status);
+};
+
+callback interface AlphaMessengerCallback {
+    void on_message_received(string chat_id, string message_json);
+    void on_delivery_update(string message_id, string status);
+    void on_sync_complete(u64 new_message_count);
+    void on_chat_created(string chat_id, string chat_type);
+    void on_devices_event(string kind);
+    void on_member_added(string chat_id, string member_id);
+    void on_member_removed(string chat_id, string member_id);
+    void on_notification_received();
+    void on_peer_profile_updated(string sender_id);
+    void on_chat_metadata_updated(string chat_id);
+    // thread: the channel post whose discussion it is in ("" = the chat itself).
+    void on_chat_state(string chat_id, string sender_id, string state, string thread, u64 age_ms);
+    void on_media_progress(string op_id, u64 downloaded, u64 total);
+    void on_join_requested(string chat_id, string requester_npub, string token);
+    void on_member_leave_requested(string chat_id, string leaver_npub);
+    void on_relay_status_change(string relay_url, string status);
+    void on_sync_state(u32 connected, u32 relays, boolean catching_up);
+    // BLOCK K — one coalesced batch of CoreEvents (replaces the per-event flood).
+    void on_events_batch(sequence<CoreEvent> events);
+};
+
+// Identity management
+dictionary IdentityInfo {
+    string nostr_pubkey;
+    string npub;
+    string mls_credential_hex;
+};
+
+// Message types
+enum MessageType {
+    "text",
+    "edit",
+    "reaction",
+    "reply",
+    "delete",
+    "disappearing",
+    "media",
+    "read_signal"
+};
+
+// Expiry policy for ephemeral messages (enum with associated data)
+[Enum]
+interface ExpiryPolicy {
+    None();
+    AfterSend(u32 ttl_secs);
+    AfterRead(u32 ttl_secs);
+    ViewOnce();
+    Whisper(u32 secs);
+};
+
+// Message information
+dictionary MessageInfo {
+    string id;
+    string chat_id;
+    string sender_id;
+    MessageType msg_type;
+    string? content;
+    string? reply_to;
+    string? media_ref;
+    u32? ttl_seconds;
+    string? expires_at;
+    ExpiryPolicy? expiry_policy;
+    string? read_at;
+    boolean consumed;
+    string created_at;
+    string? edited_at;
+    boolean is_deleted;
+    // TD-003: fully-delivered timestamp (RFC3339) or null. Persisted so the
+    // DELIVERED (✓✓) tick survives reload. MUST stay last to match bindings.
+    string? delivered_at;
+};
+
+dictionary ProfileInfo {
+    string display_name;
+    string bio;
+    string avatar_path;
+    string npub;
+};
+
+dictionary SearchHit {
+    string message_id;
+    string chat_id;
+    string sender_id;
+    string content;
+    string created_at;
+    string msg_type;
+    string media_kind;
+    string media_name;
+};
+
+dictionary ChatInfo {
+    string id;
+    string chat_type;
+    string? name;
+    u64 epoch;
+    string created_at;
+    // Chat-list extras (Этап 8.4)
+    string last_message_preview;
+    string last_message_at;
+    string last_message_kind;
+    boolean last_message_outgoing;
+    // Delivery status of the last message when outgoing: "sending"|"sent"|"read"
+    // (empty for incoming). Drives the chat-list preview checkmarks.
+    string last_message_status;
+    u32 unread_count;
+    boolean unread_override;
+    u64 pinned_at;
+    u64 muted_until;
+    u64 archived_at;
+    // 8.8 v3 — group metadata (empty for 1:1 unless mirrored).
+    string avatar_path;
+    string description;
+    // Per-chat disappearing-messages timer (0 = off). Drives the chat-list
+    // ephemeral-timer icon.
+    u32 ephemeral_seconds;
+    // True when the last message is an incoming voice note not yet played.
+    boolean last_message_unplayed;
+    // Groups: roster size, my role, channel settings (a chat opens with its real header).
+    u32 member_count;
+    string my_role;
+    string channel_settings;
+};
+
+dictionary PeerProfile {
+    string id;
+    string display_name;
+    string bio;
+    string avatar_path;
+    string avatar_hash;
+    u64 profile_version;
+};
+
+dictionary RelayInfo {
+    string url;
+    boolean read;
+    boolean write;
+    boolean enabled;
+    boolean connected;
+    u32 ping_ms;
+    boolean is_tor;
+    string state;
+    u32 retry_secs;
+    boolean inbox_auth;
+    u32 accepted;
+    u32 rejected;
+    string last_error;
+};
+
+
+// Core API object
+interface AlphaMessengerCore {
+    [Throws=MessengerError]
+    constructor(string db_path, string passphrase, string relay_urls_json);
+
+    // C2 Stage 3: construct AFTER unlock, resolving the DB key from the migration
+    // state. master_key = the 32-byte MasterDataKey (empty = force legacy open).
+    // rekey_hint = the pre-open SharedPreferences hint; recovery_already_attempted
+    // = the one-shot fallback flag mirror. device_key = 32 random bytes kept by
+    // this phone's keystore: the key of a database no password protects yet
+    // (empty = the old empty key). Generated as a named factory:
+    // `AlphaMessengerCore.newUnlocked(...)` in Kotlin.
+    [Throws=MessengerError, Name=new_unlocked]
+    constructor(string db_path, sequence<u8> master_key, string relay_urls_json, string rekey_hint, boolean recovery_already_attempted, sequence<u8> device_key);
+
+    // Lifecycle
+    [Throws=MessengerError]
+    void initialize();
+    [Throws=MessengerError]
+    void shutdown();
+
+    // Identity
+    [Throws=MessengerError]
+    IdentityInfo get_identity_info();
+    [Throws=MessengerError]
+    string export_public_key_package();
+    // Export the Nostr identity secret key as a bech32 `nsec1…` string.
+    // This is the identity/login key — NOT the data-encryption key.
+    [Throws=MessengerError]
+    string export_nsec();
+    // The account's secret phrase, kept next to the identity key; null for an
+    // account created before phrases existed (it only has an nsec).
+    [Throws=MessengerError]
+    void store_mnemonic(string words);
+    string? stored_mnemonic();
+    // Daily backup with the key remembered by the last manual backup.
+    boolean auto_backup_ready();
+    [Throws=MessengerError]
+    string upload_backup_auto();
+    // Import a Nostr identity from an `nsec1…` (or 64-char hex) secret key.
+    // Rebuilds the dual identity, persists it, swaps the active identity.
+    [Throws=MessengerError]
+    void import_identity(string nsec_or_hex);
+
+    // ── Recovery Password (Phase 1 — RoadmapE2EE) ───────────────
+    // The Recovery Password derives the MasterDataKey (Argon2id). Sub-keys
+    // (DatabaseKey, BackupFileKey, …) are HKDF-derived from it. We persist
+    // only the public salt/params + a non-reversible verifier.
+    // Has the user already set a Recovery Password on this device?
+    boolean has_recovery_password();
+    // Set (or replace) the Recovery Password. Argon2id-heavy — call off-UI.
+    [Throws=MessengerError]
+    void set_recovery_password(string password);
+    // C2: change the Recovery Password, re-keying the live DB to the new
+    // DatabaseKey (backup + PRAGMA rekey + verify + rollback). Verifies the old
+    // password first. Returns the NEW 32-byte MasterDataKey so the caller can
+    // re-cache it for biometric unlock. Argon2id-heavy + full-DB rekey — off-UI.
+    [Throws=MessengerError]
+    sequence<u8> change_recovery_password(string old_password, string new_password);
+    // Verify a candidate password against the stored verifier (yes/no only).
+    // Returns false (not error) if no password is set or the password is wrong.
+    [Throws=MessengerError]
+    boolean verify_recovery_password(string password);
+    // Derive the 32-byte MasterDataKey from the password. Returns raw bytes.
+    // The caller caches it in the Android Keystore under biometrics.
+    [Throws=MessengerError]
+    sequence<u8> derive_master_key(string password);
+    // C2 Stage 0: export the PUBLIC KDF material ({version, params, salt,
+    // verifier}) as JSON so Kotlin can mirror it OUTSIDE the encrypted DB.
+    // Empty string if no Recovery Password is set. Contains NO secret material
+    // (no master/database/derived key, no password) — only public salt/params
+    // and a non-reversible verifier.
+    [Throws=MessengerError]
+    string export_recovery_kdf_public();
+
+    // ── C2 Stage 2: SQLCipher production-key migration ──────────────
+    // Current migration state: "legacy" | "in_progress" | "migrated" | "confirmed".
+    string db_rekey_state();
+    // C2 Stage 3: true if the last open did a one-shot restore→legacy fallback.
+    boolean db_did_recovery_restore();
+    // Migrate the live DB to DatabaseKey = HKDF(master_key, "alpha/v1/db").
+    // master_key = the 32-byte MasterDataKey. Returns true if migrated (or
+    // already migrated). On failure the pre-rekey backup is restored and an
+    // error is thrown — the caller must surface "restart required". Call right
+    // after open, before services use the DB heavily.
+    [Throws=MessengerError]
+    boolean migrate_db_to_recovery_key(sequence<u8> master_key);
+    // Finalize a completed migration after a proven working session (start +
+    // read history + send + receive). Deletes the backup and recovery flag,
+    // then advances state to "confirmed".
+    [Throws=MessengerError]
+    void confirm_db_migration();
+
+    // ── Backup container (Phase 2 — backup.enc) ─────────────────
+    // Export a full encrypted backup (header || ciphertext) sealed with the
+    // BackupFileKey derived from the password. Requires a Recovery Password.
+    [Throws=MessengerError]
+    bytes export_backup(string password);
+    // Decrypt + summarize a backup WITHOUT touching the live DB. Returns a
+    // human-readable summary string (table list). Wrong password ⇒ CryptoError.
+    [Throws=MessengerError]
+    string inspect_backup(bytes container, string password);
+    // Decrypt + replay a backup into the live DB (restore path, Phase 4).
+    // Atomic: wrong password rejected before any SQL runs; on failure rolls back.
+    [Throws=MessengerError]
+    void import_backup(bytes container, string password);
+
+    /// Delete a 1:1 chat here and at the other side (a group: here only).
+    [Throws=MessengerError]
+    void delete_chat_for_both(string chat_id);
+
+    /// Our npub with a few of our relays (nprofile) for QR codes and links.
+    [Throws=MessengerError]
+    string contact_code();
+
+    // ── Cloud backup via Blossom (Phase 3) ──────────────────────
+    // Upload an encrypted backup to Blossom (auth by the user's own nsec via
+    // kind 24242). Returns the blob URL. publish_nostr_link also emits a
+    // replaceable kind 30078 event so other devices can discover it by npub.
+    [Throws=MessengerError]
+    string upload_backup(string password, boolean publish_nostr_link);
+    // Look up a backup blob URL by npub (fetches the kind 30078 event).
+    // Phase 4 restore: new device knows npub from nsec, finds the backup URL.
+    [Throws=MessengerError]
+    string lookup_backup_url(string npub_or_hex);
+    // Sticker packs that update themselves: keys, publish the latest version, read it.
+    // Media refs of messages that expired: the app deletes their files.
+    sequence<string> drain_expired_media();
+    // The signing key stays in the database: the app gets "pub:read" only.
+    [Throws=MessengerError]
+    string sticker_pack_keys();
+    // A pack made before keys lived here: its signing key moves in.
+    [Throws=MessengerError]
+    void sticker_pack_adopt_key(string sign_hex);
+    [Throws=MessengerError]
+    void sticker_pack_publish(string pub_hex, string read_hex, string manifest_ref);
+    [Throws=MessengerError]
+    string sticker_pack_latest(string pub_hex, string read_hex);
+    // Polls: send one (JSON, see core), vote (empty = withdraw), close, results (JSON).
+    [Throws=MessengerError]
+    string send_poll(string chat_id, string poll_json, string? thread);
+    [Throws=MessengerError]
+    void poll_vote(string chat_id, string poll_id, sequence<u32> options);
+    [Throws=MessengerError]
+    void poll_close(string chat_id, string poll_id);
+    string poll_results(string chat_id, string poll_id);
+    // A group's / channel's look set by its admins (JSON; "" = none).
+    // Join/leave lines in a group chat (default on); owner and admins set it for all.
+    boolean group_notices(string chat_id);
+    [Throws=MessengerError]
+    void set_group_notices(string chat_id, boolean on);
+    string chat_look(string chat_id);
+    [Throws=MessengerError]
+    void set_chat_look(string chat_id, string look);
+    // Public Nostr emoji sets (opt-in import), read anonymously.
+    [Throws=MessengerError]
+    string nostr_emoji_sets(string input);
+    // The Alpha feed: read anonymously; only Alpha's key publishes.
+    [Throws=MessengerError]
+    string alpha_feed_fetch(u32 limit);
+    boolean alpha_feed_key_ok(string key);
+    [Throws=MessengerError]
+    void alpha_feed_publish(string key, string d, string content);
+    // Download a backup container from a known Blossom URL. Returns raw bytes
+    // (header || ciphertext) — feed to import_backup with the Recovery Password.
+    [Throws=MessengerError]
+    bytes download_backup(string blob_url);
+    // JSON info about the last uploaded cloud backup (for the UI status card).
+    string get_backup_info();
+    // Delete the cloud backup: remove the Blossom blob + clear local reference.
+    [Throws=MessengerError]
+    void delete_cloud_backup();
+
+    // Chat operations
+    [Throws=MessengerError]
+    ChatInfo create_direct_chat(string peer_key_package_base64);
+    [Throws=MessengerError]
+    ChatInfo add_contact_by_npub(string npub_or_hex);
+    [Throws=MessengerError]
+    boolean direct_chat_exists(string npub_or_hex);
+    [Throws=MessengerError]
+    ChatInfo join_chat(string welcome_base64);
+    [Throws=MessengerError]
+    sequence<ChatInfo> list_chats();
+    [Throws=MessengerError]
+    sequence<SearchHit> search_messages(string query, string? kind, string? chat_id, string? sender, string? since, string? until, u32 limit, u32 offset);
+    [Throws=MessengerError]
+    string? message_at_date(string chat_id, string at);
+    [Throws=MessengerError]
+    u32? message_rank(string chat_id, string message_id);
+    [Throws=MessengerError]
+    sequence<string> stored_media();
+    [Throws=MessengerError]
+    boolean refresh_leaf_binding(string chat_id);
+    [Throws=MessengerError]
+    sequence<MessageInfo> chat_media(string chat_id, sequence<string> kinds, u32 limit, u32 offset);
+    [Throws=MessengerError]
+    sequence<MessageInfo> messages_by_ids(sequence<string> ids);
+
+    // Messaging
+    [Throws=MessengerError]
+    string send_text(string chat_id, string body, string? thread);
+    [Throws=MessengerError]
+    string send_location(string chat_id, double lat, double lng, string name, string address, string? thread);
+    [Throws=MessengerError]
+    string send_link_preview(string chat_id, string url, string title, string description, string image, string site, string? caption, string? thread, string? image_ref, boolean video);
+    // Group-call primitives: a signal for one member, and ephemeral rooms.
+    [Throws=MessengerError]
+    void send_chat_signal(string chat_id, string to, string payload);
+    [Throws=MessengerError]
+    void room_announce(string chat_id, string room, string state);
+    string room_members(string chat_id, string room);
+    u32 room_count(string chat_id, string room);
+    // Our member id in a chat (how others address us there).
+    string own_member_id(string chat_id);
+    [Throws=MessengerError]
+    void send_chat_state(string chat_id, string state, string? thread);
+    [Throws=MessengerError]
+    string send_reply(string chat_id, string body, string reply_to, string quoted_text, string? thread);
+    [Throws=MessengerError]
+    string send_edit(string chat_id, string message_id, string new_body);
+    [Throws=MessengerError]
+    string send_reaction(string chat_id, string target_id, string emoji, boolean remove);
+    [Throws=MessengerError]
+    string send_delete(string chat_id, string target_id);
+    [Throws=MessengerError]
+    void delete_message_local(string message_id);
+    [Throws=MessengerError]
+    string send_disappearing(string chat_id, string body, u32 ttl_seconds);
+
+    // Ephemeral messages (STAGE D)
+    [Throws=MessengerError]
+    string send_ephemeral_text(string chat_id, string body, string expiry_mode, u32 ttl_secs);
+    [Throws=MessengerError]
+    string send_ephemeral_media(string chat_id, string media_ref, string media_type, string filename, u64 size_bytes, string? caption, string expiry_mode, u32 ttl_secs);
+    [Throws=MessengerError]
+    void mark_message_read(string chat_id, string message_id);
+    [Throws=MessengerError]
+    void mark_view_once_consumed(string message_id);
+    // Whispers: read under the finger, then burned on both sides.
+    void whisper_mark_outgoing(string chat_id, string message_id, string kind, u32 secs, boolean glance);
+    string? whisper_secret(string message_id);
+    boolean whisper_burn(string message_id, u32 used_secs, boolean shot);
+    string whispers_json(string chat_id);
+    [Throws=MessengerError]
+    u64 sweep_expired_messages();
+
+    // Media
+    [Throws=MessengerError]
+    string persist_outgoing_media(string chat_id, string file_path, string media_type, string? caption, u32 ttl_secs, string? thread);
+    // Persist a local echo DIRECTLY from an existing MediaRef (forward/reuse): the
+    // bubble shows its FINAL content (filename, poster, size) from the first frame — no
+    // rebuild after publish. No file read (size/filename come from the ref).
+    [Throws=MessengerError]
+    string persist_outgoing_media_ref(string chat_id, string mls_ref, string media_type, string? caption, u32 ttl_secs, string? thread);
+    [Throws=MessengerError]
+    void download_media(string media_ref_json, string output_path);
+    // The media vault key: received media is kept on disk sealed under it.
+    bytes media_vault_key();
+    [Throws=MessengerError]
+    void download_media_with_progress(string media_ref_json, string output_path, string op_id);
+
+    // Single media publish API. expiry_mode ("after_send"|"after_read"|
+    // "view_once"|"none"|null) + ttl_secs merge the old broadcast_ephemeral_media.
+    [Throws=MessengerError]
+    void broadcast_media(string chat_id, string msg_id, string mls_ref, string media_type, string? caption, string? expiry_mode, u32? ttl_secs);
+    /// An outgoing photo, video or sticker answers [reply_to]: kept on its row, carried when it goes out.
+    [Throws=MessengerError]
+    void set_media_reply(string msg_id, string reply_to);
+
+    // Album send — ONE MLS message for a whole photo/video batch.
+    [Throws=MessengerError]
+    string upload_blob_ref_only(string file_path, string media_type, string? poster_b64, string op_id, string? meta_json);
+    /// Sends a video's settled chunks while the encoder writes growing_path; ends on end_preupload.
+    [Throws=MessengerError]
+    u64 preupload_growing(string op_id, string growing_path, string final_path, u64 estimate_bytes);
+    void end_preupload(string op_id);
+    [Throws=MessengerError]
+    string persist_outgoing_album(string chat_id, string items_json, string? caption, u32 ttl_secs, string? thread);
+    [Throws=MessengerError]
+    void send_album(string chat_id, string msg_id, string item_refs_json, string? caption, u32 ttl_secs);
+    [Throws=MessengerError]
+    string resolve_media_ref(string media_ref_json);
+    [Throws=MessengerError]
+    string download_stream_chunk(string media_ref_json, u32 chunk_index, string output_path);
+    [Throws=MessengerError]
+    u32 get_stream_chunk_count(string media_ref_json);
+    [Throws=MessengerError]
+    string get_stream_chunk_info(string media_ref_json, u32 chunk_index);
+
+    // Outbox — re-publish undelivered messages (guaranteed delivery).
+    u32 replay_outbox();
+
+    // Defer-encryption outgoing queue: encrypt+publish messages composed while
+    // offline. Call AFTER catch-up so encryption uses the latest MLS state.
+    u32 flush_pending_sends();
+    sequence<string> pending_send_ids();
+
+    // Offline media queue (Этап 7.10)
+    [Throws=MessengerError]
+    void enqueue_pending_media_single(string chat_id, string msg_id, string file_path, string media_type, string? caption, string? poster_b64, boolean streaming, u32 ttl_secs, string? meta_json);
+    [Throws=MessengerError]
+    void enqueue_pending_media_album(string chat_id, string msg_id, string items_json, string? caption, u32 ttl_secs);
+    void delete_pending_media(string msg_id);
+    void cancel_media_upload(string msg_id);
+    void cancel_media_download(string op_id);
+    u32 flush_pending_media();
+
+
+
+    boolean retry_pending_media(string msg_id);
+
+    // T3 — ключи шифрования медиа для незавершённой отправки.
+    //
+    // API УЗКИЙ намеренно: это не хранилище секретов общего назначения.
+    // Идентификатор собирается внутри ядра из send_id/item_index/revision,
+    // поэтому произвольную строку сюда передать нельзя, а значит нельзя и
+    // прочитать или затереть чужую запись. Ключ не логируется.
+    [Throws=MessengerError]
+    void store_media_send_key(string send_id, u32 item_index, u64 revision, sequence<u8> key_material);
+    sequence<u8>? load_media_send_key(string send_id, u32 item_index, u64 revision);
+    void delete_media_send_key(string send_id, u32 item_index, u64 revision);
+    u32 delete_media_send_keys(string send_id);
+
+
+    // Sync
+    [Throws=MessengerError]
+    void start_sync();
+    [Throws=MessengerError]
+    void stop_sync();
+    // Health of the receiving side (heartbeat pulse, silence, paused relays).
+    string sync_health_json();
+    [Throws=MessengerError]
+    void force_reconnect();
+    // The device's network as the OS reports it (gained / switched / lost).
+    [Throws=MessengerError]
+    void set_network_available(boolean available);
+    [Throws=MessengerError]
+    u64 catch_up();
+
+    // Notifications
+    [Throws=MessengerError]
+    void start_notifications(string ntfy_server_url);
+    [Throws=MessengerError]
+    void stop_notifications();
+
+    // Callbacks
+    void set_callback(AlphaMessengerCallback callback);
+
+    // Group management
+    [Throws=MessengerError]
+    ChatInfo create_group(string name);
+    // A channel that hides its admins: we own it under a persona of its own.
+    [Throws=MessengerError]
+    ChatInfo create_group_anonymous(string name);
+    [Throws=MessengerError]
+    ChatInfo create_group_with_members(string name, string npubs_json);
+    [Throws=MessengerError]
+    string add_member(string chat_id, string peer_key_package_base64);
+    [Throws=MessengerError]
+    void add_member_by_npub(string chat_id, string npub_or_hex);
+    [Throws=MessengerError]
+    u32 chat_member_count(string chat_id);
+    // List current group members as JSON (G-1):
+    // [{leaf_index, sender_id, npub, display_name, avatar_path, is_self}]
+    [Throws=MessengerError]
+    string list_group_members(string chat_id);
+
+    // Saved Messages / Избранное (local-only notes-to-self).
+    [Throws=MessengerError]
+    ChatInfo ensure_saved_messages_chat();
+    [Throws=MessengerError]
+    ChatInfo ensure_assistant_chat(string profile_id, string name);
+    [Throws=MessengerError]
+    string insert_assistant_message(string chat_id, string body, string? id);
+    [Throws=MessengerError]
+    string insert_assistant_media(string chat_id, string file_path, string media_type, string? caption, string? meta_json);
+
+    // Own profile (local-only for now; peer propagation comes in 8.8 v2).
+    [Throws=MessengerError]
+    ProfileInfo get_my_profile();
+    [Throws=MessengerError]
+    ProfileInfo set_my_profile(string? display_name, string? bio, string? avatar_path);
+    [Throws=MessengerError]
+    void broadcast_my_profile_now();
+    [Throws=MessengerError]
+    void set_group_metadata(string chat_id, string? name, string? description, string? avatar_path);
+    [Throws=MessengerError]
+    PeerProfile get_peer_profile(string id);
+    [Throws=MessengerError]
+    string get_peer_npub_for_chat(string chat_id);
+    [Throws=MessengerError]
+    string peer_hex_for_chat(string chat_id);
+    [Throws=MessengerError]
+    string verification_info(string chat_id);
+    [Throws=MessengerError]
+    void set_contact_verified(string chat_id, boolean verified);
+    [Throws=MessengerError]
+    string secret_chat_start(string chat_id);
+    [Throws=MessengerError]
+    string secret_chat_offers();
+    [Throws=MessengerError]
+    void secret_chat_accept(string invite_id);
+    [Throws=MessengerError]
+    void secret_chat_decline(string invite_id);
+    [Throws=MessengerError]
+    string secret_chat_origin(string chat_id);
+    [Throws=MessengerError]
+    void secret_chat_end(string chat_id);
+    [Throws=MessengerError]
+    string secret_chat_ids();
+    boolean secret_chat_ready(string chat_id);
+    [Throws=MessengerError]
+    string secret_chat_status(string chat_id);
+    [Throws=MessengerError]
+    void secret_chat_new_circuit(string chat_id);
+    [Throws=MessengerError]
+    string secret_chat_check(string chat_id);
+    [Throws=MessengerError]
+    void set_my_cover(string cover_path);
+    [Throws=MessengerError]
+    string get_peer_cover_path(string sender_id);
+    [Throws=MessengerError]
+    string get_member_npub(string sender_id);
+    [Throws=MessengerError]
+    string member_hex(string sender_id);
+    [Throws=MessengerError]
+    sequence<PeerProfile> list_peer_profiles();
+
+    // Chat-list mutations (Этап 8.4)
+    [Throws=MessengerError]
+    void pin_chat(string chat_id, boolean pinned);
+    [Throws=MessengerError]
+    void mute_chat(string chat_id, i64 seconds);
+    [Throws=MessengerError]
+    void archive_chat(string chat_id, boolean archived);
+    [Throws=MessengerError]
+    void delete_chat(string chat_id);
+    [Throws=MessengerError]
+    void set_chat_ephemeral(string chat_id, u32 seconds);
+    u32 get_chat_ephemeral(string chat_id);
+
+    // ── Presence (Stage 2) ──
+    void presence_set_mode(string mode);
+    void presence_set_my_status(boolean busy, string custom, u32 color);
+    void presence_arm();
+    string presence_status(string user_id);
+    i64 presence_last_seen(string user_id);
+    string presence_custom_status(string user_id);
+    u32 presence_color(string user_id);
+    sequence<string> presence_capabilities(string user_id);
+    string presence_tick();
+    [Throws=MessengerError]
+    void mark_chat_read(string chat_id);
+    [Throws=MessengerError]
+    void mark_chat_read_through(string chat_id, string message_id);
+    [Throws=MessengerError]
+    void set_draft(string chat_id, string text);
+    [Throws=MessengerError]
+    string get_draft(string chat_id);
+    [Throws=MessengerError]
+    void clear_draft(string chat_id);
+    [Throws=MessengerError]
+    string list_drafts();
+    [Throws=MessengerError]
+    void mark_chat_unread(string chat_id);
+        // Ban for good: the member gets the reason, then is removed; their phone keeps nothing of the chat.
+    [Throws=MessengerError]
+    void ban_member(string chat_id, string npub_or_hex, u32 leaf_index, string reason);
+    // Our ban in a chat: {"reason","at"} or "".
+    string chat_ban(string chat_id);
+[Throws=MessengerError]
+    string remove_member(string chat_id, u32 leaf_index);
+
+    // Group roles (G-3)
+    [Throws=MessengerError]
+    void set_member_role(string chat_id, string npub_or_hex, string role);
+    [Throws=MessengerError]
+    void transfer_ownership(string chat_id, string npub_or_hex);
+    [Throws=MessengerError]
+    void set_member_mute(string chat_id, string npub_or_hex, i64 until_ts);
+    [Throws=MessengerError]
+    i64 group_mute_until(string chat_id, string npub_or_hex);
+    // G-8: group permissions (who can write / invite / edit). JSON in/out.
+    [Throws=MessengerError]
+    string group_permissions(string chat_id);
+    [Throws=MessengerError]
+    void set_group_permissions(string chat_id, string who_can_write, string who_can_invite, string who_can_edit);
+    [Throws=MessengerError]
+    void set_group_reactions(string chat_id, string mode, string list_json);
+    // G-10: temporarily close the chat until until_ts (unix secs; 0 = reopen).
+    [Throws=MessengerError]
+    void set_group_closed(string chat_id, i64 until_ts);
+    // G-9: audit log (Недавние действия)
+    [Throws=MessengerError]
+    string group_audit_log(string chat_id);
+    [Throws=MessengerError]
+    void log_group_event(string chat_id, string action, string target_npub_or_hex, string target_name);
+    [Throws=MessengerError]
+    void request_role_sync(string chat_id);
+    [Throws=MessengerError]
+    void request_group_profiles(string chat_id);
+    [Throws=MessengerError]
+    boolean is_removed_from_group(string chat_id);
+    boolean is_group_unavailable(string chat_id);
+    [Throws=MessengerError]
+    string create_group_invite(string chat_id, i64 expires_at_secs, u32 max_uses);
+    [Throws=MessengerError]
+    string list_group_invites(string chat_id);
+    [Throws=MessengerError]
+    void revoke_group_invite(string chat_id, string token);
+    [Throws=MessengerError]
+    void send_join_request(string link, string avatar_b64);
+    // Video avatar: set ours (a short silent mp4; "" clears it) and read paths.
+    [Throws=MessengerError]
+    void set_my_avatar_video(string path);
+    string my_avatar_video();
+    string peer_avatar_video(string sender_id);
+    // Who asked to join: {"name","avatar"} (avatar: small JPEG, base64).
+    string join_request_profile(string chat_id, string requester_npub);
+    [Throws=MessengerError]
+    void approve_join_request(string chat_id, string requester_npub, string token);
+    // G-7: fetch a Nostr kind-0 profile by npub (for the join-requests UI).
+    // Returns JSON {"name":..,"picture":..}; "{}" if none found. Never errors hard.
+    [Throws=MessengerError]
+    string fetch_profile_by_npub(string npub_or_hex);
+
+    // Utility
+    [Throws=MessengerError]
+    void leave_chat(string chat_id);
+    [Throws=MessengerError]
+    sequence<MessageInfo> get_messages(string chat_id, u32 limit, u32 offset);
+    [Throws=MessengerError]
+    sequence<MessageInfo> export_messages_page(string chat_id, string after_at, string after_id, i64 since, i64 until, u32 limit);
+    string export_reactions_json(string chat_id);
+
+    // The discussion of one channel post (comments + their reactions/edits/deletes).
+    [Throws=MessengerError]
+    sequence<MessageInfo> get_thread(string chat_id, string post_id, u32 limit, u32 offset);
+
+    // Comment count, newest time and recent authors under each post (JSON array).
+    string thread_summaries_json(string chat_id);
+
+
+    // Privacy — who may reach me; enforced on this phone.
+    string privacy_settings_json();
+    boolean set_privacy(string name, string value);
+    void set_user_blocked(string npub_or_hex, boolean blocked);
+    string chat_requests_json();
+    boolean is_chat_request(string chat_id);
+    void accept_chat_request(string chat_id);
+    void decline_chat_request(string chat_id, boolean block);
+    boolean call_allowed(string chat_id, string sender_id, boolean video);
+    string contacts_json();
+    // May we call this member: {"voice": bool, "video": bool} (their privacy rules).
+    string peer_call_rights(string sender_id);
+    // Our active stories for "all contacts" reach new contacts (idempotent).
+    u32 share_stories_with_contacts();
+    void set_contact(string npub_or_hex, boolean contact);
+
+    // Relay management (Settings → Relays)
+    [Throws=MessengerError]
+    sequence<RelayInfo> list_relay_statuses();
+    [Throws=MessengerError]
+    sequence<RelayInfo> ping_all_relays(u32 timeout_ms);
+    [Throws=MessengerError]
+    void add_relay(string url, boolean read, boolean write);
+    [Throws=MessengerError]
+    void remove_relay(string url);
+    [Throws=MessengerError]
+    void set_relay_enabled(string url, boolean enabled);
+    [Throws=MessengerError]
+    u32 apply_relay_changes(sequence<string> add, sequence<string> enable, sequence<string> disable, sequence<string> remove);
+    [Throws=MessengerError]
+    void set_relay_flags(string url, boolean read, boolean write);
+
+    // Route all traffic through a local SOCKS5 proxy (Tor via Orbot). Applies after restart.
+    [Throws=MessengerError]
+    void set_tor_enabled(boolean enabled);
+    boolean is_tor_enabled();
+    // Tell peers when we read their messages (default on).
+    [Throws=MessengerError]
+    void set_read_receipts_enabled(boolean enabled);
+    boolean read_receipts_enabled();
+    // Scheduled messages: created and encrypted now, published at their time.
+    void arm_scheduled_send(string chat_id, i64 not_before);
+    void arm_silent_send(string chat_id);
+    // Linked devices (core/devices.rs).
+    string devices_json();
+    string link_begin();
+    string link_poll();
+    [Throws=MessengerError]
+    void link_accept(string device_name);
+    [Throws=MessengerError]
+    void link_device(string qr, string this_name);
+    string link_status_json();
+    [Throws=MessengerError]
+    void unlink_device(string device_id);
+    u32 process_device_inbox();
+    boolean is_message_silent(string msg_id);
+    i64 take_armed_send(string chat_id);
+    // Pinned messages (shared with the chat). JSON array of ids, newest first.
+    string pinned_messages_json(string chat_id);
+    // Stories (end-to-end, per-contact, they expire by themselves).
+    [Throws=MessengerError]
+    string publish_story(string params_json);
+    string stories_json();
+    [Throws=MessengerError]
+    void story_seen(string story_id, string reaction);
+    [Throws=MessengerError]
+    void delete_my_story(string story_id);
+    [Throws=MessengerError]
+    void story_screenshot(string story_id);
+    [Throws=MessengerError]
+    void set_channel_settings(string chat_id, string cfg_json);
+    string channel_settings(string chat_id);
+    [Throws=MessengerError]
+    void channel_seen(string chat_id, string post_ids_json);
+    string channel_views(string chat_id, string post_ids_json);
+    [Throws=MessengerError]
+    void channel_forwarded(string chat_id, string post_ids_json);
+    string channel_forwards(string chat_id, string post_ids_json);
+    string write_status(string chat_id, string post_id, string kind);
+    [Throws=MessengerError]
+    void pin_message(string chat_id, string target_id, boolean pin);
+    [Throws=MessengerError]
+    void hold_message(string msg_id, string chat_id, i64 not_before);
+    u32 release_due_held();
+    string held_messages_json(string chat_id);
+    [Throws=MessengerError]
+    void reschedule_held(string msg_id, i64 not_before);
+    [Throws=MessengerError]
+    void cancel_held(string msg_id);
+    [Throws=MessengerError]
+    void edit_held_text(string msg_id, string text);
+    [Throws=MessengerError]
+    void set_ghost_mode(boolean enabled);
+    boolean ghost_mode();
+    // "Don't keep on servers": events expire on relays, media is deleted from
+    // storage once recipients had time to download it.
+    [Throws=MessengerError]
+    void set_chat_no_store(string chat_id, boolean enabled);
+    boolean chat_no_store(string chat_id);
+    [Throws=MessengerError]
+    void set_no_store_default(boolean enabled);
+    boolean no_store_default();
+    [Throws=MessengerError]
+    void register_media_purge(string message_id, string refs_json);
+};

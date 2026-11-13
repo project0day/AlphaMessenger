@@ -1,0 +1,5 @@
+[bindings.kotlin]
+# The Rust cdylib is built as `libalpha_ffi.so` (see Cargo.toml `[lib] name`).
+# Without this override, uniffi-bindgen would emit a `Native.load("uniffi_alphamessenger")`
+# call that fails at runtime with `library "libuniffi_alphamessenger.so" not found`.
+cdylib_name = "alpha_ffi"

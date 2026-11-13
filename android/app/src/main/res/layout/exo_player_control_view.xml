@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Custom ExoPlayer control view. Used by PlayerView via
+     controllerLayoutId = R.layout.exo_player_control_view.
+     NOTE: media3's PlayerView does NOT support app:rewind_increment /
+     app:fastforward_increment as XML attrs (those are on the Player, not
+     the view). The seek increment is set programmatically on the ExoPlayer
+     instance — see ChatScreen.kt. This layout just provides a clean
+     white-on-black control bar. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_gravity="bottom"
+    android:layoutDirection="ltr"
+    android:background="#80000000"
+    android:orientation="vertical">
+
+    <androidx.media3.ui.DefaultTimeBar
+        android:id="@id/exo_progress"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="8dp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="4dp">
+
+        <ImageButton
+            android:id="@id/exo_prev"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="?android:selectableItemBackgroundBorderless"
+            android:src="@android:drawable/ic_media_previous"
+            android:tint="#FFFFFF"
+            android:contentDescription="Назад" />
+
+        <ImageButton
+            android:id="@id/exo_rew"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?android:selectableItemBackgroundBorderless"
+            android:src="@android:drawable/ic_media_rew"
+            android:tint="#FFFFFF"
+            android:contentDescription="Назад 5с" />
+
+        <ImageButton
+            android:id="@id/exo_play_pause"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="?android:selectableItemBackgroundBorderless"
+            android:src="@android:drawable/ic_media_play"
+            android:tint="#FFFFFF"
+            android:contentDescription="Play/Pause" />
+
+        <ImageButton
+            android:id="@id/exo_ffwd"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?android:selectableItemBackgroundBorderless"
+            android:src="@android:drawable/ic_media_ff"
+            android:tint="#FFFFFF"
+            android:contentDescription="Вперёд 5с" />
+
+        <ImageButton
+            android:id="@id/exo_next"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="?android:selectableItemBackgroundBorderless"
+            android:src="@android:drawable/ic_media_next"
+            android:tint="#FFFFFF"
+            android:contentDescription="Вперёд" />
+
+        <Space android:layout_width="0dp" android:layout_height="0dp" android:layout_weight="1" />
+
+        <TextView
+            android:id="@id/exo_position"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:layout_marginEnd="4dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#88FFFFFF"
+            android:textSize="12sp"
+            android:text="/" />
+
+        <TextView
+            android:id="@id/exo_duration"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#88FFFFFF"
+            android:textSize="12sp"
+            android:layout_marginStart="4dp"
+            android:layout_marginEnd="8dp" />
+    </LinearLayout>
+</LinearLayout>

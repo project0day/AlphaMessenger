@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AlphaMessenger ghost mark. A clean, serious ghost silhouette with a soft
+  teal gradient, calm narrowed eyes and a subtle top highlight for depth.
+  Used by both the adaptive launcher icon and the in-app splash.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Soft outer glow behind the ghost (very subtle, for a premium feel) -->
+    <path
+        android:pathData="M54,22 C37.5,22 24,35.5 24,52 L24,82 C24,86 28,88 31,85.5 L37,80 C38.4,78.7 40.5,78.8 41.8,80.2 L46.4,85 C47.8,86.5 50.2,86.5 51.6,85 L54,82.5 L56.4,85 C57.8,86.5 60.2,86.5 61.6,85 L66.2,80.2 C67.5,78.8 69.6,78.7 71,80 L77,85.5 C80,88 84,86 84,82 L84,52 C84,35.5 70.5,22 54,22 Z"
+        android:fillAlpha="0.18">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54"
+                android:centerY="52"
+                android:gradientRadius="40"
+                android:startColor="#5EEAD4"
+                android:endColor="#0014B8A6" />
+        </aapt:attr>
+    </path>
+
+    <!-- Ghost body -->
+    <path
+        android:pathData="M54,26 C39.6,26 28,37.6 28,52 L28,79 C28,81.2 30.6,82.3 32.2,80.8 L37,76.4 C38.1,75.4 39.8,75.5 40.8,76.6 L44.6,80.7 C45.7,81.9 47.6,81.9 48.7,80.7 L52.3,76.8 C53.4,75.6 55.3,75.6 56.4,76.8 L60,80.7 C61.1,81.9 63,81.9 64.1,80.7 L67.9,76.6 C68.9,75.5 70.6,75.4 71.7,76.4 L76.5,80.8 C78.1,82.3 80,81.2 80,79 L80,52 C80,37.6 68.4,26 54,26 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="34"
+                android:startY="28"
+                android:endX="74"
+                android:endY="82"
+                android:startColor="#7FFFE9"
+                android:endColor="#0F9488" />
+        </aapt:attr>
+    </path>
+
+    <!-- Top highlight for a glossy, premium depth -->
+    <path
+        android:pathData="M54,31 C44,31 35.5,38.5 33.6,48.5 C33.2,50.7 35.4,52 37,51 C40,49 47,47 54,47 C61,47 68,49 71,51 C72.6,52 74.8,50.7 74.4,48.5 C72.5,38.5 64,31 54,31 Z"
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.18" />
+
+    <!-- Eyes (calm, slightly narrowed → serious look) -->
+    <path
+        android:pathData="M45.5,48 m-4,0 a4,5 0 1,0 8,0 a4,5 0 1,0 -8,0"
+        android:fillColor="#0A0E1A" />
+    <path
+        android:pathData="M62.5,48 m-4,0 a4,5 0 1,0 8,0 a4,5 0 1,0 -8,0"
+        android:fillColor="#0A0E1A" />
+
+    <!-- Tiny eye glints -->
+    <path
+        android:pathData="M44,46 m-1.1,0 a1.1,1.1 0 1,0 2.2,0 a1.1,1.1 0 1,0 -2.2,0"
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.9" />
+    <path
+        android:pathData="M61,46 m-1.1,0 a1.1,1.1 0 1,0 2.2,0 a1.1,1.1 0 1,0 -2.2,0"
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.9" />
+</vector>

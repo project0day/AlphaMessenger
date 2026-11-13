@@ -1,0 +1,15 @@
+# Copy this file to `local.properties` and fill in YOUR paths.
+# `local.properties` is machine-specific and must NOT be committed to git.
+#
+# Windows example:
+#   sdk.dir=C:\\Users\\YourName\\AppData\\Local\\Android\\Sdk
+#   ndk.dir=D:\\Android\\android-ndk-r27d
+#
+# Linux/Mac example:
+#   sdk.dir=/home/yourname/Android/Sdk
+#   ndk.dir=/home/yourname/Android/android-ndk-r27d
+#
+# The NDK version in app/build.gradle.kts (ndkVersion) must match the
+# installed NDK. Check with: `cat $ndk.dir/source.properties | grep Pkg.Revision`
+sdk.dir=C:\\Users\\YourName\\AppData\\Local\\Android\\Sdk
+ndk.dir=D:\\Android\\android-ndk-r27d

@@ -1,0 +1,16 @@
+name: Idea
+description: Something Alpha could do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What you want to do, and why the app does not let you today.
+    validations:
+      required: true
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Privacy
+      description: Would it make anyone learn more about you than today (relays, contacts, servers)?

@@ -1,0 +1,40 @@
+name: Bug report
+description: Something does not work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security problems do not go here.** Report them privately: Security tab → Report a vulnerability.
+        Never paste your recovery phrase, nsec, password or message contents.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open …
+        2. Tap …
+  - type: input
+    id: version
+    attributes:
+      label: Alpha version
+      description: Settings → About
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Phone and Android version
+      placeholder: Pixel 8, Android 16
+  - type: dropdown
+    id: tor
+    attributes:
+      label: Private mode (Tor)
+      options: ["Off", "On", "Not sure"]

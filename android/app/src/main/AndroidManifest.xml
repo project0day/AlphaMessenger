@@ -1,0 +1,295 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Suppress the auto-generated <permission> tag for
+         DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION. Android Gradle Plugin
+         injects both a <permission> and a <uses-permission> for this name
+         (for ContextCompat.registerReceiver on API 33+). On some custom
+         ROMs (e.g. Project Infinity-X) the explicit <permission> tag
+         collides with the system's internal declaration on reinstall -r,
+         causing INSTALL_FAILED_DUPLICATE_PERMISSION even though the app
+         owns the permission itself. Removing the <permission> element is
+         safe: the framework still creates the permission internally. -->
+    <permission
+        android:name="${applicationId}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+        tools:node="remove" />
+
+    <!-- Existing permissions -->
+    <!-- An .apk received in a chat opens in the system installer (the user confirms there). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Lets an update this app installed itself go in without a second prompt (Android 12+). -->
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Android 14+: know that a screenshot was taken of a story (to tell its author). -->
+    <uses-permission android:name="android.permission.DETECT_SCREEN_CAPTURE" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+
+    <!-- Calls (voice/video) module -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Storage: for photo/video/file picking and saving -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+
+    <!-- Location: for location sharing -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+
+    <!-- System: for sync service and auto-start -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Keep the sync/ntfy connection alive through Doze so messages arrive
+         promptly in the background (no Google FCM). User opts in via a prompt. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Hardware features (required=false so it works on devices without them) -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
+
+    <application
+        android:name=".AlphaMessengerApp"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:hasFragileUserData="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:localeConfig="@xml/locales_config"
+        android:supportsRtl="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:theme="@style/Theme.AlphaMessenger">
+
+        <!-- CPU profiles of the release build over adb (simpleperf); nothing else changes. -->
+        <profileable android:shell="true" />
+
+        <!-- Tor ends its process on a fatal error; that process is not ours. -->
+        <service
+            android:name="org.torproject.jni.TorService"
+            android:process=":tor"
+            android:exported="false" />
+
+        <service
+            android:name="androidx.appcompat.app.AppLocalesMetadataHolderService"
+            android:enabled="false"
+            android:exported="false">
+            <meta-data
+                android:name="autoStoreLocales"
+                android:value="true" />
+        </service>
+
+        <!-- Disable WorkManager default initializer (we use custom via Configuration.Provider) -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+        </provider>
+
+        <!-- singleTask: Share обязан приходить в ЕДИНСТВЕННЫЙ живой экземпляр
+             (onNewIntent). Замерено: со стандартным режимом каждый шаринг заводил
+             новый экземпляр и новую ЗАДАЧУ — в dumpsys три ActivityRecord
+             MainActivity в задачах t1489/t1490, в «Недавних» три карточки
+             приложения. singleTop этого не лечит: он совпадает только внутри
+             одной задачи. Отсюда шли и «работает через раз» (payload забирал
+             невидимый экземпляр), и потерянный цвет панели навигации у нового
+             окна. Приложение одноэкранное, поэтому «очистка задачи», которой
+             singleTask отличается от singleTop, здесь ничего не сносит. -->
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.AlphaMessenger.Splash"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- G-7: group invite deep links: alpha://group/invite/<token> -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="alpha" android:host="group" />
+                <data android:scheme="alpha" android:host="channel" />
+            </intent-filter>
+
+            <!-- Системный Sharesheet. Приходит в ЭТУ же Activity (onCreate /
+                 onNewIntent) — второго entry point нет. Конкретные типы нужны
+                 приложениям, которые спрашивают именно их; */* добирает
+                 остальное, а реальный тип каждого URI всё равно определяется
+                 через ContentResolver в ShareIntentHandler. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="application/*" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="application/*" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <!-- Delivery without Google push: a persistent, end-to-end encrypted
+             connection to Nostr relays. specialUse, not dataSync: since Android 15
+             dataSync is cut after 6 h a day, which would silently stop delivery. -->
+        <!-- Group calls: the call screen and the service that keeps it going. -->
+        <activity
+            android:name=".calls.group.GroupCallActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.AlphaMessenger" />
+        <service
+            android:name=".calls.group.GroupCallService"
+            android:foregroundServiceType="microphone|camera"
+            android:exported="false" />
+        <!-- Music in the notification shade and on the lock screen. -->
+        <service
+            android:name=".service.MusicService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
+        <!-- Export: writes the archive in the foreground while the app may be in the background. -->
+        <service
+            android:name=".export.ExportService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+        <service
+            android:name=".service.MessageSyncService"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Persistent end-to-end encrypted connection to Nostr relays for real-time message and call delivery without Google push services" />
+        </service>
+
+        <!-- Call UI: full-screen over lockscreen, keeps state across rotation,
+             supports Picture-in-Picture for video calls. -->
+        <activity
+            android:name=".ui.video.VideoPlayerActivity"
+            android:exported="false"
+            android:supportsPictureInPicture="true"
+            android:resizeableActivity="true"
+            android:theme="@style/Theme.AlphaMessenger.Player"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode" />
+        <!-- Built-in browser: a task of its own, one instance; links come in as tabs. -->
+        <activity
+            android:name=".ui.browser.BrowserActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.alphamessenger.browser"
+            android:label="@string/browser_title"
+            android:theme="@style/Theme.AlphaMessenger"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".service.ReactActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:noHistory="true"
+            android:theme="@style/Theme.AlphaMessenger.Player" />
+        <activity
+            android:name=".calls.ui.CallActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:supportsPictureInPicture="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.AlphaMessenger"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode" />
+
+        <!-- Ongoing-call foreground service: keeps the WebRTC session alive
+             when the app is backgrounded / the screen is locked; hosts the
+             Answer / Decline / Hang-up notification actions. -->
+        <service
+            android:name=".calls.service.CallForegroundService"
+            android:foregroundServiceType="microphone|camera"
+            android:exported="false" />
+
+        <!-- Inline notification actions (reply / mark-as-read). Not exported:
+             only our own PendingIntents trigger it. -->
+        <receiver
+            android:name=".service.NotificationActionReceiver"
+            android:exported="false" />
+
+        <!-- After a restart or an update the sync starts by itself. -->
+        <receiver
+            android:name=".service.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- What the system installer says about an app update (ours only). -->
+        <receiver
+            android:name=".ui.update.UpdateInstallReceiver"
+            android:exported="false" />
+
+        <!-- Image cropper Activity (vanniktech library).
+             DarkActionBar gives us the toolbar overlay with menu icons
+             (Cancel / Rotate / Done) tinted white over the dark image.
+             Without `windowActionBar=true` from the AppCompat parent the
+             activity opens grey with no controls. -->
+        <activity
+            android:name="com.canhub.cropper.CropImageActivity"
+            android:theme="@style/Theme.AlphaMessenger.Crop" />
+
+        <!-- FileProvider for camera capture and file sharing -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>

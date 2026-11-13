@@ -1,0 +1,99 @@
+[workspace]
+resolver = "2"
+members = [
+    "alpha-identity",
+    "alpha-keys",
+    "alpha-transport",
+    "alpha-mls",
+    "alpha-database",
+    "alpha-messages",
+    "alpha-media",
+    "alpha-sync",
+    "alpha-notifications",
+    "alpha-ffi",
+]
+
+[workspace.dependencies]
+# OpenMLS v0.8.3 (vendored)
+openmls = { path = "../vendor/openmls-v0.8.3/openmls-v0.8.3/openmls" }
+openmls-basic-credential = { package = "openmls_basic_credential", path = "../vendor/openmls-v0.8.3/openmls-v0.8.3/basic_credential" }
+openmls-rust-crypto = { package = "openmls_rust_crypto", path = "../vendor/openmls-v0.8.3/openmls-v0.8.3/openmls_rust_crypto" }
+openmls-traits = { package = "openmls_traits", path = "../vendor/openmls-v0.8.3/openmls-v0.8.3/traits" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Crypto
+rand = "0.8"
+rand_chacha = "0.3"
+
+# Database
+# Use bundled-sqlcipher-vendored-openssl which bundles BOTH SQLCipher and OpenSSL,
+# eliminating the need for system OpenSSL headers. This is critical for Android NDK
+# cross-compilation where system OpenSSL isn't available.
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl", "hooks"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Bytes
+bytes = "1"
+
+# Hex
+hex = "0.4"
+
+# Base64
+base64 = "0.22"
+
+# Nostr
+nostr-sdk = { version = "0.44", features = ["nip59"] }
+nostr = { version = "0.44", features = ["nip59", "nip06"] }
+
+# ChaCha for media encryption
+chacha20poly1305 = "0.10"
+blake3 = "1"
+
+# Secret zeroization
+zeroize = { version = "1", features = ["derive", "aarch64"] }
+
+# Argon2id for password-based key derivation (replaces PBKDF2)
+argon2 = "0.5"
+
+# Subtle for CSPRNG nonce generation helpers
+subtle = "2"
+
+# HKDF for key hierarchy (Phase 1 recovery keys)
+hkdf = "0.12"
+
+# HTTP client (for Blossom/file relay)
+# Use rustls-tls instead of default native-tls (OpenSSL) for NDK cross-compilation.
+# This eliminates the openssl-sys dependency which requires an Android-compatible
+# OpenSSL build that is difficult to set up with the NDK.
+reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls", "socks"], default-features = false }
+
+# FFI
+uniffi = "0.28"
+
+# TLS codec (from OpenMLS)
+tls_codec = "0.4"
+
+# The released library carries no symbol tables: smaller, and no free map of
+# the crypto core for a reverse engineer.
+[profile.release]
+strip = "symbols"

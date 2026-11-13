@@ -1,0 +1,59 @@
+[package]
+name = "alpha-ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "alpha_ffi"
+
+# Tiny binary that proxies to uniffi_bindgen for Kotlin binding regeneration.
+# Invoked from build-android.sh and the WSL build pipeline whenever the UDL
+# changes.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+alpha-identity = { path = "../alpha-identity" }
+alpha-keys = { path = "../alpha-keys" }
+alpha-transport = { path = "../alpha-transport" }
+alpha-mls = { path = "../alpha-mls" }
+alpha-database = { path = "../alpha-database" }
+alpha-messages = { path = "../alpha-messages" }
+alpha-media = { path = "../alpha-media" }
+reqwest = { workspace = true }
+alpha-sync = { path = "../alpha-sync" }
+alpha-notifications = { path = "../alpha-notifications" }
+uniffi = { workspace = true, features = ["cli"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ctor = "0.2"
+rand = "0.8"
+chrono = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
+openmls-rust-crypto = { workspace = true }
+openmls-basic-credential = { workspace = true }
+nostr = { workspace = true }
+blake3 = { workspace = true }
+zeroize = { workspace = true }
+sha2 = "0.10"
+# Direct rusqlite access for the backup dump (Phase 2): we need Connection /
+# Row / ValueRef types that alpha_database re-exports only partially.
+rusqlite = { workspace = true }
+
+# Logcat sink for `tracing` so we can see what the Rust core is doing
+# from `adb logcat` (publish/fetch/decrypt etc). Only compiled when
+# targeting Android.
+[target.'cfg(target_os = "android")'.dependencies]
+tracing-android = "0.2"
+
+[build-dependencies]
+uniffi = { workspace = true, features = ["build"] }

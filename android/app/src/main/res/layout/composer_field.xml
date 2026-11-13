@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Inflated rather than built in code: scrollbars exist only when declared here. -->
+<com.alphamessenger.ui.chat.v2.ComposerEditText xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@null"
+    android:gravity="center_vertical|start"
+    android:importantForAutofill="no"
+    android:imeOptions="flagNoExtractUi"
+    android:inputType="textCapSentences|textMultiLine"
+    android:overScrollMode="never"
+    android:scrollbarStyle="insideOverlay"
+    android:scrollbars="vertical"
+    android:fadeScrollbars="false" />

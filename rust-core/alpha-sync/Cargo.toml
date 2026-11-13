@@ -1,0 +1,31 @@
+[package]
+name = "alpha-sync"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+alpha-identity = { path = "../alpha-identity" }
+alpha-transport = { path = "../alpha-transport" }
+alpha-mls = { path = "../alpha-mls" }
+alpha-database = { path = "../alpha-database" }
+alpha-messages = { path = "../alpha-messages" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+openmls = { workspace = true }
+openmls-basic-credential = { workspace = true }
+openmls-rust-crypto = { workspace = true }
+openmls-traits = { workspace = true }
+nostr = { workspace = true, features = ["nip59"] }
+nostr-sdk = { workspace = true, features = ["nip59"] }
+futures-util = "0.3"
+futures-executor = "0.3"
+
+[dev-dependencies]
+uuid = { workspace = true }

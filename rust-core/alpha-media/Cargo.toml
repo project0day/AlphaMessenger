@@ -1,0 +1,34 @@
+[package]
+name = "alpha-media"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+chacha20poly1305 = { workspace = true }
+blake3 = { workspace = true }
+reqwest = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+nostr = { workspace = true }
+zeroize = { workspace = true }
+image = "0.25"
+sha2 = "0.10"
+aes = "0.8"
+ctr = "0.9"
+hmac = "0.12"
+
+# Dev-only: CBOR codec benchmark for the BlobEnvelope architecture probe
+# (examples/blossom_probe.rs). NOT compiled into the shipped library.
+[dev-dependencies]
+ciborium = "0.2"

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status-bar mark: the logo ghost as a single-colour silhouette, eyes cut out. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="60"
+    android:viewportHeight="60">
+    <group android:translateX="-24" android:translateY="-24">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:fillType="evenOdd"
+            android:pathData="M54,26 C39.6,26 28,37.6 28,52 L28,79 C28,81.2 30.6,82.3 32.2,80.8 L37,76.4 C38.1,75.4 39.8,75.5 40.8,76.6 L44.6,80.7 C45.7,81.9 47.6,81.9 48.7,80.7 L52.3,76.8 C53.4,75.6 55.3,75.6 56.4,76.8 L60,80.7 C61.1,81.9 63,81.9 64.1,80.7 L67.9,76.6 C68.9,75.5 70.6,75.4 71.7,76.4 L76.5,80.8 C78.1,82.3 80,81.2 80,79 L80,52 C80,37.6 68.4,26 54,26 Z M45.5,48 m-4,0 a4,5 0 1,0 8,0 a4,5 0 1,0 -8,0 Z M62.5,48 m-4,0 a4,5 0 1,0 8,0 a4,5 0 1,0 -8,0 Z" />
+    </group>
+</vector>

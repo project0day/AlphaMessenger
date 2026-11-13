@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!-- Провайдер существует только в тестовом APK: даёт URI, у которых
+             можно убрать имя, размер или сам файл. -->
+        <provider
+            android:name="com.alphamessenger.ui.media.draft.DraftTestProvider"
+            android:authorities="com.alphamessenger.draft.test"
+            android:exported="false" />
+    </application>
+</manifest>

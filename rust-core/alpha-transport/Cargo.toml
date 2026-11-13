@@ -1,0 +1,40 @@
+[package]
+name = "alpha-transport"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+alpha-identity = { path = "../alpha-identity" }
+openmls = { workspace = true }
+openmls-basic-credential = { workspace = true }
+openmls-rust-crypto = { workspace = true }
+openmls-traits = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+tls_codec = { workspace = true }
+nostr = { workspace = true, features = ["nip59"] }
+nostr-sdk = { workspace = true, features = ["nip59"] }
+futures-util = "0.3"
+chacha20poly1305 = { workspace = true }
+hkdf = { workspace = true }
+sha2 = "0.10"
+rand = { workspace = true }
+tokio-socks = "0.5"
+
+[dev-dependencies]
+tokio-tungstenite = "0.24"
+reqwest = { workspace = true }
+
+alpha-mls = { path = "../alpha-mls" }
+alpha-identity = { path = "../alpha-identity" }
+openmls-rust-crypto = { workspace = true }
+openmls-basic-credential = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -1,0 +1,20 @@
+[env]
+# Try to use a pre-configured OpenSSL or skip dynamic configuration
+OPENSSL_STATIC = "1"
+OPENSSL_DIR = ""
+OPENSSL_LIB_DIR = ""
+OPENSSL_INCLUDE_DIR = ""
+
+[build]
+# Use more jobs for faster parallel compilation
+jobs = 8
+
+[target.aarch64-linux-android]
+runner = "cargo-ndk"
+# Align ELF LOAD segments to 16 KB so libalpha_ffi.so works on Android 15+
+# devices using 16 KB memory pages (fixes the "library not aligned to 16 KB"
+# compatibility warning). See developer.android.com/16kb-page-size.
+rustflags = [
+    "-C", "link-arg=-Wl,-z,max-page-size=16384",
+    "-C", "link-arg=-Wl,-z,common-page-size=16384",
+]

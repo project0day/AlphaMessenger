@@ -1,0 +1,12 @@
+-- TD-003: persist the DELIVERED status across app restarts.
+--
+-- Before this, "delivered" (✓✓) lived only in memory: it was pushed to the UI
+-- via on_delivery_update(msg_id, "delivered") when every recipient ACKed, but
+-- nothing was written to disk. After a reload get_messages() rebuilt the status
+-- from read_at/consumed only, so an already-delivered message fell back to
+-- "sent" (✓). delivered_at is stamped on the SENDER's copy the moment a message
+-- becomes fully ACKed and now survives reload.
+--
+-- NULL  = not yet delivered (still "sent"/"sending").
+-- set   = RFC3339 timestamp of full delivery → drives the ✓✓ (delivered) tick.
+ALTER TABLE messages ADD COLUMN delivered_at TEXT;
