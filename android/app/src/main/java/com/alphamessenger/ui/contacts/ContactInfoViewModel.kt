@@ -441,9 +441,7 @@ class ContactInfoViewModel @Inject constructor(
             //    still in the group at this epoch, so they receive this notice
             //    (and keep it, since their chat history is preserved on removal).
             val banName = member.displayName.ifBlank { strings.get(R.string.chat_member_fallback) }
-            val notice = if (reason.isNotBlank())
-                strings.get(R.string.ban_notice_reason, banName, reason.trim())
-            else strings.get(R.string.ban_notice, banName)
+            val notice = com.alphamessenger.ui.chat.buildBanNotice(banName, reason)
             // A channel's feed carries posts only: its moderation stays in the
             // admins' "Recent actions".
             if (_uiState.value.channel == null) runCatching { repository.sendText(chatId, notice) }
@@ -1007,7 +1005,7 @@ class ContactInfoViewModel @Inject constructor(
                 // Visible chat notice (sent while we're still a member) + audit.
                 // A notice in the chat — not in a channel's feed. (The core
                 // tells the owner we leave, whichever way we leave.)
-                if (_uiState.value.channel == null) runCatching { repository.sendText(chatId, strings.get(R.string.leave_group_message, shown)) }
+                if (_uiState.value.channel == null) runCatching { repository.sendText(chatId, com.alphamessenger.ui.chat.buildLeaveNotice(shown)) }
             }
             runCatching { repository.leaveChat(chatId) }
             // The leaver's own copy of the group closes & is removed.
@@ -1044,7 +1042,7 @@ class ContactInfoViewModel @Inject constructor(
             val myName = runCatching { repository.getMyProfile()?.displayName }.getOrNull().orEmpty()
             // A hidden owner's name never goes into the chat; nor a line into a channel's feed.
             if (!_uiState.value.ownerHidden && _uiState.value.channel == null) {
-                runCatching { repository.sendText(chatId, strings.get(R.string.leave_group_message, myName.ifBlank { strings.get(R.string.role_owner) })) }
+                runCatching { repository.sendText(chatId, com.alphamessenger.ui.chat.buildLeaveNotice(myName.ifBlank { strings.get(R.string.role_owner) })) }
             }
             runCatching { repository.logGroupEvent(chatId, "leave", me, myName) }
             runCatching { repository.leaveChat(chatId) }

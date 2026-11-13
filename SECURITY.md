@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Report it privately through GitHub: on this repository's **Security** tab, choose **Report a vulnerability**. You can also do this from the app, under Settings → About → Report a vulnerability.
+Report it privately through GitHub: on this repository's **Security** tab, choose **Report a vulnerability**. The app leads there too: Settings → About → Report a bug, then "Security vulnerability".
 
 Please include:
 

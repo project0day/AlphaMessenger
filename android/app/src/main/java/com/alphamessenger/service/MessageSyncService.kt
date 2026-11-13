@@ -623,6 +623,8 @@ class MessageSyncService : Service() {
 
         // Disappearing-timer control messages are silent — never notify.
         if (msg.content?.startsWith(com.alphamessenger.ui.chat.TIMER_MARK) == true) return
+        // Nor do group events (someone left, was banned): they are read in the chat.
+        if (msg.content?.startsWith(com.alphamessenger.ui.chat.NOTICE_MARK) == true) return
         // Comments under channel posts are not in `getMessages` (they live in
         // their post's discussion), so they never notify; the post itself does.
 

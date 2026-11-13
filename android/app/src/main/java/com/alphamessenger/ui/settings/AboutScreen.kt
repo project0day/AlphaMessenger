@@ -53,6 +53,9 @@ import com.alphamessenger.ui.theme.AlphaTheme
 /** The public repository. Empty: the source rows say "soon" and the GitHub links hide. */
 const val SOURCE_URL = "https://github.com/Vincentdiligent/AlphaMessenger"
 
+/** Where people can support the project. Empty: the row hides. */
+const val DONATE_URL = ""
+
 /** Bundled from the repository root at build time (see app/build.gradle.kts). */
 enum class LegalDoc(val asset: String) { LICENSE("legal/LICENSE"), COMPONENTS("legal/THIRD_PARTY_LICENSES.md") }
 
@@ -148,14 +151,20 @@ fun AboutScreen(repository: AlphaCoreRepository, onBack: () -> Unit, onDoc: (Leg
             )
             if (SOURCE_URL.isNotEmpty()) {
                 OptionDivider()
+                // One way in: the page lets a bug go public and a vulnerability go privately.
                 OptionRow(
                     stringResource(R.string.about_bug), stringResource(R.string.about_bug_sub),
-                    AlphaIcons.Outlined.Info, Color(0xFFF59E0B), onClick = { open("$SOURCE_URL/issues/new/choose") },
+                    AlphaIcons.Outlined.Shield, Color(0xFFF59E0B), onClick = { open("$SOURCE_URL/issues/new/choose") },
                 )
-                OptionDivider()
+            }
+        }
+
+        if (DONATE_URL.isNotEmpty()) {
+            OptionSection(stringResource(R.string.about_section_support))
+            OptionGroup {
                 OptionRow(
-                    stringResource(R.string.about_report), stringResource(R.string.about_report_sub),
-                    AlphaIcons.Outlined.Shield, Color(0xFFEF4444), onClick = { open("$SOURCE_URL/security/advisories/new") },
+                    stringResource(R.string.about_donate), stringResource(R.string.about_donate_sub),
+                    AlphaIcons.Outlined.FavoriteBorder, Color(0xFFEC4899), onClick = { open(DONATE_URL) },
                 )
             }
         }

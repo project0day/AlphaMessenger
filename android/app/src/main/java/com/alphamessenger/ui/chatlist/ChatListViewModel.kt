@@ -418,7 +418,12 @@ class ChatListViewModel @Inject constructor(
                 val bannedText = strings.get(R.string.ban_list_line)
                 val groupsShown = groupChats.map { c ->
                     val gone = repository.chatBan(c.id)
-                    if (gone == null) c else {
+                    if (gone == null) {
+                        // A group event (left, banned): worded in this phone's language.
+                        val at = c.lastMessagePreview.indexOf(com.alphamessenger.ui.chat.NOTICE_MARK)
+                        val worded = if (at < 0) null else com.alphamessenger.ui.chat.noticeText(c.lastMessagePreview.substring(at), strings)
+                        if (worded == null) c else c.copy(lastMessagePreview = worded, lastMessageKind = "")
+                    } else {
                         com.alphamessenger.ui.chat.ConversationSnapshotCache.clear(c.id)
                         val line = if (!gone.disbanded) bannedText
                             else strings.get(if (c.id in channelIds) R.string.disband_title_channel else R.string.disband_title_group)
@@ -927,7 +932,7 @@ class ChatListViewModel @Inject constructor(
                 val shown = myName.ifBlank { strings.get(R.string.participant_fallback) }
                 // Visible notice in a group (never in a channel's feed); the core
                 // itself tells the owner we leave.
-                if (!repository.channelCfg(chat.id).on) runCatching { repository.sendText(chat.id, strings.get(R.string.leave_group_message, shown)) }
+                if (!repository.channelCfg(chat.id).on) runCatching { repository.sendText(chat.id, com.alphamessenger.ui.chat.buildLeaveNotice(shown)) }
             }
             runCatching { repository.leaveChat(chat.id) }
             // The leaver's own copy of the group closes & is removed.

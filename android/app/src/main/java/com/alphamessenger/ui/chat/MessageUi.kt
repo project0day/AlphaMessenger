@@ -208,6 +208,30 @@ fun parseStoryReply(content: String?): Pair<StoryQuote, String>? {
     return quote to (if (nl < 0) "" else rest.substring(nl + 1))
 }
 
+// A group event (left, banned) told to everyone: the sender's phone sends what
+// happened, not a sentence, and each phone words it in its own language.
+val NOTICE_MARK: String = Char(2) + "NTC" + Char(2)
+
+fun buildLeaveNotice(name: String): String =
+    NOTICE_MARK + org.json.JSONObject().put("k", "leave").put("n", name).toString()
+
+fun buildBanNotice(name: String, reason: String?): String =
+    NOTICE_MARK + org.json.JSONObject().put("k", "ban").put("n", name)
+        .apply { reason?.takeIf { it.isNotBlank() }?.let { put("r", it.trim()) } }.toString()
+
+/** The notice in this phone's language, or null if [content] is not one. */
+fun noticeText(content: String?, s: Strings): String? {
+    if (content == null || !content.startsWith(NOTICE_MARK)) return null
+    val o = runCatching { org.json.JSONObject(content.substring(NOTICE_MARK.length)) }.getOrNull() ?: return null
+    val name = o.optString("n")
+    return when (o.optString("k")) {
+        "leave" -> s.get(R.string.leave_group_message, name)
+        "ban" -> o.optString("r").takeIf { it.isNotBlank() }?.let { s.get(R.string.ban_notice_reason, name, it) }
+            ?: s.get(R.string.ban_notice, name)
+        else -> null
+    }
+}
+
 /** Parse a timer-control message → seconds (0 = off), or null if not one. */
 fun parseTimerControl(content: String?): Int? {
     if (content == null || !content.startsWith(TIMER_MARK)) return null
@@ -219,6 +243,8 @@ fun parseTimerControl(content: String?): Int? {
  *  Resolves through [Strings] on each access so an in-app locale switch is
  *  picked up on the next conversion. */
 class MessageUiLabels(private val s: Strings) {
+    /** A group event (left, banned) in this phone's language, or null. */
+    fun notice(content: String?): String? = noticeText(content, s)
     /** "You" — own-message sender label. */
     val you: String get() = s.get(R.string.notif_you)
     /** Quote of a story in a reply to it. */
@@ -334,6 +360,11 @@ fun MessageInfo.toMessageUi(ownId: String, labels: MessageUiLabels): MessageUi {
             senderId = senderId,
             secretInvite = invite,
         )
+    }
+
+    // A group event: worded here, it keeps the emoji the chat draws as a system chip.
+    labels.notice(this.content)?.let { text ->
+        return MessageUi(id = id, text = text, timestamp = createdAt, isOutgoing = isOwn, senderId = senderId)
     }
 
     // Disappearing-timer control message → render as a centered system notice
