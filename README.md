@@ -21,14 +21,26 @@ The core is written in Rust; the app is native Android.
 
 </div>
 
-> Screenshots are coming soon.
+<div align="center">
+
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/1.jpg" width="200" alt="Screenshot 1" />
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/2.jpg" width="200" alt="Screenshot 2" />
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/3.jpg" width="200" alt="Screenshot 3" />
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/4.jpg" width="200" alt="Screenshot 4" />
+<br/>
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/5.jpg" width="200" alt="Screenshot 5" />
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/6.jpg" width="200" alt="Screenshot 6" />
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/7.jpg" width="200" alt="Screenshot 7" />
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/8.jpg" width="200" alt="Screenshot 8" />
+
+</div>
 
 ## Why Alpha
 
 Most messengers know who you are (your phone number), who you talk to (their servers route every message) and when. Alpha is built so that there is nobody in a position to know:
 
 - **No phone number, no email, no account server.** Your account is a key pair created on your phone, backed up as a recovery phrase.
-- **No servers of our own.** Messages travel through public [Nostr](https://github.com/nostr-protocol/nips) relays you choose, media through Blossom servers. They only ever see ciphertext.
+- **No server in the middle.** Messages travel through public [Nostr](https://github.com/nostr-protocol/nips) relays you choose, media through Blossom servers. They only ever see ciphertext. The project runs a reserve relay, used only when you have no working relay left, and a read-only archive for the Alpha channel's media; both see only ciphertext too.
 - **Encryption by default, everywhere.** One-to-one chats, groups and channels all use [MLS (RFC 9420)](https://www.rfc-editor.org/rfc/rfc9420), the IETF standard for group end-to-end encryption, with forward secrecy and post-compromise security.
 - **Tor built in.** One switch routes all traffic through Tor. Secret chats always use it.
 - **No ads, no analytics, no trackers, no Google push.** The app reports nothing about you to anyone.
@@ -47,7 +59,7 @@ Most messengers know who you are (your phone number), who you talk to (their ser
 | 💾 **Backup & export** | Encrypted backups, export of a chat, a channel or your profile |
 | 🗂️ **Organize** | Folders, archive, pinned chats, saved messages with tags, search across all chats |
 | 🤖 **Assistant** | An optional AI assistant that talks only to the service you set up, never through us |
-| 🎨 **Looks** | Themes, chat wallpapers, day and night modes |
+| 🎨 **Looks** | Themes, chat wallpapers and patterns (with blur and your own colours), day and night modes |
 
 ## Under the hood
 

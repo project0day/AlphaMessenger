@@ -1,0 +1,21 @@
+<p>Alpha is a private messenger with no phone number, no account server and no one in the middle. Your account is a key pair made on your phone.</p>
+<p><b>Private by design</b></p>
+<ul>
+<li>End-to-end encryption everywhere with MLS (RFC 9420): one-to-one chats, groups and channels, with forward secrecy.</li>
+<li>Messages travel through Nostr relays you choose, media through Blossom servers: they only see ciphertext.</li>
+<li>Tor built in: one switch routes all traffic through it; secret chats always use it.</li>
+<li>No ads, no analytics, no trackers, no Google push.</li>
+</ul>
+<p><b>Everything a messenger needs</b></p>
+<ul>
+<li>Groups, channels with comments, replies, reactions, edits, polls, link previews.</li>
+<li>Voice notes, round video messages, voice and video calls.</li>
+<li>Photos, videos and albums of any size, files, stickers, GIFs, animated emoji.</li>
+<li>Secret chats, view-once media, disappearing messages, anonymous channel admins.</li>
+<li>App lock with PIN or fingerprint and a panic PIN.</li>
+<li>Linked devices, encrypted backups, export of chats.</li>
+<li>Folders, archive, saved messages, search.</li>
+<li>Themes, chat wallpapers and patterns, day and night modes.</li>
+<li>An optional AI assistant that talks only to the service you set up.</li>
+</ul>
+<p>Open source under the AGPL-3.0.</p>

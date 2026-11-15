@@ -1,0 +1,5 @@
+- Reserve relay when no relay is left or none answers; notices in the chat list.
+- Sticker catalog in the Alpha channel; animated emoji sets combined.
+- Chat background patterns with blur and own colours; the assistant can make them.
+- Assistant: several conversations, Stop always stops.
+- Fixes: empty forward sheet in assistant chats.
