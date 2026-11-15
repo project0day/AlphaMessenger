@@ -398,6 +398,11 @@ interface AlphaMessengerCore {
     void alpha_feed_remove(string key, string d, u64 at);
     [Throws=MessengerError]
     string alpha_catalog_fetch();
+    [Throws=MessengerError]
+    string alpha_health_fetch();
+    void set_media_health_down(sequence<string> urls);
+    [Throws=MessengerError]
+    string media_ref_blobs(string ref_json);
     // Download a backup container from a known Blossom URL. Returns raw bytes
     // (header || ciphertext) — feed to import_backup with the Recovery Password.
     [Throws=MessengerError]

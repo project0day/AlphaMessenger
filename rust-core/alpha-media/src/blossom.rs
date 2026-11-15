@@ -390,6 +390,20 @@ pub fn own_servers() -> Vec<String> {
     OWN_SERVERS.read().map(|s| s.clone()).unwrap_or_default()
 }
 
+/// Servers the project's health map finds down or losing blobs: tried last, never dropped
+/// (the map is hours old; a server back up still gets its turn).
+static MAP_DOWN: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+pub fn set_map_down(urls: Vec<String>) {
+    let clean = urls.into_iter().map(|u| u.trim().trim_end_matches('/').to_string()).collect();
+    if let Ok(mut s) = MAP_DOWN.write() { *s = clean; }
+}
+
+fn map_down(server: &str) -> bool {
+    let s = server.trim_end_matches('/');
+    MAP_DOWN.read().map(|d| d.iter().any(|x| x == s)).unwrap_or(false)
+}
+
 /// Servers once in [DEFAULT_BLOSSOM_SERVERS]: older messages still point there.
 const RETIRED_BLOSSOM_SERVERS: &[&str] = &["https://blossom.band", "https://cdn.hzrd149.com"];
 
@@ -767,6 +781,7 @@ impl BlossomClient {
                     (true, true) => 2,
                     (true, false) => 3,
                 };
+                let tier = if !own.contains(s) && map_down(s) { tier.max(3) } else { tier };
                 let latency = if own.contains(s) && !cooling { 0 } else { latency };
                 Some((tier, latency, s.clone()))
             })

@@ -4,3 +4,4 @@ dist/
 .upload-token
 .dev.vars
 .b2key
+.health-key

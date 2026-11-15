@@ -95,6 +95,8 @@ class PackPublishService : Service() {
                     if (batch.size >= 10) flush()
                 }
                 flush()
+                // What just went out is listed for the archive before the service ends.
+                runCatching { ArchiveKeeper.sync(this@PackPublishService, repository, full = true) }
             } finally {
                 set(PackPublishState.Done(done, ids.size, failed))
                 runCatching {

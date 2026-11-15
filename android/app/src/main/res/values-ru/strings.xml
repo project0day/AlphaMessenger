@@ -2898,4 +2898,9 @@ Nostr используется как транспорт.</string>
     <string name="feed_remove_from_channel">Из канала</string>
     <string name="feed_remove_everywhere">Из канала и с телефона</string>
     <string name="feed_removed_packs">Удалено наборов: %1$d</string>
+    <string name="relays_section_map">Работают сейчас</string>
+    <string name="relays_map_note">Реле, которые карта сети Альфы видела рабочими %1$s назад. Карту делает проект, приложение читает её анонимно; твой список меняется, только если ты добавишь реле сам.</string>
+    <string name="relays_warn_map_down">По карте сети Альфы тоже не отвечает</string>
+    <string name="relays_hours">%1$d ч</string>
+    <string name="relays_days">%1$d дн</string>
 </resources>

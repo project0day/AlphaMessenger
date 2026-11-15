@@ -1645,6 +1645,17 @@ class AlphaCoreRepository @Inject constructor(
     suspend fun alphaCatalogFetch(): String? =
         withContext(Dispatchers.IO) { runCatching { core.`alphaCatalogFetch`() }.getOrNull() }
 
+    /** The project's network health map (JSON), or null when none could be read. */
+    suspend fun alphaHealthFetch(): String? =
+        withContext(Dispatchers.IO) { runCatching { core.`alphaHealthFetch`() }.getOrNull() }
+
+    /** Media servers the health map finds bad: uploads try them last. */
+    fun setMediaHealthDown(urls: List<String>) { runCatching { core.`setMediaHealthDown`(urls) } }
+
+    /** Every stored blob of [ref] as `[{"sha","urls"}]` (resolves a large file's manifest). */
+    suspend fun mediaRefBlobs(ref: String): String? =
+        withContext(Dispatchers.IO) { runCatching { core.`mediaRefBlobs`(ref) }.getOrNull() }
+
     /** Publish (or replace) catalog page [d]. True when it went out. */
     suspend fun alphaCatalogPublish(key: String, d: String, content: String): Boolean =
         withContext(Dispatchers.IO) { runCatching { core.`alphaCatalogPublish`(key, d, content) }.isSuccess }

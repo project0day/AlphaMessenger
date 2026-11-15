@@ -147,6 +147,7 @@ fun FeedScreen(colors: AlphaColorScheme, repo: AlphaCoreRepository, onDismiss: (
         // Nothing on the phone yet: say it is loading, not that the feed is empty.
         loading = FeedStore.posts.isEmpty()
         FeedStore.refreshIfStale(ctx, repo, maxAgeMs = 60_000L)
+        if (FeedStore.isOwner) scope.launch { ArchiveKeeper.sync(ctx.applicationContext, repo) }
         loading = false
         FeedStore.markSeen(ctx)
     }

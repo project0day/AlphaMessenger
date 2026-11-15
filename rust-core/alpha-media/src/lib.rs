@@ -91,7 +91,7 @@ pub fn with_socks_proxy(builder: reqwest::ClientBuilder, addr: Option<std::net::
     }
 }
 
-pub use blossom::{own_servers, set_own_servers, BlobDescriptor, BlossomClient, MediaSigner, DEFAULT_BLOSSOM_SERVERS};
+pub use blossom::{own_servers, set_own_servers, set_map_down, BlobDescriptor, BlossomClient, MediaSigner, DEFAULT_BLOSSOM_SERVERS};
 pub use blob_transport::{
     active_codec, unwrap_blob, BlobEnvelope, BlobEnvelopeCodec, BlobMetrics, BlobMetricsSnapshot,
     JsonCodec, BLOB_ENVELOPE_VERSION,

@@ -2334,6 +2334,8 @@ fun ChatScreen(
                     }
                 }
             }
+            // The list and the avatars over it stretch together at the ends.
+            ChatOverscroll {
             androidx.compose.runtime.CompositionLocalProvider(
                 com.alphamessenger.ui.sticker.LocalListMoving provides listMoving,
                 com.alphamessenger.ui.chat.text.LocalCodeCopy provides codeCopy,
@@ -2774,6 +2776,7 @@ fun ChatScreen(
                     onAvatarClick = { m -> if (m.senderId in state.channelVoices) channelVoice = m else avatarPreview = m },
                 )
             }
+            } // ChatOverscroll
             // Scroll-to-bottom FAB — appears only when the user is reading
             // history. Smooth scroll + clear the unread badge on tap.
             androidx.compose.animation.AnimatedVisibility(

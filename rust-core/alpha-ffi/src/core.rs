@@ -177,6 +177,8 @@ fn expired_media() -> &'static std::sync::Mutex<Vec<String>> {
 const ALPHA_FEED_PUBKEY: &str = "68e4444782adfea8a2c1bd66a75569b81cb2ef33543c86d5613e538a3f8f44aa";
 const ALPHA_FEED_TAG: &str = "alpha-feed";
 const ALPHA_CATALOG_TAG: &str = "alpha-catalog";
+/// Signs the network health map the project's worker publishes (its secret lives only there).
+const ALPHA_HEALTH_PUBKEY: &str = "fd7874c1a8708908e0e961545dec94042600a9fdb00aab1b83f8f224ba3b3c77";
 
 /// A 32-byte key from hex.
 fn read_key32(hex_str: &str) -> Result<[u8; 32], MessengerError> {
@@ -4116,17 +4118,55 @@ impl AlphaMessengerCore {
     /// into the app — and they are read over a separate anonymous connection, so
     /// no relay learns who reads the feed. Above one page it reads older pages too.
     pub fn alpha_feed_fetch(&self, limit: u32) -> Result<String, MessengerError> {
-        self.alpha_events(ALPHA_FEED_TAG, limit.clamp(1, 5000) as usize)
+        self.alpha_events(ALPHA_FEED_PUBKEY, ALPHA_FEED_TAG, limit.clamp(1, 5000) as usize)
     }
 
     /// The sticker catalog: pages of packs, apart from the feed so they never push posts out of it.
     pub fn alpha_catalog_fetch(&self) -> Result<String, MessengerError> {
-        self.alpha_events(ALPHA_CATALOG_TAG, 400)
+        self.alpha_events(ALPHA_FEED_PUBKEY, ALPHA_CATALOG_TAG, 400)
     }
 
-    fn alpha_events(&self, tag: &str, limit: usize) -> Result<String, MessengerError> {
+    /// The project's network health map (JSON), from its newest signed copy on
+    /// our relays, read anonymously; "" when none is found.
+    pub fn alpha_health_fetch(&self) -> Result<String, MessengerError> {
+        let all = self.alpha_events(ALPHA_HEALTH_PUBKEY, "alpha-health", 10)?;
+        let arr: Vec<serde_json::Value> = serde_json::from_str(&all).unwrap_or_default();
+        Ok(arr.first().and_then(|o| o.get("c")).and_then(|c| c.as_str()).unwrap_or("").to_string())
+    }
+
+    /// Media servers the health map finds down or losing blobs: uploads try them last.
+    pub fn set_media_health_down(&self, urls: Vec<String>) {
+        alpha_media::set_map_down(urls);
+    }
+
+    /// Every stored blob of a media ref (its manifest, chunks, thumbnail), as
+    /// `[{"sha","urls":[…]}]`: what an archive must hold for the file to open.
+    pub fn media_ref_blobs(&self, ref_json: String) -> Result<String, MessengerError> {
+        let r: MediaRef = serde_json::from_str(&ref_json)
+            .map_err(|e| MessengerError::InvalidArgument { description: format!("media ref: {e}") })?;
+        let mut blobs: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+        let mut add = |url: &str| {
+            let last = url.rsplit('/').next().unwrap_or("");
+            let sha = last.split('.').next().unwrap_or("").to_ascii_lowercase();
+            if sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()) && url.starts_with("https://") {
+                let urls = blobs.entry(sha).or_default();
+                if !urls.iter().any(|u| u == url) { urls.push(url.to_string()); }
+            }
+        };
+        if let Some(u) = &r.manifest_url { add(u); }
+        let full = if r.is_external_manifest() { self.resolve_manifest(&r)? } else { r };
+        for u in &full.blob_urls { add(u); }
+        for u in full.thumbnail_urls.iter().flatten() { add(u); }
+        for c in full.chunks.iter().flatten() {
+            for l in &c.locations { add(&l.url); }
+        }
+        let out: Vec<serde_json::Value> = blobs.into_iter().map(|(sha, urls)| serde_json::json!({ "sha": sha, "urls": urls })).collect();
+        Ok(serde_json::Value::Array(out).to_string())
+    }
+
+    fn alpha_events(&self, author: &str, tag: &str, limit: usize) -> Result<String, MessengerError> {
         const PAGE: usize = 200;
-        let alpha = nostr::PublicKey::from_hex(ALPHA_FEED_PUBKEY)
+        let alpha = nostr::PublicKey::from_hex(author)
             .map_err(|e| MessengerError::InternalError { description: format!("feed key: {}", e) })?;
         let rt = runtime();
         let urls = rt.block_on(self.transport.enabled_relay_urls());

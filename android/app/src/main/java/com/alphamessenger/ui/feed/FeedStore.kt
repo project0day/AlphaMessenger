@@ -9,6 +9,7 @@ import com.alphamessenger.data.AlphaCoreRepository
 import com.alphamessenger.ui.gif.GifEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -115,6 +116,8 @@ object FeedStore {
     suspend fun refresh(ctx: Context, repo: AlphaCoreRepository): Boolean = kotlinx.coroutines.coroutineScope {
         load(ctx)
         val catalog = async { StickerCatalog.refresh(ctx, repo) }
+        // Apart from the feed: a slow map read must not hold its refresh up.
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch { com.alphamessenger.data.NetworkHealth.refreshIfStale(ctx, repo) }
         val json = repo.alphaFeedFetch()
         catalog.await()
         val fresh = json?.let { runCatching { parse(it) }.getOrNull() } ?: return@coroutineScope false
@@ -205,7 +208,10 @@ object FeedStore {
             post.level?.let { c.put("lvl", it) }
             if (post.until > 0) c.put("until", post.until)
             val ok = repo.alphaFeedPublish(key, post.id, c.toString())
-            if (ok) refresh(ctx, repo)
+            if (ok) {
+                refresh(ctx, repo)
+                kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch { ArchiveKeeper.sync(ctx, repo) }
+            }
             ok
         }
 

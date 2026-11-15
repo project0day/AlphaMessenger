@@ -198,6 +198,20 @@ fun RelaysScreen(
             }
         }
 
+
+        // The project's health map: relays it saw answering that this list does not have yet.
+        val mine = ui.relays.map { com.alphamessenger.data.NetworkHealth.key(it.url) }.toSet()
+        val alive = com.alphamessenger.data.NetworkHealth.working().filter { com.alphamessenger.data.NetworkHealth.key(it.url) !in mine && it.url !in presets }.take(6)
+        if (alive.isNotEmpty()) {
+            OptionSection(stringResource(R.string.relays_section_map))
+            OptionGroup {
+                alive.forEachIndexed { i, r ->
+                    if (i > 0) OptionDivider()
+                    PresetRow(url = r.url, colors = colors, onAdd = { viewModel.addPresetRelay(r.url) })
+                }
+            }
+            OptionNote(stringResource(R.string.relays_map_note, mapAge(com.alphamessenger.data.NetworkHealth.at)))
+        }
         MediaServersSection(viewModel.repository, colors)
 
         OptionSection(stringResource(R.string.relays_section_anonymity))
@@ -421,6 +435,8 @@ private fun RelayRow(
             }
             // What it does with us while connected: refuses our events, or keeps our inbox behind sign-in.
             val warning = when {
+                relay.isEnabled && relay.state != "connected" && com.alphamessenger.data.NetworkHealth.relay(relay.url)?.ok == false ->
+                    stringResource(R.string.relays_warn_map_down)
                 !relay.isEnabled || relay.state != "connected" -> null
                 relay.rejected > 0 && relay.accepted == 0 -> stringResource(R.string.relays_warn_rejects_all, relay.lastError)
                 relay.lastError.isNotEmpty() -> stringResource(R.string.relays_warn_rejects_some, relay.lastError)
@@ -676,4 +692,13 @@ private fun lookupIp(viaTor: Boolean): IpInfo? {
     val country = code?.let { java.util.Locale("", it).displayCountry.ifBlank { it } }
     val flag = code?.let { c -> String(Character.toChars(0x1F1E6 + (c[0] - 'A'))) + String(Character.toChars(0x1F1E6 + (c[1] - 'A'))) }
     return IpInfo(ip, country, flag, tor.optBoolean("IsTor"))
+}
+
+/** "2 h", "1 d": how old the health map is. */
+@Composable
+private fun mapAge(at: Long): String {
+    val mins = ((System.currentTimeMillis() / 1000 - at) / 60).coerceAtLeast(1)
+    return if (mins < 60) stringResource(R.string.relays_mins, mins.toInt())
+    else if (mins < 48 * 60) stringResource(R.string.relays_hours, (mins / 60).toInt())
+    else stringResource(R.string.relays_days, (mins / 1440).toInt())
 }

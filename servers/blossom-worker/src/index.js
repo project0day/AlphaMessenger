@@ -6,12 +6,13 @@ import { AwsClient } from "aws4fetch";
 import { schnorr } from "@noble/curves/secp256k1";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
+import { addToKeep, keepRound, healthRound, readHealth } from "./care.js";
 
 const MAX_BYTES = 50 * 1024 * 1024;
 const HASH = /^[0-9a-f]{64}$/;
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, HEAD, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, HEAD, PUT, POST, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Authorization, Content-Type, Content-Length, Range, X-SHA-256, X-Content-Type, X-Content-Length",
   "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges, X-Reason",
   "Access-Control-Max-Age": "86400",
@@ -35,6 +36,8 @@ function s3(env) {
     secretAccessKey: clean(env.B2_APP_KEY),
     service: "s3",
     region: env.B2_REGION,
+    // Its own retries would spend the free plan's 50 requests a run unseen; the next round retries.
+    retries: 0,
   });
 }
 const objectUrl = (env, hash) => `${env.B2_ENDPOINT}/${env.B2_BUCKET}/${hash}`;
@@ -134,7 +137,35 @@ async function serve(request, env, hash) {
   return reply(res.status, request.method === "HEAD" ? null : res.body, out);
 }
 
+// The bucket as the scheduled care sees it.
+function bucket(env) {
+  const c = s3(env);
+  const url = (key) => `${env.B2_ENDPOINT}/${env.B2_BUCKET}/${key}`;
+  return {
+    get: (key) => c.fetch(url(key)),
+    put: (key, text) => c.fetch(url(key), { method: "PUT", body: text, headers: { "Content-Type": "application/json" } }),
+    has: async (sha) => (await c.fetch(url(sha), { method: "HEAD" })).ok,
+    // One page of the bucket's names (blobs only), and where the next starts.
+    list: async (token) => {
+      const q = new URLSearchParams({ "list-type": "2", "max-keys": "1000" });
+      if (token) q.set("continuation-token", token);
+      const r = await c.fetch(`${env.B2_ENDPOINT}/${env.B2_BUCKET}?${q}`);
+      if (!r.ok) return null;
+      const xml = await r.text();
+      const keys = [...xml.matchAll(/<Key>([0-9a-f]{64})<\/Key>/g)].map((m) => m[1]);
+      const next = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/);
+      return { keys, next: /<IsTruncated>true<\/IsTruncated>/.test(xml) && next ? next[1] : null };
+    },
+    putBlob: (sha, bytes) => c.fetch(url(sha), { method: "PUT", body: bytes, headers: { "Content-Type": "application/octet-stream", "X-Amz-Content-Sha256": sha } }),
+  };
+}
+
 export default {
+  async scheduled(event, env, ctx) {
+    const store = bucket(env);
+    ctx.waitUntil(event.cron === "17 */2 * * *" ? healthRound(store, env) : keepRound(store));
+  },
+
   async fetch(request, env) {
     const m = request.method;
     if (m === "OPTIONS") return reply(204, null);
@@ -160,6 +191,27 @@ export default {
       if (m === "GET" || m === "HEAD") return serve(request, env, blob[1]);
       if (m === "DELETE") return writer ? remove(request, env, blob[1]) : refuse(401, "deletes are closed");
       return refuse(405, "method not allowed");
+    }
+
+    // The owner's phone lists what must never be lost.
+    if (path === "/keep") {
+      if (!writer) return refuse(401, "closed");
+      if (m !== "POST") return refuse(405, "method not allowed");
+      const r = await addToKeep(request, bucket(env));
+      return r.status === 200 ? json(r.body) : refuse(r.status, r.reason);
+    }
+
+    // The owner can run a round now instead of waiting for the schedule.
+    if (writer && m === "POST" && (path === "/run/health" || path === "/run/keep")) {
+      const store = bucket(env);
+      if (path === "/run/health") await healthRound(store, env); else await keepRound(store);
+      return json({ done: path.slice(5) });
+    }
+
+    // The latest health map, also published signed on relays (where the app reads it).
+    if (path === "/health" && m === "GET") {
+      const h = await readHealth(bucket(env));
+      return h ? reply(200, h, { "Content-Type": "application/json", "Cache-Control": "public, max-age=600" }) : refuse(404, "not yet");
     }
 
     if (path === "/" && (m === "GET" || m === "HEAD")) return reply(200, "Blossom server", { "Content-Type": "text/plain" });

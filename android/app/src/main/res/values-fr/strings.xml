@@ -2866,4 +2866,9 @@ Nostr sert de transport.</string>
     <string name="feed_remove_from_channel">Du canal</string>
     <string name="feed_remove_everywhere">Du canal et de ce téléphone</string>
     <string name="feed_removed_packs">Packs supprimés : %1$d</string>
+    <string name="relays_section_map">Fonctionnent maintenant</string>
+    <string name="relays_map_note">Relais que la carte du réseau Alpha a vus répondre il y a %1$s. La carte est faite par le projet et lue anonymement ; ta liste ne change que si tu en ajoutes un.</string>
+    <string name="relays_warn_map_down">Ne répond pas non plus sur la carte du réseau Alpha</string>
+    <string name="relays_hours">%1$d h</string>
+    <string name="relays_days">%1$d j</string>
 </resources>

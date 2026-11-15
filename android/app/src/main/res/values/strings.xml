@@ -2844,4 +2844,9 @@ Nostr is used as transport.</string>
     <string name="feed_remove_from_channel">From the channel</string>
     <string name="feed_remove_everywhere">From the channel and this phone</string>
     <string name="feed_removed_packs">Packs deleted: %1$d</string>
+    <string name="relays_section_map">Working now</string>
+    <string name="relays_map_note">Relays the Alpha network map saw answering %1$s ago. The map is made by the project and read anonymously; your list changes only when you add one.</string>
+    <string name="relays_warn_map_down">Not answering on the Alpha network map either</string>
+    <string name="relays_hours">%1$d h</string>
+    <string name="relays_days">%1$d d</string>
 </resources>
