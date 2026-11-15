@@ -31,7 +31,7 @@ pub use callbacks::{AlphaMessengerCallback, CallbackDispatcher};
 // BLOCK K — CoreEvent must be in crate-root scope for the UDL scaffolding.
 pub use events::CoreEvent;
 pub use core::{
-    AlphaMessengerCore, ChatInfo, ExpiryPolicy, IdentityInfo, MessageInfo,
+    AlphaMessengerCore, AssistantConversation, ChatInfo, ExpiryPolicy, IdentityInfo, MessageInfo,
     MessengerError, MessageType, PeerProfile, ProfileInfo, RelayInfo,
     ReplicationObjectSpec, ReplicationOutcome, SearchHit,
 };

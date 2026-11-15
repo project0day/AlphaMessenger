@@ -74,8 +74,10 @@ object AnimatedEmoji {
     fun json(ctx: Context, code: String): String? = runCatching { File(dir(ctx), "$code.json").readText() }.getOrNull()
 
     /**
-     * Install the set the feed announces, if this phone does not have it yet.
-     * Tried at most every few minutes; a failure leaves the old set (or none).
+     * Install every set the feed announces, together: one folder, the older sets
+     * first, so where two sets draw the same emoji the newer one wins. Done again
+     * only when the announced sets change. Tried at most every few minutes; a
+     * failure leaves what is installed (or nothing).
      */
     suspend fun ensure(ctx: Context, repo: AlphaCoreRepository, force: Boolean = false) = withContext(Dispatchers.IO) {
         // Removed in settings: fetched again only when asked there.
@@ -87,42 +89,62 @@ object AnimatedEmoji {
             triedAt = System.currentTimeMillis()
             val feed = com.alphamessenger.ui.feed.FeedStore
             if (feed.posts.isEmpty()) feed.refresh(ctx, repo)
-            val ref = feed.posts.filter { it.set != null }.maxByOrNull { it.at }?.set
-            if (ref == null) {
+            val refs = announced()
+            if (refs.isEmpty()) {
                 // Not announced yet: look again soon, not after the long pause.
                 triedAt = System.currentTimeMillis() - RETRY_MS + NO_SET_RETRY_MS
                 return@withLock
             }
-            if (prefs(ctx).getString("ref", null) == ref && codes(ctx).isNotEmpty()) return@withLock
-            val path = repo.downloadMediaToCache(ref) ?: return@withLock
-            if (install(ctx, File(path))) {
-                prefs(ctx).edit().putString("ref", ref).apply()
+            if (installedRefs(ctx) == refs && codes(ctx).isNotEmpty()) return@withLock
+            val archives = refs.mapNotNull { ref -> repo.downloadMediaToCache(ref)?.let { File(it) } }
+            // A set that will not come now must not take the others down with it.
+            if (archives.isEmpty()) return@withLock
+            if (install(ctx, archives)) {
+                prefs(ctx).edit().putString("ref", if (archives.size == refs.size) refs.joinToString(" ") else "").apply()
                 _ready.value++
             }
         }
     }
 
-    /** Unpack [archive] beside the current set, then swap: a broken archive changes nothing. */
-    private fun install(ctx: Context, archive: File): Boolean {
+    /** The sets the feed announces, oldest first. */
+    private fun announced(): List<String> =
+        com.alphamessenger.ui.feed.FeedStore.posts.filter { it.set != null }.sortedBy { it.at }.mapNotNull { it.set }.distinct()
+
+    private fun installedRefs(ctx: Context): List<String> =
+        prefs(ctx).getString("ref", null).orEmpty().split(' ').filter { it.isNotBlank() }
+
+    /** Unpack [archives] (oldest first) into a fresh folder with one index, then swap: a broken archive changes nothing. */
+    private fun install(ctx: Context, archives: List<File>): Boolean {
         val fresh = File(ctx.filesDir, "$DIR.new").apply { deleteRecursively(); mkdirs() }
         var total = 0L
         var count = 0
-        val ok = runCatching {
-            ZipInputStream(com.alphamessenger.data.MediaVault.open(archive)).use { zip ->
-                while (true) {
-                    val e = zip.nextEntry ?: break
-                    // Only flat "<code>.json" names and the index: nothing can land outside the folder.
-                    if (e.isDirectory || !(NAME.matches(e.name) || e.name == INDEX)) continue
-                    if (++count > MAX_ENTRIES) error("too many entries")
-                    val bytes = readLimited(zip, MAX_ENTRY_BYTES) ?: error("entry too big")
-                    total += bytes.size
-                    if (total > MAX_TOTAL_BYTES) error("archive too big")
-                    File(fresh, e.name).writeBytes(bytes)
+        val merged = LinkedHashMap<String, org.json.JSONObject>()
+        var any = false
+        for (archive in archives) {
+            val ok = runCatching {
+                ZipInputStream(com.alphamessenger.data.MediaVault.open(archive)).use { zip ->
+                    while (true) {
+                        val e = zip.nextEntry ?: break
+                        // Only flat "<code>.json" names and the index: nothing can land outside the folder.
+                        if (e.isDirectory || !(NAME.matches(e.name) || e.name == INDEX)) continue
+                        if (++count > MAX_ENTRIES * 2) error("too many entries")
+                        val bytes = readLimited(zip, MAX_ENTRY_BYTES) ?: error("entry too big")
+                        total += bytes.size
+                        if (total > MAX_TOTAL_BYTES * 2) error("archives too big")
+                        if (e.name == INDEX) {
+                            val arr = org.json.JSONArray(String(bytes))
+                            for (i in 0 until arr.length()) arr.optJSONObject(i)?.let { o -> o.optString("c").takeIf { it.isNotBlank() }?.let { merged[it] = o } }
+                        } else File(fresh, e.name).writeBytes(bytes)
+                    }
                 }
-            }
-            count > 0
-        }.getOrDefault(false)
-        if (!ok) { fresh.deleteRecursively(); return false }
+            }.isSuccess
+            any = any || ok
+        }
+        if (!any || fresh.list().isNullOrEmpty()) { fresh.deleteRecursively(); return false }
+        // Codes a set brought without an index entry still show, in "objects".
+        if (merged.isNotEmpty()) fresh.list()?.filter { it != INDEX }?.map { it.removeSuffix(".json") }?.filter { it !in merged }
+            ?.forEach { merged[it] = org.json.JSONObject().put("c", it).put("g", "objects") }
+        if (merged.isNotEmpty()) File(fresh, INDEX).writeText(org.json.JSONArray(merged.values.toList()).toString())
         val old = File(ctx.filesDir, "$DIR.old").apply { deleteRecursively() }
         dir(ctx).renameTo(old)
         val swapped = fresh.renameTo(dir(ctx))
@@ -133,9 +155,10 @@ object AnimatedEmoji {
         return true
     }
 
-    /** The set on this phone (its ref), and the newest one the feed announces. */
-    fun installedRef(ctx: Context): String? = prefs(ctx).getString("ref", null)?.takeIf { codes(ctx).isNotEmpty() }
-    fun announcedRef(): String? = com.alphamessenger.ui.feed.FeedStore.posts.filter { it.set != null }.maxByOrNull { it.at }?.set
+
+    /** Is the set [ref] among those on this phone? */
+    fun has(ctx: Context, ref: String): Boolean = codes(ctx).isNotEmpty() && ref in installedRefs(ctx)
+    fun anyInstalled(ctx: Context): Boolean = codes(ctx).isNotEmpty()
 
     private val shown = java.util.Collections.synchronizedSet(HashSet<String>())
 

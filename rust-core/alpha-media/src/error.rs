@@ -32,6 +32,19 @@ pub enum MediaError {
     #[error("Download failed: {0}")]
     DownloadFailed(String),
 
+    /// The server answered that it does not hold the object (404 / 410).
+    #[error("Not on server: {0}")]
+    NotOnServer(String),
+
+    /// Every server that could hold the object answered that it does not:
+    /// the copies were removed. Not a network fault — retrying will not help.
+    #[error("Media is no longer stored on any server")]
+    Gone,
+
+    /// The file is only on a server the sender named, which is reached only through Tor.
+    #[error("Media is only on a server this user does not know")]
+    UnknownServer,
+
     /// Delete from Blossom relay failed.
     #[error("Delete failed: {0}")]
     DeleteFailed(String),

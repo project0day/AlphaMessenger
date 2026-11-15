@@ -189,7 +189,7 @@ async fn download_blob_locations(
     if locations.is_empty() {
         return Err(MediaError::NoChunkUrls);
     }
-    let n = locations.len();
+    let listed = locations.len();
 
     #[derive(Clone)]
     struct Source {
@@ -199,11 +199,24 @@ async fn download_blob_locations(
         discovered: Option<String>,
     }
     // Listed hints, round-robin from the chunk index so consecutive chunks
-    // hit different servers.
-    let mut sources: Vec<Source> = (0..n)
-        .map(|k| &locations[(start_at + k) % n])
+    // hit different servers. A server only the SENDER named is never contacted
+    // without Tor: whoever runs it would learn every reader's IP address.
+    // The copies on servers we know are found by content hash below.
+    let anonymous = blossom.via_tor();
+    let mut skipped_unknown = false;
+    let mut sources: Vec<Source> = (0..listed)
+        .map(|k| &locations[(start_at + k) % listed])
+        .filter(|l| {
+            let ok = anonymous || blossom.is_known(&l.url);
+            if !ok { skipped_unknown = true; }
+            ok
+        })
         .map(|l| Source { url: l.url.clone(), relay: l.relay.clone(), discovered: None })
         .collect();
+    let n = sources.len();
+    if skipped_unknown {
+        tracing::info!(target: "alpha_ffi", "CHUNK_UNKNOWN_SERVER skipped={} chunk={}", listed - n, start_at);
+    }
 
     // --- TRANSPORT V1 — replica discovery by object identity ---
     //
@@ -245,18 +258,22 @@ async fn download_blob_locations(
 
     // Fastest expected answer first: a listed hint that is slow or crowded
     // must not hold a chunk while a replica elsewhere answers at once.
+    if sources.is_empty() {
+        return Err(if skipped_unknown { MediaError::UnknownServer } else { MediaError::NoChunkUrls });
+    }
     let discovered = sources.len() - n;
     sources.sort_by_key(|s| expected_answer_ms(&s.url, s.discovered.is_some()));
     let hints: Vec<usize> = (0..sources.len()).filter(|&k| sources[k].discovered.is_none()).collect();
     // Launch plan: every source once, then the hints again (each repeat is a
     // FRESH connection) up to the retry budget.
-    let budget = MAX_CHUNK_ATTEMPTS.max(n) + discovered;
+    let budget = if hints.is_empty() { sources.len() } else { MAX_CHUNK_ATTEMPTS.max(n) + discovered };
     let plan: Vec<usize> = (0..budget)
         .map(|k| if k < sources.len() { k } else { hints[(k - sources.len()) % hints.len()] })
         .collect();
 
     let launch = |k: usize| {
-        let src = sources[plan[k]].clone();
+        let idx = plan[k];
+        let src = sources[idx].clone();
         // A repeat of an already-tried address waits a little first.
         let repeat = k >= sources.len();
         let attempt = k + 1;
@@ -276,9 +293,12 @@ async fn download_blob_locations(
                     "no answer in {}s", CHUNK_ATTEMPT_TIMEOUT.as_secs()
                 ))),
             };
-            (src, attempt, t0.elapsed(), host_wait, r)
+            (idx, src, attempt, t0.elapsed(), host_wait, r)
         }
     };
+    // Sources that answered "not here". Once every one has, the object is gone:
+    // retrying the same servers cannot bring it back.
+    let mut not_held: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
     // --- Hedged fetch ---
     //
@@ -296,7 +316,7 @@ async fn download_blob_locations(
         let hedge = tokio::time::sleep(hedge_delay());
         tokio::select! {
             done = inflight.next() => {
-                let Some((src, attempt, took, host_wait, result)) = done else { break };
+                let Some((idx, src, attempt, took, host_wait, result)) = done else { break };
                 match result {
                     Ok(d) => {
                         note_host(&src.url, HostOutcome::Served(took));
@@ -314,10 +334,19 @@ async fn download_blob_locations(
                     }
                     Err(e) => {
                         tracing::warn!(target: "alpha_ffi", "CHUNK_RETRY attempt={} waited_ms={} relay={} err={e}", attempt, took.as_millis(), src.relay);
-                        let missing = e.to_string().contains("404");
+                        let missing = matches!(e, MediaError::NotOnServer(_));
                         note_host(&src.url, if missing { HostOutcome::Missing } else { HostOutcome::Failed });
-                        if let (Some(base), Some(cid)) = (&src.discovered, &content_id) {
-                            blossom.discovery_note_missing(base, cid);
+                        if missing {
+                            // Only "not here" is remembered: a timeout says nothing about the object.
+                            if let (Some(base), Some(cid)) = (&src.discovered, &content_id) {
+                                blossom.discovery_note_missing(base, cid);
+                            }
+                            not_held.insert(idx);
+                            if not_held.len() == sources.len() {
+                                tracing::warn!(target: "alpha_ffi", "CHUNK_GONE chunk={} sources={} unknown={}", start_at, sources.len(), skipped_unknown);
+                                // Not on any server we know; the sender's own may still hold it.
+                                return Err(if skipped_unknown { MediaError::UnknownServer } else { MediaError::Gone });
+                            }
                         }
                         last_err = Some(e);
                         if next < plan.len() {

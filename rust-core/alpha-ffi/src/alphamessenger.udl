@@ -57,6 +57,8 @@ interface MessengerError {
     CryptoError(string description);
     NetworkError(string description);
     KeyPackageExhausted(string peer);
+    MediaGone();
+    MediaUnknownServer();
 };
 
 // Callback interface for receiving events from Rust
@@ -87,7 +89,7 @@ callback interface AlphaMessengerCallback {
     void on_join_requested(string chat_id, string requester_npub, string token);
     void on_member_leave_requested(string chat_id, string leaver_npub);
     void on_relay_status_change(string relay_url, string status);
-    void on_sync_state(u32 connected, u32 relays, boolean catching_up);
+    void on_sync_state(u32 connected, u32 relays, boolean catching_up, string link);
     // BLOCK K — one coalesced batch of CoreEvents (replaces the per-event flood).
     void on_events_batch(sequence<CoreEvent> events);
 };
@@ -159,6 +161,13 @@ dictionary SearchHit {
     string msg_type;
     string media_kind;
     string media_name;
+};
+
+dictionary AssistantConversation {
+    string chat_id;
+    string title;
+    string last_at;
+    u32 count;
 };
 
 dictionary ChatInfo {
@@ -383,6 +392,12 @@ interface AlphaMessengerCore {
     boolean alpha_feed_key_ok(string key);
     [Throws=MessengerError]
     void alpha_feed_publish(string key, string d, string content);
+    [Throws=MessengerError]
+    void alpha_catalog_publish(string key, string d, string content);
+    [Throws=MessengerError]
+    void alpha_feed_remove(string key, string d, u64 at);
+    [Throws=MessengerError]
+    string alpha_catalog_fetch();
     // Download a backup container from a known Blossom URL. Returns raw bytes
     // (header || ciphertext) — feed to import_backup with the Recovery Password.
     [Throws=MessengerError]
@@ -477,6 +492,12 @@ interface AlphaMessengerCore {
     string persist_outgoing_media_ref(string chat_id, string mls_ref, string media_type, string? caption, u32 ttl_secs, string? thread);
     [Throws=MessengerError]
     void download_media(string media_ref_json, string output_path);
+    // The user's own media servers, tried before the public ones.
+    sequence<string> own_media_servers();
+    [Throws=MessengerError]
+    void set_own_media_servers(sequence<string> urls);
+    // "" when the server stores and returns a test blob, else the reason.
+    string probe_media_server(string url);
     // The media vault key: received media is kept on disk sealed under it.
     bytes media_vault_key();
     [Throws=MessengerError]
@@ -554,6 +575,7 @@ interface AlphaMessengerCore {
     string sync_health_json();
     [Throws=MessengerError]
     void force_reconnect();
+    void reserve_relay_changed();
     // The device's network as the OS reports it (gained / switched / lost).
     [Throws=MessengerError]
     void set_network_available(boolean available);
@@ -597,6 +619,12 @@ interface AlphaMessengerCore {
     string insert_assistant_message(string chat_id, string body, string? id);
     [Throws=MessengerError]
     string insert_assistant_media(string chat_id, string file_path, string media_type, string? caption, string? meta_json);
+    [Throws=MessengerError]
+    boolean assistant_new_conversation(string profile_id);
+    [Throws=MessengerError]
+    void assistant_open_conversation(string profile_id, string chat_id);
+    [Throws=MessengerError]
+    sequence<AssistantConversation> assistant_conversations(string profile_id);
 
     // Own profile (local-only for now; peer propagation comes in 8.8 v2).
     [Throws=MessengerError]

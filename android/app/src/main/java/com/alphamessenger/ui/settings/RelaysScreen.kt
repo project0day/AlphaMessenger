@@ -183,7 +183,10 @@ fun RelaysScreen(
             )
         }
         OptionNote(stringResource(R.string.relays_share_note))
-        if (ui.relays.isEmpty()) OptionNote(stringResource(R.string.relays_empty))
+        when {
+            ui.relays.isEmpty() -> OptionNote(stringResource(R.string.relays_empty))
+            ui.relays.none { it.isEnabled } -> OptionNote(stringResource(R.string.relays_all_off))
+        }
 
         if (presets.isNotEmpty()) {
             OptionSection(stringResource(R.string.relays_section_curated))
@@ -194,6 +197,8 @@ fun RelaysScreen(
                 }
             }
         }
+
+        MediaServersSection(viewModel.repository, colors)
 
         OptionSection(stringResource(R.string.relays_section_anonymity))
         OptionGroup {
@@ -278,6 +283,88 @@ fun RelaysScreen(
                 }
             },
             colors = colors,
+        )
+    }
+}
+
+// --- Own media servers ---
+
+/** The user's own media servers: new files land there first, the public ones keep copies too. */
+@Composable
+private fun MediaServersSection(repository: com.alphamessenger.data.AlphaCoreRepository, colors: AlphaColorScheme) {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var servers by remember { mutableStateOf<List<String>>(emptyList()) }
+    var adding by remember { mutableStateOf(false) }
+    var url by remember { mutableStateOf("") }
+    var checking by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    androidx.compose.runtime.LaunchedEffect(Unit) { servers = repository.ownMediaServers() }
+
+    OptionSection(stringResource(R.string.media_servers_section))
+    OptionGroup {
+        servers.forEach { s ->
+            OptionRow(
+                title = s.removePrefix("https://"),
+                icon = AlphaIcons.Outlined.Storage,
+                chevron = false,
+                trailing = {
+                    IconButton(onClick = {
+                        scope.launch { repository.setOwnMediaServers(servers - s); servers = repository.ownMediaServers() }
+                    }) { Icon(AlphaIcons.Outlined.Delete, stringResource(R.string.common_delete), tint = colors.textMuted) }
+                },
+            )
+            OptionDivider()
+        }
+        OptionRow(
+            title = stringResource(R.string.media_servers_add),
+            icon = AlphaIcons.Outlined.Add,
+            chevron = false,
+            onClick = { url = "https://"; error = null; adding = true },
+        )
+    }
+    OptionNote(stringResource(R.string.media_servers_note))
+
+    if (adding) {
+        AlertDialog(
+            onDismissRequest = { if (!checking) adding = false },
+            containerColor = colors.bgSecondary,
+            title = { Text(stringResource(R.string.media_servers_add), color = colors.textPrimary) },
+            text = {
+                Column {
+                    BasicTextField(
+                        value = url, onValueChange = { url = it.trim(); error = null }, singleLine = true,
+                        textStyle = TextStyle(color = colors.textPrimary, fontSize = 15.sp, fontFamily = FontFamily.Monospace),
+                        cursorBrush = androidx.compose.ui.graphics.SolidColor(colors.accent),
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(colors.bgTertiary)
+                            .padding(horizontal = 12.dp, vertical = 12.dp),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        error?.let { stringResource(R.string.media_servers_failed, it) } ?: stringResource(R.string.media_servers_check_hint),
+                        color = if (error != null) colors.danger else colors.textMuted, fontSize = 12.sp, lineHeight = 16.sp,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = !checking && url.length > 8, onClick = {
+                    checking = true
+                    scope.launch {
+                        val why = repository.probeMediaServer(url)
+                        checking = false
+                        if (why.isEmpty()) {
+                            repository.setOwnMediaServers(listOf(url) + servers)
+                            servers = repository.ownMediaServers()
+                            adding = false
+                        } else error = why
+                    }
+                }) {
+                    if (checking) CircularProgressIndicator(strokeWidth = 2.dp, color = colors.accent, modifier = Modifier.size(18.dp))
+                    else Text(stringResource(R.string.media_servers_check), color = colors.accent)
+                }
+            },
+            dismissButton = {
+                TextButton(enabled = !checking, onClick = { adding = false }) { Text(stringResource(R.string.common_cancel), color = colors.textMuted) }
+            },
         )
     }
 }

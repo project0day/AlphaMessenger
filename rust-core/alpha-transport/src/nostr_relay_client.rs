@@ -247,6 +247,9 @@ pub struct NostrRelayClient {
     supervising: Arc<std::sync::atomic::AtomicBool>,
     /// Recipient relays connected write-only, per connection: when last used.
     write_only: Arc<std::sync::Mutex<std::collections::HashMap<(u64, String), std::time::Instant>>>,
+    /// Relays of our groups we read from (group events only) because the other
+    /// members do not write where we listen.
+    listen_extra: Arc<std::sync::RwLock<Vec<String>>>,
     publish_stats: Arc<std::sync::Mutex<std::collections::HashMap<String, PublishStats>>>,
 }
 
@@ -530,6 +533,13 @@ impl Conn {
         self.client.pool().add_relay(url, self.relay_options(nostr_sdk::pool::RelayServiceFlags::default())).await
     }
 
+    /// Read only (a relay of our group's we only listen on).
+    pub async fn add_read_relay(&self, url: &str) -> std::result::Result<bool, nostr_sdk::pool::pool::Error> {
+        use nostr_sdk::pool::RelayServiceFlags as F;
+        if switched_off(url) { return Ok(false); }
+        self.client.pool().add_relay(url, self.relay_options(F::PING | F::READ)).await
+    }
+
     /// Write only (a recipient's relay we don't otherwise use).
     pub async fn add_write_relay(&self, url: &str) -> std::result::Result<bool, nostr_sdk::pool::pool::Error> {
         use nostr_sdk::pool::RelayServiceFlags as F;
@@ -560,6 +570,35 @@ const RESTART_WAIT: Duration = Duration::from_secs(1);
 
 /// How often the parking supervisor looks at the pools (local state only).
 const PARKING_TICK: Duration = Duration::from_secs(5);
+
+/// The project's own relay: joined only while the user has no relay that works,
+/// so a phone never loses contact because every public relay is gone or deleted.
+pub const RESERVE_RELAY: &str = "wss://rs-nostr-relay.rs-nostr-relay.workers.dev";
+/// At most this many group relays read beside our own.
+const MAX_LISTEN_EXTRA: usize = 4;
+/// How long none of the user's relays may be down before the reserve joins.
+const RESERVE_AFTER: Duration = Duration::from_secs(90);
+/// How long a user relay must stay up before the reserve leaves again.
+const RESERVE_HOLD: Duration = Duration::from_secs(600);
+
+static RESERVE_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// (none of the user's relays up since, one of them up since).
+static RESERVE_CLOCK: std::sync::Mutex<(Option<std::time::Instant>, Option<std::time::Instant>)> =
+    std::sync::Mutex::new((None, None));
+
+/// We are on the reserve relay: it is in the pool, but it is not the user's.
+pub fn reserve_active() -> bool {
+    RESERVE_ON.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn is_reserve(url: &str) -> bool {
+    relay_key(url) == relay_key(RESERVE_RELAY)
+}
+
+/// Ours, not the user's: hidden from their list and never saved into it.
+fn reserve_slot(url: &str) -> bool {
+    reserve_active() && is_reserve(url)
+}
 /// One probe's connect deadline.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A recipient relay connected for a send is let go after this long unused.
@@ -643,6 +682,7 @@ impl NostrRelayClient {
             parking: Arc::new(std::sync::Mutex::new(Default::default())),
             supervising: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             write_only: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            listen_extra: Arc::new(std::sync::RwLock::new(Vec::new())),
             publish_stats: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -701,6 +741,7 @@ impl NostrRelayClient {
             parking: Arc::new(std::sync::Mutex::new(Default::default())),
             supervising: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             write_only: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            listen_extra: Arc::new(std::sync::RwLock::new(Vec::new())),
             publish_stats: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -922,11 +963,68 @@ impl NostrRelayClient {
         let urls = self.relay_urls.read().await;
         let flags = self.relay_flags.read().await;
         urls.iter()
+            .filter(|url| !reserve_slot(url))
             .map(|url| {
                 let f = flags.get(url).copied().unwrap_or(RelayFlags::new(true, true, true));
                 (url.clone(), f.read, f.write, f.enabled)
             })
             .collect()
+    }
+
+    /// Join or leave the reserve relay. The user's list rules: none at all (all
+    /// deleted) → join at once; all switched off → never (a choice to be
+    /// offline); some on but none reachable for [RESERVE_AFTER] → join; leave
+    /// once one has stayed up for [RESERVE_HOLD]. Returns the new state on a change.
+    pub async fn reserve_tick(&self) -> Option<bool> {
+        if !self.network_available() {
+            return None;
+        }
+        let on = reserve_active();
+        let flags = self.relay_flags.read().await.clone();
+        let own: Vec<String> = self.relay_urls.read().await.iter().filter(|u| !reserve_slot(u)).cloned().collect();
+        let enabled: Vec<String> = own.iter().filter(|u| flags.get(*u).map(|f| f.enabled).unwrap_or(true)).cloned().collect();
+        let want = if own.is_empty() {
+            true
+        } else if enabled.is_empty() || enabled.iter().any(|u| is_reserve(u)) {
+            false
+        } else {
+            let pool = self.client.pool();
+            let mut up = false;
+            for u in &enabled {
+                if let Ok(ru) = nostr::RelayUrl::parse(u) {
+                    if let Ok(r) = pool.relay(&ru).await {
+                        if r.status() == nostr_sdk::RelayStatus::Connected { up = true; break; }
+                    }
+                }
+            }
+            let now = std::time::Instant::now();
+            let mut clock = RESERVE_CLOCK.lock().ok()?;
+            if up {
+                clock.0 = None;
+                let since = *clock.1.get_or_insert(now);
+                on && now.duration_since(since) < RESERVE_HOLD
+            } else {
+                clock.1 = None;
+                let since = *clock.0.get_or_insert(now);
+                on || now.duration_since(since) >= RESERVE_AFTER
+            }
+        };
+        if want == on {
+            return None;
+        }
+        if want {
+            if let Err(e) = self.add_relay_with_flags(RESERVE_RELAY, true, true, true).await {
+                tracing::warn!(target: "TRANSPORT", "RESERVE join failed: {e}");
+                return None;
+            }
+            RESERVE_ON.store(true, std::sync::atomic::Ordering::SeqCst);
+            tracing::warn!(target: "TRANSPORT", "RESERVE joined: no relay of the user's works");
+        } else {
+            RESERVE_ON.store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = self.remove_relay(RESERVE_RELAY).await;
+            tracing::warn!(target: "TRANSPORT", "RESERVE left: the user's relays work again");
+        }
+        Some(want)
     }
 
     // -----------------------------------------------------------------------
@@ -1226,7 +1324,8 @@ impl NostrRelayClient {
         if idle.is_empty() {
             return;
         }
-        let own: std::collections::HashSet<String> = self.relay_urls.read().await.iter().map(|u| relay_key(u)).collect();
+        let mut own: std::collections::HashSet<String> = self.relay_urls.read().await.iter().map(|u| relay_key(u)).collect();
+        own.extend(self.listen_extra().iter().map(|u| relay_key(u)));
         for (lane, url) in idle {
             if own.contains(&url) {
                 continue;
@@ -1417,6 +1516,12 @@ impl NostrRelayClient {
         write: bool,
         enabled: bool,
     ) -> Result<()> {
+        // The user adds the reserve relay themselves: from now on it is theirs.
+        if is_reserve(url) {
+            RESERVE_ON.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        // A group relay we only read becomes a full one of the user's.
+        self.forget_listen_extra(url).await;
         {
             let mut urls = self.relay_urls.write().await;
             if urls.iter().any(|u| u == url) {
@@ -1536,8 +1641,21 @@ impl NostrRelayClient {
             .collect()
     }
 
+    /// Drop [url] from the group relays we only read (the next route refresh may add it back).
+    async fn forget_listen_extra(&self, url: &str) {
+        let had = self.listen_extra.write().map(|mut l| {
+            let n = l.len();
+            l.retain(|e| relay_key(e) != relay_key(url));
+            n != l.len()
+        }).unwrap_or(false);
+        if had {
+            let _ = self.groups.remove_relay(url).await;
+        }
+    }
+
     /// Remove a relay URL at runtime.
     pub async fn remove_relay(&self, url: &str) -> Result<()> {
+        self.forget_listen_extra(url).await;
         {
             let mut urls = self.relay_urls.write().await;
             urls.retain(|u| u != url);
@@ -2004,6 +2122,44 @@ impl NostrRelayClient {
         self.inbox_routes.read().ok().and_then(|i| i.get(&pk.to_hex()).cloned()).unwrap_or_default()
     }
 
+    /// Relays of our groups we read from, group events only.
+    pub fn listen_extra(&self) -> Vec<String> {
+        self.listen_extra.read().map(|l| l.clone()).unwrap_or_default()
+    }
+
+    /// Read group events also on [urls]: the other members write there, not where
+    /// we listen. The group connection joins them read-only. True on a change
+    /// (the caller resubscribes).
+    pub async fn set_listen_extra(&self, urls: Vec<String>) -> bool {
+        let own: std::collections::HashSet<String> = self.relay_urls.read().await.iter().map(|u| relay_key(u)).collect();
+        let mut next: Vec<String> = Vec::new();
+        for u in urls {
+            let k = relay_key(&u);
+            if u.starts_with("wss://") && !own.contains(&k) && !switched_off(&u) && !next.iter().any(|n| relay_key(n) == k) {
+                next.push(u);
+            }
+        }
+        next.truncate(MAX_LISTEN_EXTRA);
+        let old = self.listen_extra();
+        let same = old.len() == next.len() && old.iter().all(|o| next.iter().any(|n| relay_key(n) == relay_key(o)));
+        if same {
+            return false;
+        }
+        if let Ok(mut l) = self.listen_extra.write() { *l = next.clone(); }
+        for u in &old {
+            if !next.iter().any(|n| relay_key(n) == relay_key(u)) {
+                let _ = self.groups.remove_relay(u.as_str()).await;
+            }
+        }
+        for u in &next {
+            if self.groups.add_read_relay(u).await.unwrap_or(false) {
+                let _ = self.groups.connect_relay(u.as_str()).await;
+            }
+        }
+        tracing::info!(target: "TRANSPORT", "group relays read: {}", next.len());
+        true
+    }
+
     /// Relays the other members of [group_id] listen on.
     pub fn group_route(&self, group_id: &[u8]) -> Vec<String> {
         self.group_routes.read().ok().and_then(|g| g.get(group_id).cloned()).unwrap_or_default()
@@ -2267,25 +2423,38 @@ impl NostrRelayClient {
         // Each connection asks only for its own: the identity one for our gift
         // wraps, the group one for group events and presence, each persona for
         // its inbox. No single REQ ties our npub to our groups or personas.
-        let urls: Vec<String> = match &only {
-            Some(urls) if !urls.is_empty() => urls.clone(),
+        let extra = self.listen_extra();
+        let is_extra = |u: &String| extra.iter().any(|e| relay_key(e) == relay_key(u));
+        let (urls, extra_targets): (Vec<String>, Vec<String>) = match &only {
+            Some(urls) if !urls.is_empty() => urls.iter().cloned().partition(|u| !is_extra(u)),
             _ => {
                 let flags = self.relay_flags.read().await.clone();
-                self.relay_urls.read().await.iter()
+                let own: Vec<String> = self.relay_urls.read().await.iter()
                     .filter(|u| flags.get(*u).map(|f| f.enabled && f.read).unwrap_or(true))
-                    .cloned().collect()
+                    .cloned().collect();
+                let more = extra.iter().filter(|e| !own.iter().any(|o| relay_key(o) == relay_key(e))).cloned().collect();
+                (own, more)
             }
         };
         let gift_id = SubscriptionId::new(SUB_IDENTITY);
         let gift_filter = Filter::new().kind(Kind::GiftWrap).pubkey(*self_pubkey);
-        self.subscribe_lane(&self.client, &gift_id, &urls, vec![gift_filter]).await?;
+        if !urls.is_empty() {
+            self.subscribe_lane(&self.client, &gift_id, &urls, vec![gift_filter]).await?;
+        }
 
         let group_id = SubscriptionId::new(SUB_GROUPS);
+        let extra_filter = group_filter.clone();
         let rest: Vec<Filter> = group_filter.into_iter().chain(presence_filter).collect();
         if rest.is_empty() {
             self.groups.unsubscribe(&group_id).await;
-        } else {
+        } else if !urls.is_empty() {
             self.subscribe_lane(&self.groups, &group_id, &urls, rest).await?;
+        }
+        // The group's relays we only read: group events, nothing that names us.
+        if let (Some(f), false) = (extra_filter, extra_targets.is_empty()) {
+            if let Err(e) = self.subscribe_lane(&self.groups, &group_id, &extra_targets, vec![f]).await {
+                tracing::warn!(target: "TRANSPORT", "group-relay subscription failed: {e}");
+            }
         }
 
         self.sync_personas().await;
@@ -2810,12 +2979,14 @@ impl NostrRelayClient {
             if group_tags.is_empty() || groups_refused { return Ok(Vec::new()); }
             self.groups.fetch_events_from([relay_url], f_445, timeout).await.map(|e| e.to_vec())
         };
-        let wraps_refused = refused(SUB_IDENTITY);
+        // A group relay we only read: group events only, our inboxes stay unasked there.
+        let group_relay_only = self.listen_extra().iter().any(|e| relay_key(e) == relay_key(relay_url));
+        let wraps_refused = refused(SUB_IDENTITY) || group_relay_only;
         let q_1059 = async {
             if wraps_refused { return Ok(Vec::new()); }
             self.client.fetch_events_from([relay_url], wraps_for(*self_pubkey), timeout).await.map(|e| e.to_vec())
         };
-        let personas: Vec<(PublicKey, Conn)> = if refused(SUB_PERSONA) {
+        let personas: Vec<(PublicKey, Conn)> = if refused(SUB_PERSONA) || group_relay_only {
             Vec::new()
         } else {
             self.personas.lock().map(|p| {

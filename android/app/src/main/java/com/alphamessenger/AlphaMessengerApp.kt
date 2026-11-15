@@ -63,6 +63,7 @@ class AlphaMessengerApp : Application(), Configuration.Provider, coil3.Singleton
 
     override fun onCreate() {
         super.onCreate()
+        com.alphamessenger.ui.theme.PatternIcons.init(this)
         // The Tor process hosts only Tor: none of the app starts there.
         if (processName().endsWith(":tor")) return
 

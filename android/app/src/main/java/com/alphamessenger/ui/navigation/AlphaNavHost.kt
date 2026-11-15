@@ -392,6 +392,7 @@ fun AlphaNavHost(
                 onCreateStory = { navController.navigate(AlphaRoute.StoryCreate.route) },
                 onOpenChatAt = { id, msg -> navController.navigate(AlphaRoute.Chat.create(id, msg)) },
                 onOpenFound = { id, msg, q -> navController.navigate(AlphaRoute.Chat.found(id, msg, q)) },
+                onOpenRelays = { navController.navigate(AlphaRoute.SetRelays.route) },
             )
         }
 

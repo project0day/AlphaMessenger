@@ -311,13 +311,14 @@ class CallbackBridge @Inject constructor() : AlphaMessengerCallback {
     /** The receiving side's progress as the core last reported it; null until the first report. */
     val syncState: StateFlow<SyncState?> = _syncState.asStateFlow()
 
-    override fun `onSyncState`(connected: kotlin.UInt, relays: kotlin.UInt, catchingUp: kotlin.Boolean) {
-        _syncState.value = SyncState(connected.toInt(), relays.toInt(), catchingUp)
+    override fun `onSyncState`(connected: kotlin.UInt, relays: kotlin.UInt, catchingUp: kotlin.Boolean, link: kotlin.String) {
+        _syncState.value = SyncState(connected.toInt(), relays.toInt(), catchingUp, link)
     }
 }
 
-/** Live relays out of the enabled ones, and whether a catch-up is running. */
-data class SyncState(val connected: Int, val relays: Int, val catchingUp: Boolean)
+/** Live relays out of the enabled ones, whether a catch-up is running, and the
+ *  user's relays: "ok", "off" (all switched off), "none" (all deleted), "reserve". */
+data class SyncState(val connected: Int, val relays: Int, val catchingUp: Boolean, val link: String = "ok")
 
 /**
  * A peer's transient activity: `state` is "typing", "recording" or "paused"

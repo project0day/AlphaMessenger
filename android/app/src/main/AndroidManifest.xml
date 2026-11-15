@@ -85,6 +85,10 @@
 
         <!-- Tor ends its process on a fatal error; that process is not ours. -->
         <service
+            android:name=".ui.feed.PackPublishService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+        <service
             android:name="org.torproject.jni.TorService"
             android:process=":tor"
             android:exported="false" />

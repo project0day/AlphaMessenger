@@ -159,7 +159,7 @@ mod tests {
         fn on_join_requested(&self, _c: String, _r: String, _t: String) {}
         fn on_member_leave_requested(&self, _c: String, _l: String) {}
         fn on_relay_status_change(&self, _r: String, _s: String) {}
-        fn on_sync_state(&self, _c: u32, _r: u32, _u: bool) {}
+        fn on_sync_state(&self, _c: u32, _r: u32, _u: bool, _l: String) {}
         fn on_events_batch(&self, events: Vec<CoreEvent>) {
             self.batches.fetch_add(1, Ordering::SeqCst);
             self.events.fetch_add(events.len() as u64, Ordering::SeqCst);

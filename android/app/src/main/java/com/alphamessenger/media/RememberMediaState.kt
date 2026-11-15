@@ -201,6 +201,10 @@ private fun resolveSingle(
         if (download.isPaused) return state(TransferStage.Paused, download.progress)
         if (download.isActive) return state(TransferStage.Downloading, download.progress)
         if (download.isFailed) return state(TransferStage.Failed)
+        // Our own original still plays even when the servers dropped their copies.
+        (download.state as? TransferState.Gone)?.takeIf { ownLocalPath == null }?.let {
+            return state(if (it.unknownServer) TransferStage.UnknownServer else TransferStage.Gone)
+        }
         if (download.isReady) {
             return state(TransferStage.Ready, localPath = download.localPath)
         }
@@ -299,6 +303,7 @@ private fun albumStage(
         is TransferState.Paused -> TransferStage.Paused to s.progress
         is TransferState.WaitingNetwork -> TransferStage.WaitingNetwork to s.progress
         is TransferState.Failed -> TransferStage.Failed to null
+        is TransferState.Gone -> (if (s.unknownServer) TransferStage.UnknownServer else TransferStage.Gone) to null
         is TransferState.Idle ->
             if (!hasUpload && group.completed < group.items.size)
                 TransferStage.NeedDownload to null

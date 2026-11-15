@@ -17,7 +17,12 @@ pub(super) fn own_listen_relays(conn: &rusqlite::Connection) -> Vec<String> {
     let list: Vec<PersistedRelay> = KeyValueRepo::get(conn, KV_RELAYS).ok().flatten()
         .and_then(|j| serde_json::from_str(&j).ok())
         .unwrap_or_default();
-    peer_relays::clean(list.into_iter().filter(|r| r.enabled && r.read).map(|r| r.url))
+    let mut urls: Vec<String> = list.into_iter().filter(|r| r.enabled && r.read).map(|r| r.url).collect();
+    // On the reserve relay we listen there too: contacts must write there.
+    if alpha_transport::nostr_relay_client::reserve_active() {
+        urls.push(alpha_transport::nostr_relay_client::RESERVE_RELAY.to_string());
+    }
+    peer_relays::clean(urls)
 }
 
 fn hex_of(key: &str) -> Option<String> {
@@ -26,15 +31,22 @@ fn hex_of(key: &str) -> Option<String> {
     nostr::PublicKey::from_bech32(k).ok().map(|p| p.to_hex())
 }
 
-/// Rebuild the transport's routes from what contacts told us and who is in which group.
-pub(super) fn refresh(db: &DatabasePool, transport: &NostrRelayClient) {
+/// Group relays we read beside our own: at most this many per group.
+const LISTEN_PER_GROUP: usize = 2;
+
+/// Rebuild the transport's routes from what contacts told us and who is in which
+/// group. Returns the group relays we must also read: those of groups whose
+/// members, counting the same way we do, would not write where we listen.
+pub(super) fn refresh(db: &DatabasePool, transport: &NostrRelayClient) -> Vec<String> {
     let conn = db.connection();
     let own = own_listen_relays(&conn);
     let ours = |u: &str| own.iter().any(|o| o.eq_ignore_ascii_case(u.trim_end_matches('/')));
-    let inboxes: std::collections::HashMap<String, Vec<String>> = peer_relays::all(&conn).into_iter()
-        .map(|(pk, list)| (pk, list.into_iter().filter(|u| !ours(u)).collect::<Vec<_>>()))
+    let raw = peer_relays::all(&conn);
+    let inboxes: std::collections::HashMap<String, Vec<String>> = raw.iter()
+        .map(|(pk, list)| (pk.clone(), list.iter().filter(|u| !ours(u)).cloned().collect::<Vec<_>>()))
         .filter(|(_, l)| !l.is_empty())
         .collect();
+    let raw: std::collections::HashMap<String, Vec<String>> = raw.into_iter().collect();
     let mut members: std::collections::HashMap<String, std::collections::HashSet<String>> = Default::default();
     for (k, v) in KeyValueRepo::list_prefix(&conn, "dir:").unwrap_or_default() {
         let Some(chat) = k.strip_prefix("dir:").and_then(|r| r.split(':').next()) else { continue };
@@ -42,6 +54,7 @@ pub(super) fn refresh(db: &DatabasePool, transport: &NostrRelayClient) {
     }
     drop(conn);
     let mut groups = std::collections::HashMap::new();
+    let mut listen: std::collections::HashMap<String, usize> = Default::default();
     for (chat, people) in members {
         let Ok(gid) = hex::decode(&chat) else { continue };
         let mut count: std::collections::HashMap<String, usize> = Default::default();
@@ -51,10 +64,28 @@ pub(super) fn refresh(db: &DatabasePool, transport: &NostrRelayClient) {
         let mut ranked: Vec<(String, usize)> = count.into_iter().collect();
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let route: Vec<String> = ranked.into_iter().take(MAX_GROUP_ROUTE).map(|(u, _)| u).collect();
+        // What the others send to: the top of ALL members' relays, ours counted
+        // too. None of ours among them → we read the group's busiest ones.
+        let mut all: std::collections::HashMap<String, usize> = Default::default();
+        for pk in &people {
+            for u in raw.get(pk).into_iter().flatten() { *all.entry(u.trim_end_matches('/').to_ascii_lowercase()).or_default() += 1; }
+        }
+        for o in &own { *all.entry(o.trim_end_matches('/').to_ascii_lowercase()).or_default() += 1; }
+        let mut all: Vec<(String, usize)> = all.into_iter().collect();
+        all.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let covered = all.iter().take(MAX_GROUP_ROUTE).any(|(u, _)| ours(u));
+        if !covered && !own.is_empty() {
+            for u in route.iter().take(LISTEN_PER_GROUP) {
+                *listen.entry(u.clone()).or_default() += 1;
+            }
+        }
         if !route.is_empty() { groups.insert(gid, route); }
     }
     tracing::info!(target: "TRANSPORT", "relay routes: {} people, {} chats", inboxes.len(), groups.len());
     transport.set_relay_routes(inboxes, groups);
+    let mut listen: Vec<(String, usize)> = listen.into_iter().collect();
+    listen.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    listen.into_iter().map(|(u, _)| u).collect()
 }
 
 impl AlphaMessengerCore {
@@ -124,8 +155,28 @@ mod tests {
         KeyValueRepo::set(&conn, "dir:ab:sig2", &b).unwrap();
         drop(conn);
         let t = NostrRelayClient::new(vec!["wss://on.example".to_string()]);
-        refresh(&db, &t);
+        // A member shares our relay and the group is small: nothing extra to read.
+        assert!(refresh(&db, &t).is_empty());
         assert_eq!(t.group_route(&[0xab]), vec!["wss://shared.example", "wss://b.example"]);
+
+        // A big group "cd" where nobody else uses our relay: we read its busiest ones.
+        let conn = db.connection();
+        let relays = ["wss://p.example", "wss://q.example", "wss://r.example", "wss://s.example", "wss://t.example"];
+        for (i, rl) in relays.iter().enumerate() {
+            for j in 0..3 {
+                let pk = format!("{:064x}", 0xc0de00 + i * 16 + j);
+                peer_relays::set(&conn, &pk, &[rl.to_string()]);
+                KeyValueRepo::set(&conn, &format!("dir:cd:s{i}{j}"), &pk).unwrap();
+            }
+        }
+        // p is the busiest: one more member there.
+        let extra_pk = "9".repeat(64);
+        peer_relays::set(&conn, &extra_pk, &["wss://p.example".into()]);
+        KeyValueRepo::set(&conn, "dir:cd:sx", &extra_pk).unwrap();
+        drop(conn);
+        let listen = refresh(&db, &t);
+        assert_eq!(listen.len(), 2);
+        assert_eq!(listen[0], "wss://p.example");
         let pk = nostr::PublicKey::from_hex(&a).ok();
         if let Some(pk) = pk { assert_eq!(t.inbox_route(&pk), vec!["wss://shared.example"]); }
         let _ = std::fs::remove_dir_all(&dir);

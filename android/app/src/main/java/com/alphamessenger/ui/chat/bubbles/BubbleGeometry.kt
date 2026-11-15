@@ -12,7 +12,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.graphics.addOutline
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.unit.Dp
@@ -69,7 +71,18 @@ private fun Modifier.bubbleShellOf(
             com.alphamessenger.ui.chat.media.MediaSourceRegistry.put(registerId, it.boundsInWindow())
         } else Modifier,
     )
-    .clip(bubbleShape)
+    .clipDrawing(bubbleShape)
     .then(if (fill != null) Modifier.background(fill) else Modifier.background(bubbleColor))
     .combinedClickable(onClick = onTap, onLongClick = onLongPress)
     .padding(contentPadding)
+
+/**
+ * Clips what is drawn to [shape] without a clipping layer. A layer clip also
+ * decides touches by the shape's path, and on a bubble many screens tall that
+ * test misses: every tap inside a long text ("Read more", links) fell through
+ * to the row and opened the menu. Touches are judged by the plain bounds here.
+ */
+private fun Modifier.clipDrawing(shape: Shape): Modifier = drawWithCache {
+    val path = androidx.compose.ui.graphics.Path().apply { addOutline(shape.createOutline(size, layoutDirection, this@drawWithCache)) }
+    onDrawWithContent { clipPath(path) { this@onDrawWithContent.drawContent() } }
+}

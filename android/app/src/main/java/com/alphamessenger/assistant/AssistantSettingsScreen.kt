@@ -372,7 +372,11 @@ fun AssistantProfileScreen(
                 TextButton(onClick = {
                     confirmDelete = false
                     AssistantStore.delete(existing.id)
-                    scope.launch { runCatching { repository.deleteChat(existing.chatId) }; onBack() }
+                    scope.launch {
+                        runCatching { repository.assistantConversations(existing.id).forEach { repository.deleteChat(it.chatId) } }
+                        runCatching { repository.deleteChat(existing.chatId) }
+                        onBack()
+                    }
                 }) { Text(stringResource(R.string.common_delete), color = cs.danger) }
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text(stringResource(R.string.common_cancel), color = cs.textMuted) } },

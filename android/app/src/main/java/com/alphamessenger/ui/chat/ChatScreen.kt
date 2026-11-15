@@ -1951,6 +1951,8 @@ fun ChatScreen(
                 secret = isSecret,
                 isSaved = isSavedChat || isAssistant,
                 assistant = isAssistant,
+                assistantVm = if (isAssistant) viewModel else null,
+                assistantMemory = assistantProfile?.memory == true,
                 showCalls = state.channel == null && !isSecret,
                 showVoice = if (state.isGroup) state.groupCalls else state.peerCanCall,
                 showVideo = if (state.isGroup) state.groupVideoCalls else state.peerCanVideo,
@@ -4314,10 +4316,8 @@ fun ChatScreen(
 
     // --- Forward target picker ---
     forwardIds?.let { ids ->
-        ChatPickerSheet(
-            chats = state.forwardTargets,
-            profiles = state.forwardTargetProfiles,
-            channelIds = state.forwardChannelIds,
+        ForwardTargetsPicker(
+            viewModel = viewModel,
             summary = forwardSummary(state.messages.filter { it.id in ids }),
             colors = colors,
             onDismiss = { forwardIds = null },
@@ -4704,6 +4704,9 @@ private fun ChatTopBar(
     isSaved: Boolean = false,
     /** The assistant's own chat: its avatar and the verified seal. */
     assistant: Boolean = false,
+    /** A bot's chat: its conversations live here, not in the (already huge) screen function. */
+    assistantVm: ChatViewModel? = null,
+    assistantMemory: Boolean = false,
     /** Call buttons (not in Saved Messages, not in a channel). */
     showCalls: Boolean = true,
     /** The peer's privacy rules let us call (voice / video). */
@@ -4711,6 +4714,24 @@ private fun ChatTopBar(
     showVideo: Boolean = true,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    var conversationsOpen by remember { mutableStateOf(false) }
+    val barCtx = androidx.compose.ui.platform.LocalContext.current
+    val onNewConversation: () -> Unit = {
+        assistantVm?.newAssistantConversation { moved ->
+            if (!moved) android.widget.Toast.makeText(barCtx, barCtx.getString(R.string.assistant_already_new), android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+    val onConversations: () -> Unit = { conversationsOpen = true }
+    if (conversationsOpen && assistantVm != null) {
+        AssistantConversationsSheet(
+            viewModel = assistantVm,
+            memoryOn = assistantMemory,
+            colors = colors,
+            onDismiss = { conversationsOpen = false },
+            onNew = { conversationsOpen = false; onNewConversation() },
+            onOpen = { id -> conversationsOpen = false; assistantVm.openAssistantConversation(id) },
+        )
+    }
  // Compose 1:1 with other messengers layout:
     //  [<back] [avatar] [title+subtitle (clickable)] ... [video] [voice] [⋮]
     // Built as a manual Row instead of TopAppBar so we can tighten the
@@ -4843,6 +4864,15 @@ private fun ChatTopBar(
                     )
                 }
             }
+            if (assistant) {
+                IconButton(onClick = onNewConversation, modifier = Modifier.size(44.dp)) {
+                    Icon(
+                        AlphaIcons.Outlined.AddComment,
+                        contentDescription = stringResource(R.string.assistant_new_conversation),
+                        tint = colors.textSecondary,
+                    )
+                }
+            }
             Box {
                 IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(44.dp)) {
                     Icon(
@@ -4897,6 +4927,9 @@ private fun ChatTopBar(
                                 }
                                 if (!isSaved) ChatMenuRow(AlphaIcons.Outlined.Palette, stringResource(R.string.look_menu), colors) {
                                     menuOpen = false; com.alphamessenger.ui.chat.look.ChatLooks.editMine = true
+                                }
+                                if (assistant) ChatMenuRow(AlphaIcons.Outlined.History, stringResource(R.string.assistant_conversations), colors) {
+                                    menuOpen = false; onConversations()
                                 }
                                 if (assistant) ChatMenuRow(AlphaIcons.Outlined.AutoAwesome, stringResource(R.string.assistant_settings_menu), colors) {
                                     menuOpen = false; onMenu()
@@ -5720,9 +5753,10 @@ private fun MessageBubble(
     // that tail attaches — it never changes the body width, so the column stays aligned.
     val showTail = hasTail(message)
     val inChannel = com.alphamessenger.ui.channel.LocalChannelPostWidth.current != null
-    val bubbleShape = remember(message.isOutgoing, showTail, inChannel) {
+    val bubbleRadius = com.alphamessenger.ui.theme.LocalBubbleRadius.current
+    val bubbleShape = remember(message.isOutgoing, showTail, inChannel, bubbleRadius) {
         if (inChannel) androidx.compose.foundation.shape.RoundedCornerShape(com.alphamessenger.ui.channel.CHANNEL_BUBBLE_RADIUS)
-        else bubbleShape(outgoing = message.isOutgoing, showTail = showTail)
+        else bubbleShape(outgoing = message.isOutgoing, showTail = showTail, radius = bubbleRadius)
     }
     val senderColor = remember(message.senderId) { senderColorFor(message.senderId) }
     // MediaKind is fixed at creation and never flips → a stable bubble type.
@@ -9139,5 +9173,74 @@ private fun SheetButton(
         Icon(icon, null, tint = if (filled) colors.bgPrimary else colors.textPrimary, modifier = Modifier.size(19.dp))
         Spacer(Modifier.width(8.dp))
         Text(label, color = if (filled) colors.bgPrimary else colors.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+    }
+}
+
+/** A bot's past conversations: start a new one, go back to one, or delete it. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AssistantConversationsSheet(
+    viewModel: ChatViewModel,
+    memoryOn: Boolean,
+    colors: AlphaColorScheme,
+    onDismiss: () -> Unit,
+    onNew: () -> Unit,
+    onOpen: (String) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var items by remember { mutableStateOf<List<uniffi.alphamessenger.AssistantConversation>?>(null) }
+    LaunchedEffect(Unit) { items = viewModel.assistantConversations() }
+    com.alphamessenger.ui.components.AlphaSheet(
+        onDismissRequest = onDismiss,
+        sheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+            Text(
+                stringResource(R.string.assistant_conversations), fontSize = 22.sp, fontWeight = FontWeight.SemiBold,
+                color = colors.textPrimary, modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+            )
+            ChatMenuRow(AlphaIcons.Outlined.AddComment, stringResource(R.string.assistant_new_conversation), colors, tintOverride = colors.accent, onClick = onNew)
+            val list = items
+            when {
+                list == null -> Unit
+                list.isEmpty() -> Text(
+                    stringResource(R.string.assistant_conversations_empty), color = colors.textMuted, fontSize = 14.sp,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 20.dp),
+                )
+                else -> androidx.compose.foundation.lazy.LazyColumn(Modifier.heightIn(max = 480.dp)) {
+                    items(list.size, key = { list[it].chatId }) { i ->
+                        val c = list[i]
+                        Row(
+                            Modifier.fillMaxWidth().clickable { onOpen(c.chatId) }.padding(start = 24.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    c.title.ifBlank { stringResource(R.string.assistant_conversation_untitled) },
+                                    color = colors.textPrimary, fontSize = 15.sp, maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    compactTime(c.lastAt) + " · " + pluralStringResource(R.plurals.assistant_conversation_messages, c.count.toInt(), c.count.toInt()),
+                                    color = colors.textMuted, fontSize = 12.sp,
+                                )
+                            }
+                            IconButton(onClick = {
+                                scope.launch {
+                                    viewModel.deleteAssistantConversation(c.chatId)
+                                    items = viewModel.assistantConversations()
+                                }
+                            }) {
+                                Icon(AlphaIcons.Outlined.DeleteOutline, stringResource(R.string.common_delete), tint = colors.textMuted)
+                            }
+                        }
+                    }
+                }
+            }
+            if (memoryOn) Text(
+                stringResource(R.string.assistant_conversations_memory), color = colors.textMuted, fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 10.dp),
+            )
+        }
     }
 }

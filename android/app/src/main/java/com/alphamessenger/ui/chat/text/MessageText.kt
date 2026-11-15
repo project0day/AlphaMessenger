@@ -292,6 +292,14 @@ fun MessageText(
         }
         }
     } else {
+        // The gesture outlives recompositions: it must act with what is shown NOW
+        // (a stale copy sent "Read more" to a state no longer on screen).
+        val nowAnnotated by androidx.compose.runtime.rememberUpdatedState(annotated)
+        val nowReadMore by androidx.compose.runtime.rememberUpdatedState(onReadMore)
+        val nowTextTap by androidx.compose.runtime.rememberUpdatedState(onTextTap)
+        val nowLongPress by androidx.compose.runtime.rememberUpdatedState(onTextLongPress)
+        val nowEntityTap by androidx.compose.runtime.rememberUpdatedState(tapEntity)
+        val nowEntities by androidx.compose.runtime.rememberUpdatedState(entities)
         // Normal mode: clickable entities. A link tap is intercepted here
         // and never reaches Bubble; a plain-text tap passes to Bubble.
         Text(
@@ -303,35 +311,38 @@ fun MessageText(
                 layoutResult = res
                 onTextLayout(res)
             },
-            modifier = modifier.pointerInput(shown, entities) {
+            modifier = modifier.pointerInput(Unit) {
                 detectTapGestures(
                     onTap = { pos ->
+                        val text = nowAnnotated
                         val layout = layoutResult
                         val offset = layout?.getOffsetForPosition(pos) ?: -1
-                        if (offset >= 0 && onReadMore != null &&
-                            annotated.getStringAnnotations(READ_MORE_TAG, offset, offset).isNotEmpty()
-                        ) {
-                            onReadMore()
+                        // "Read more" sits last: a tap past its final letter still counts.
+                        val readMoreHit = offset >= 0 && text.getStringAnnotations(READ_MORE_TAG, 0, text.length)
+                            .any { offset >= it.start && offset <= it.end }
+                        val readMore = nowReadMore
+                        if (readMoreHit && readMore != null) {
+                            readMore()
                             return@detectTapGestures
                         }
                         val entity = if (offset >= 0) {
-                            annotated
+                            text
                                 .getStringAnnotations(offset, offset)
                                 .firstOrNull { it.tag == ENTITY_TAG }
-                                ?.let { entities.getOrNull(it.item.toIntOrNull() ?: -1) }
+                                ?.let { nowEntities.getOrNull(it.item.toIntOrNull() ?: -1) }
                         } else null
                         if (entity != null && entity.clickable) {
                             // Link tap — handled here, Bubble does not get it.
-                            tapEntity(entity)
+                            nowEntityTap(entity)
                         } else {
                             // Plain-text tap — hand it to Bubble (action sheet).
-                            onTextTap?.invoke()
+                            nowTextTap?.invoke()
                         }
                     },
                     onLongPress = {
                         // Long-press ALWAYS goes to Bubble (message menu) — even
                         // on a link. No separate link menu on long-press (UX decision).
-                        onTextLongPress?.invoke()
+                        nowLongPress?.invoke()
                     },
                 )
             },

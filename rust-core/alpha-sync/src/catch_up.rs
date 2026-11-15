@@ -100,8 +100,10 @@ impl CatchUpManager {
     pub async fn prepare_catch_up(&self) -> (NostrRelayClient, Vec<(String, u64)>, PublicKey) {
         // An onion relay is unreachable without Tor: asking it only waits out the timeout.
         let tor = alpha_transport::net_switch::tor_route().is_some();
+        // Our group's relays we only read are caught up on too (group events only).
         let relay_urls: Vec<String> = self.transport.enabled_relay_urls().await
             .into_iter()
+            .chain(self.transport.listen_extra())
             .filter(|u| tor || !is_onion(u))
             .collect();
         // 90s overlap: re-pull a small window past the checkpoint so events

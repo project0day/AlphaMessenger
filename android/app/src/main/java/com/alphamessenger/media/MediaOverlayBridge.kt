@@ -21,5 +21,7 @@ fun MediaState.toOverlayState(isOutgoing: Boolean): FileUiState = when (stage) {
     TransferStage.NeedDownload -> FileUiState.NeedDownload
     TransferStage.Failed ->
         FileUiState.Failed(if (isOutgoing) TransferDirection.UPLOAD else TransferDirection.DOWNLOAD)
+    TransferStage.Gone -> FileUiState.Gone()
+    TransferStage.UnknownServer -> FileUiState.Gone(unknownServer = true)
     TransferStage.Idle, TransferStage.Canceled -> FileUiState.Hidden
 }

@@ -21,6 +21,8 @@ import javax.inject.Inject
 private val KEY_THEME_VARIANT = stringPreferencesKey("theme_variant")
 private val KEY_UI_FONT = stringPreferencesKey("ui_font_size")
 private val KEY_MSG_FONT = stringPreferencesKey("msg_font_size")
+private val KEY_MSG_SCALE = androidx.datastore.preferences.core.floatPreferencesKey("msg_font_scale")
+private val KEY_BUBBLE_RADIUS = androidx.datastore.preferences.core.floatPreferencesKey("bubble_radius")
 private val KEY_WALLPAPER_ID = stringPreferencesKey("chat_wallpaper_id")
 private val KEY_WALLPAPER_URI = stringPreferencesKey("chat_wallpaper_uri")
 /** The backgrounds the user made, newest first (ids, ";"-joined). */
@@ -248,15 +250,25 @@ class ThemeViewModel @Inject constructor(
 
     // ── Message text size (chat bubbles only) ─────────────────────────
 
-    val messageFontSize: StateFlow<FontSize> = dataStore.data
+    /** A free scale from the slider; before it existed, the old step chosen. */
+    val messageFontScale: StateFlow<Float> = dataStore.data
         .map { prefs ->
-            prefs[KEY_MSG_FONT]?.let { runCatching { FontSize.valueOf(it) }.getOrDefault(FontSize.DEFAULT) }
-                ?: FontSize.DEFAULT
+            prefs[KEY_MSG_SCALE] ?: prefs[KEY_MSG_FONT]?.let { runCatching { FontSize.valueOf(it).factor }.getOrNull() } ?: 1f
         }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, FontSize.DEFAULT)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 1f)
 
-    fun setMessageFontSize(size: FontSize) {
-        viewModelScope.launch { dataStore.edit { it[KEY_MSG_FONT] = size.name } }
+    fun setMessageFontScale(scale: Float) {
+        viewModelScope.launch { dataStore.edit { it[KEY_MSG_SCALE] = scale.coerceIn(MSG_FONT_MIN, MSG_FONT_MAX) } }
+    }
+
+    // ── Bubble corner radius ──────────────────────────────────────────
+
+    val bubbleRadius: StateFlow<Float> = dataStore.data
+        .map { it[KEY_BUBBLE_RADIUS] ?: BUBBLE_RADIUS_DEFAULT }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, BUBBLE_RADIUS_DEFAULT)
+
+    fun setBubbleRadius(dp: Float) {
+        viewModelScope.launch { dataStore.edit { it[KEY_BUBBLE_RADIUS] = dp.coerceIn(BUBBLE_RADIUS_MIN, BUBBLE_RADIUS_MAX) } }
     }
 
     // ── Chat wallpaper (default / solid / gradient / gallery) ─────────

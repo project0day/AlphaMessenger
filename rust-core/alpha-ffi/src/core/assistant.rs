@@ -21,7 +21,111 @@ pub fn is_assistant_chat(chat_id: &str) -> bool {
     chat_id.starts_with(ASSISTANT_CHAT_PREFIX)
 }
 
+/// Splits a profile's chat id from the id of a conversation put aside.
+/// Profile ids are `[A-Za-z0-9_-]`, so the separator never occurs in one.
+const CONVERSATION_SEP: char = '~';
+
+/// A past conversation with an assistant: kept apart, hidden from the chat list.
+pub fn is_assistant_conversation(chat_id: &str) -> bool {
+    is_assistant_chat(chat_id) && chat_id.contains(CONVERSATION_SEP)
+}
+
+/// One past conversation with an assistant.
+#[derive(Debug, Clone)]
+pub struct AssistantConversation {
+    pub chat_id: String,
+    pub title: String,
+    pub last_at: String,
+    pub count: u32,
+}
+
 impl AlphaMessengerCore {
+    /// Puts the current conversation of a profile aside; the profile's chat
+    /// keeps its id (pins, folders, archive stay) and starts empty.
+    /// False when there was nothing to put aside.
+    pub fn assistant_new_conversation(&self, profile_id: String) -> Result<bool, MessengerError> {
+        let base = Self::assistant_base(&profile_id)?;
+        let conn = self.db.connection();
+        let db = |e: rusqlite::Error| MessengerError::DatabaseError { description: format!("new conversation: {e}") };
+        let tx = conn.unchecked_transaction().map_err(db)?;
+        let moved = Self::stash_conversation(&tx, &base)?;
+        tx.commit().map_err(db)?;
+        Ok(moved)
+    }
+
+    /// Brings a past conversation back into the profile's chat; what was there
+    /// is put aside first, so nothing is lost.
+    pub fn assistant_open_conversation(&self, profile_id: String, chat_id: String) -> Result<(), MessengerError> {
+        let base = Self::assistant_base(&profile_id)?;
+        if !chat_id.starts_with(&format!("{base}{CONVERSATION_SEP}")) {
+            return Err(MessengerError::InvalidArgument { description: "not a conversation of this assistant".into() });
+        }
+        let conn = self.db.connection();
+        let db = |e: rusqlite::Error| MessengerError::DatabaseError { description: format!("open conversation: {e}") };
+        let tx = conn.unchecked_transaction().map_err(db)?;
+        Self::stash_conversation(&tx, &base)?;
+        Self::move_messages(&tx, &chat_id, &base).map_err(db)?;
+        tx.execute("DELETE FROM chats WHERE id = ?1", [&chat_id]).map_err(db)?;
+        tx.commit().map_err(db)
+    }
+
+    /// The conversations a profile put aside, newest first.
+    pub fn assistant_conversations(&self, profile_id: String) -> Result<Vec<AssistantConversation>, MessengerError> {
+        let base = Self::assistant_base(&profile_id)?;
+        let lead = format!("{base}{CONVERSATION_SEP}");
+        let conn = self.db.connection();
+        let db = |e: rusqlite::Error| MessengerError::DatabaseError { description: format!("list conversations: {e}") };
+        let mut st = conn.prepare(
+            "SELECT c.id, COALESCE(c.name, ''), \
+                    COALESCE((SELECT MAX(created_at) FROM messages m WHERE m.chat_id = c.id), c.created_at), \
+                    (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id AND m.is_deleted = 0) \
+             FROM chats c WHERE substr(c.id, 1, length(?1)) = ?1 ORDER BY 3 DESC",
+        ).map_err(db)?;
+        let rows = st.query_map([&lead], |r| Ok(AssistantConversation {
+            chat_id: r.get(0)?, title: r.get(1)?, last_at: r.get(2)?, count: r.get::<_, i64>(3)? as u32,
+        })).map_err(db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db)
+    }
+
+    fn assistant_base(profile_id: &str) -> Result<String, MessengerError> {
+        let p = profile_id.trim();
+        if p.is_empty() || !p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return Err(MessengerError::InvalidArgument { description: "bad assistant profile id".into() });
+        }
+        Ok(format!("{ASSISTANT_CHAT_PREFIX}{p}"))
+    }
+
+    fn stash_conversation(conn: &rusqlite::Connection, base: &str) -> Result<bool, MessengerError> {
+        let db = |e: rusqlite::Error| MessengerError::DatabaseError { description: format!("new conversation: {e}") };
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE chat_id = ?1 AND is_deleted = 0", [base], |r| r.get(0),
+        ).map_err(db)?;
+        if count == 0 { return Ok(false); }
+        // Named by the user's first words, the way the list shows it later.
+        let first: Option<String> = conn.query_row(
+            "SELECT content FROM messages WHERE chat_id = ?1 AND sender_id <> ?2 AND is_deleted = 0 \
+             AND content IS NOT NULL AND trim(content) <> '' ORDER BY created_at LIMIT 1",
+            rusqlite::params![base, ASSISTANT_SENDER_ID], |r| r.get(0),
+        ).ok();
+        let title = first.map(|t| {
+            let line = t.split_whitespace().collect::<Vec<_>>().join(" ");
+            let short: String = line.chars().take(60).collect();
+            if line.chars().count() > 60 { format!("{short}…") } else { short }
+        });
+        let id = format!("{base}{CONVERSATION_SEP}{}", uuid::Uuid::new_v4().simple());
+        let chat = new_chat(id.clone(), alpha_database::models::ChatType::Direct, title, 0);
+        ChatRepo::insert(conn, &chat).map_err(|e| MessengerError::DatabaseError { description: format!("new conversation: {e}") })?;
+        Self::move_messages(conn, base, &id).map_err(db)?;
+        Ok(true)
+    }
+
+    fn move_messages(conn: &rusqlite::Connection, from: &str, to: &str) -> rusqlite::Result<()> {
+        for table in ["messages", "pending_sends", "pending_media"] {
+            conn.execute(&format!("UPDATE {table} SET chat_id = ?2 WHERE chat_id = ?1"), [from, to])?;
+        }
+        Ok(())
+    }
+
     /// The assistant chat of one profile, created on first use.
     pub fn ensure_assistant_chat(&self, profile_id: String, name: String) -> Result<ChatInfo, MessengerError> {
         let profile = profile_id.trim();

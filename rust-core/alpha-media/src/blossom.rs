@@ -362,12 +362,36 @@ pub struct BlossomClient {
     /// turn until one succeeds (servers go down / rate-limit / require
     /// payment, so a single endpoint is fragile).
     servers: Vec<String>,
+    /// The user's own servers go first; off only for a client that tests one server.
+    include_own: bool,
+    /// Every request goes through a Tor proxy of its own (a secret chat's route).
+    tor: bool,
     http: Arc<reqwest::Client>,
     /// Replica-search memory — see DiscoveryMemory.
     discovery: Arc<DiscoveryMemory>,
     /// Endpoint health and capabilities. One per client, in memory.
     health: Arc<std::sync::Mutex<std::collections::HashMap<String, EndpointState>>>,
 }
+
+/// Media servers the user added. They go before the public ones in every
+/// client: a new file lands there first, and downloads look there first.
+static OWN_SERVERS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Replace the user's own media servers (https base URLs).
+pub fn set_own_servers(urls: Vec<String>) {
+    let clean: Vec<String> = urls.into_iter()
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| u.starts_with("https://") || u.contains(".onion"))
+        .collect();
+    if let Ok(mut s) = OWN_SERVERS.write() { *s = clean; }
+}
+
+pub fn own_servers() -> Vec<String> {
+    OWN_SERVERS.read().map(|s| s.clone()).unwrap_or_default()
+}
+
+/// Servers once in [DEFAULT_BLOSSOM_SERVERS]: older messages still point there.
+const RETIRED_BLOSSOM_SERVERS: &[&str] = &["https://blossom.band", "https://cdn.hzrd149.com"];
 
 /// Public Blossom servers that accept anonymous Nostr-signed uploads.
 /// Used as a fallback when the caller doesn't supply its own list.
@@ -386,6 +410,11 @@ pub const DEFAULT_BLOSSOM_SERVERS: &[&str] = &[
     "https://blossom.jumble.social",
     "https://blossom.yakihonne.com",
 ];
+
+/// The project's long-term store for the official channel: read-only for
+/// everyone (uploads need its owner's secret path), so readers fetch from it
+/// and find copies on it, but never upload there.
+pub const ARCHIVE_BLOSSOM_SERVERS: &[&str] = &["https://rs-blossom-b2.rs-nostr-relay.workers.dev"];
 
 /// Extra copies made in the background after a blob landed on its first server:
 /// three in all, so a file outlives two servers dropping it.
@@ -515,10 +544,18 @@ impl BlossomClient {
         };
         Self {
             servers,
+            include_own: true,
+            tor: false,
             http: Self::http_client(Route::AppWide),
             discovery: Arc::new(DiscoveryMemory::default()),
             health: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// This client talks to its own list only, never the user's servers (a server test).
+    pub fn listed_only(mut self) -> Self {
+        self.include_own = false;
+        self
     }
 
     /// Like [`Self::with_servers`], through the SOCKS proxy at [proxy] instead
@@ -526,6 +563,7 @@ impl BlossomClient {
     pub fn with_servers_via(urls: &[String], proxy: std::net::SocketAddr) -> Self {
         let mut client = Self::with_servers(urls);
         client.http = Self::http_client(Route::Via(proxy));
+        client.tor = true;
         client
     }
 
@@ -540,6 +578,8 @@ impl BlossomClient {
         }
         Self {
             servers,
+            include_own: true,
+            tor: false,
             http: Self::http_client(Route::AppWide),
             discovery: Arc::new(DiscoveryMemory::default()),
             health: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -566,7 +606,7 @@ impl BlossomClient {
         let auth_token = signer.sign_auth_event("upload", &sha256_hex)?;
 
         let mut last_err = String::from("no Blossom servers configured");
-        for server in &self.servers {
+        for server in &self.all_servers() {
             let url = format!("{server}/upload");
             debug!(sha256 = %sha256_hex, server = %server, "Uploading blob to Blossom");
 
@@ -705,10 +745,11 @@ impl BlossomClient {
             Ok(h) => h,
             // The lock is poisoned — fall back to the configured order.
             // Correctness does not depend on health knowledge; it is only speed.
-            Err(_) => return self.servers.iter().map(|s| (1, s.clone())).collect(),
+            Err(_) => return self.all_servers().into_iter().map(|s| (1, s)).collect(),
         };
+        let own = own_servers();
         let mut ranked: Vec<(u8, u64, String)> = self
-            .servers
+            .all_servers()
             .iter()
             .filter_map(|s| {
                 let st = health.get(s);
@@ -718,13 +759,15 @@ impl BlossomClient {
                 let cooling = st.map(|x| x.cooling(now)).unwrap_or(false);
                 let known = st.and_then(|x| x.capability(cap)) == Some(true);
                 let latency = st.map(|x| x.ewma_micros as u64).unwrap_or(u64::MAX / 2);
-                // Sort key: non-cooling and confirmed first.
+                // Sort key: non-cooling and confirmed first; the user's own server leads while it works.
                 let tier = match (cooling, known) {
+                    (false, _) if own.contains(s) => 0,
                     (false, true) => 0,
                     (false, false) => 1,
                     (true, true) => 2,
                     (true, false) => 3,
                 };
+                let latency = if own.contains(s) && !cooling { 0 } else { latency };
                 Some((tier, latency, s.clone()))
             })
             .collect();
@@ -754,7 +797,7 @@ impl BlossomClient {
             Ok(h) => h,
             Err(_) => return Vec::new(),
         };
-        self.servers
+        self.all_servers()
             .iter()
             .map(|s| {
                 let st = h.get(s).cloned().unwrap_or_default();
@@ -815,6 +858,7 @@ impl BlossomClient {
         }
 
         let mut locations: Vec<crate::media_ref::ChunkLocation> = Vec::new();
+        let mut landed: Vec<String> = Vec::new();
         let mut last: Option<StorageFailure> = None;
         for server in &candidates {
             if locations.len() >= desired {
@@ -840,10 +884,12 @@ impl BlossomClient {
                     // The ACTUAL address that accepted the object is recorded
                     // — what the download later looks for. With switching this
                     // is no longer the server that stood first in the config.
-                    locations.push(crate::media_ref::ChunkLocation {
-                        relay: server.clone(),
-                        url: d.url,
-                    });
+                    // The ref travels to every reader: record the public base the
+                    // server answered with, never our base (an own server's upload
+                    // path may carry its secret).
+                    let relay = d.url.rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_default();
+                    locations.push(crate::media_ref::ChunkLocation { relay, url: d.url });
+                    landed.push(server.clone());
                 }
                 Err(f) => {
                     self.note_failure(server, cap, &f);
@@ -872,7 +918,7 @@ impl BlossomClient {
         // suitable servers in the background. A file on one server is lost the
         // day that server drops it.
         if desired == 1 {
-            self.replicate_in_background(&candidates, &locations, data, content_type, &auth_token);
+            self.replicate_in_background(&candidates, &landed, data, content_type, &auth_token);
         }
         Ok(locations)
     }
@@ -880,14 +926,14 @@ impl BlossomClient {
     fn replicate_in_background(
         &self,
         candidates: &[String],
-        landed: &[crate::media_ref::ChunkLocation],
+        landed: &[String],
         data: &[u8],
         content_type: &str,
         auth_token: &str,
     ) {
         let targets: Vec<String> = candidates
             .iter()
-            .filter(|s| !landed.iter().any(|l| &l.relay == *s))
+            .filter(|s| !landed.contains(s))
             .take(BACKGROUND_REPLICAS)
             .cloned()
             .collect();
@@ -934,6 +980,9 @@ impl BlossomClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            if matches!(status.as_u16(), 404 | 410) {
+                return Err(MediaError::NotOnServer(format!("status {status}")));
+            }
             return Err(MediaError::DownloadFailed(format!(
                 "Download failed with status {status}: {body}"
             )));
@@ -954,7 +1003,7 @@ impl BlossomClient {
         // Best-effort: ask every server that might hold the blob to drop it.
         let mut last_err = String::from("no Blossom servers configured");
         let mut any_ok = false;
-        for server in &self.servers {
+        for server in &self.all_servers() {
             let url = format!("{server}/{sha256}");
             match self
                 .http
@@ -1250,18 +1299,52 @@ impl BlossomClient {
         }
     }
 
+    /// Requests leave through Tor (this client's route, or the app-wide proxy).
+    pub fn via_tor(&self) -> bool {
+        self.tor || crate::http_proxy_active()
+    }
+
+    /// A server this user chose or the app ships (or once shipped) with — not one
+    /// a sender put into a message. Only these are contacted without Tor.
+    pub fn is_known(&self, url: &str) -> bool {
+        fn host(u: &str) -> String {
+            u.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or(u).to_ascii_lowercase()
+        }
+        let h = host(url);
+        self.all_servers().iter().map(|s| host(s))
+            .chain(DEFAULT_BLOSSOM_SERVERS.iter().chain(RETIRED_BLOSSOM_SERVERS).chain(ARCHIVE_BLOSSOM_SERVERS).map(|s| host(s)))
+            .any(|k| k == h)
+    }
+
+    /// The user's own servers, then this client's list, without repeats.
+    pub(crate) fn all_servers(&self) -> Vec<String> {
+        let mut out = if self.include_own { own_servers() } else { Vec::new() };
+        for s in &self.servers {
+            if !out.iter().any(|o| o.trim_end_matches('/') == s.trim_end_matches('/')) { out.push(s.clone()); }
+        }
+        out
+    }
+
     /// Configured servers in search order: the one that worked — first.
     pub(crate) fn configured_servers(&self) -> Vec<String> {
         let preferred = self.discovery.preferred.lock().ok().and_then(|p| p.clone());
-        let mut out: Vec<String> = Vec::with_capacity(self.servers.len());
+        let all = self.all_servers();
+        let mut out: Vec<String> = Vec::with_capacity(all.len());
         if let Some(p) = preferred {
-            if self.servers.iter().any(|s| s.trim_end_matches('/') == p) {
+            if all.iter().any(|s| s.trim_end_matches('/') == p) {
                 out.push(p);
             }
         }
-        for s in &self.servers {
+        for s in &all {
             if !out.iter().any(|o| o.trim_end_matches('/') == s.trim_end_matches('/')) {
                 out.push(s.clone());
+            }
+        }
+        // Read-only archive last; skipped when the owner already lists it under its upload path.
+        let host = |u: &str| u.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or(u).to_ascii_lowercase();
+        for a in ARCHIVE_BLOSSOM_SERVERS {
+            if !out.iter().any(|o| host(o) == host(a)) {
+                out.push(a.to_string());
             }
         }
         out
@@ -1284,7 +1367,10 @@ impl BlossomClient {
             return Err(MediaError::DownloadFailed("content-id: не 64 hex".into()));
         }
         let mut last: Option<MediaError> = None;
-        for server in self.configured_servers() {
+        // Any answer other than "not here" (a timeout, a 5xx) leaves the object possibly alive.
+        let servers = self.configured_servers();
+        let mut unsure = servers.is_empty();
+        for server in servers {
             let base = server.trim_end_matches('/');
             if self.discovery_missing(base, &id) {
                 continue;
@@ -1301,12 +1387,13 @@ impl BlossomClient {
                     last = Some(MediaError::DownloadFailed("content-id mismatch".into()));
                 }
                 Err(e) => {
-                    self.discovery_note_missing(base, &id);
+                    // Only "not here" is remembered: a timeout says nothing about the object.
+                    if matches!(e, MediaError::NotOnServer(_)) { self.discovery_note_missing(base, &id); } else { unsure = true; }
                     last = Some(e);
                 }
             }
         }
-        Err(last.unwrap_or(MediaError::DownloadFailed("нет кандидатов".into())))
+        if unsure { Err(last.unwrap_or(MediaError::DownloadFailed("нет кандидатов".into()))) } else { Err(MediaError::Gone) }
     }
 }
 

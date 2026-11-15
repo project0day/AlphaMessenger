@@ -118,6 +118,7 @@ private fun albumGroupState(
                 if (hasUpload) com.alphamessenger.transfer.TransferDirection.UPLOAD
                 else com.alphamessenger.transfer.TransferDirection.DOWNLOAD,
             )
+        is com.alphamessenger.transfer.TransferState.Gone -> com.alphamessenger.transfer.FileUiState.Gone(s.unknownServer)
         // Idle with items still missing ⇒ offer "download all" (incoming only —
         // an outgoing album whose upload finished is simply done).
         is com.alphamessenger.transfer.TransferState.Idle ->

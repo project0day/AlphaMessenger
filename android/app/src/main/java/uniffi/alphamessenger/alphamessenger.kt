@@ -700,7 +700,7 @@ internal interface UniffiCallbackInterfaceAlphaMessengerCallbackMethod14 : com.s
     fun callback(`uniffiHandle`: Long,`relayUrl`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceAlphaMessengerCallbackMethod15 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`connected`: Int,`relays`: Int,`catchingUp`: Byte,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`connected`: Int,`relays`: Int,`catchingUp`: Byte,`link`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceAlphaMessengerCallbackMethod16 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`events`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
@@ -1411,6 +1411,26 @@ internal open class UniffiVTableCallbackInterfaceAlphaMessengerCallback(
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1449,11 +1469,17 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_add_relay(`ptr`: Pointer,`url`: RustBuffer.ByValue,`read`: Byte,`write`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_alpha_catalog_fetch(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_alpha_catalog_publish(`ptr`: Pointer,`key`: RustBuffer.ByValue,`d`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_alpha_feed_fetch(`ptr`: Pointer,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_alpha_feed_key_ok(`ptr`: Pointer,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_alpha_feed_publish(`ptr`: Pointer,`key`: RustBuffer.ByValue,`d`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_alpha_feed_remove(`ptr`: Pointer,`key`: RustBuffer.ByValue,`d`: RustBuffer.ByValue,`at`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_apply_relay_changes(`ptr`: Pointer,`add`: RustBuffer.ByValue,`enable`: RustBuffer.ByValue,`disable`: RustBuffer.ByValue,`remove`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
@@ -1464,6 +1490,12 @@ internal interface UniffiLib : Library {
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_arm_scheduled_send(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,`notBefore`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_arm_silent_send(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_assistant_conversations(`ptr`: Pointer,`profileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_assistant_new_conversation(`ptr`: Pointer,`profileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_assistant_open_conversation(`ptr`: Pointer,`profileId`: RustBuffer.ByValue,`chatId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_auto_backup_ready(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
@@ -1723,6 +1755,8 @@ internal interface UniffiLib : Library {
     ): Byte
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_nostr_emoji_sets(`ptr`: Pointer,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_own_media_servers(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_own_member_id(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_peer_avatar_video(`ptr`: Pointer,`senderId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1775,6 +1809,8 @@ internal interface UniffiLib : Library {
     ): Long
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_privacy_settings_json(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_probe_media_server(`ptr`: Pointer,`url`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_process_device_inbox(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_publish_story(`ptr`: Pointer,`paramsJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1798,6 +1834,8 @@ internal interface UniffiLib : Library {
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_request_role_sync(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_reschedule_held(`ptr`: Pointer,`msgId`: RustBuffer.ByValue,`notBefore`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_reserve_relay_changed(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_resolve_media_ref(`ptr`: Pointer,`mediaRefJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1908,6 +1946,8 @@ internal interface UniffiLib : Library {
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_set_network_available(`ptr`: Pointer,`available`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_set_no_store_default(`ptr`: Pointer,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_set_own_media_servers(`ptr`: Pointer,`urls`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_set_privacy(`ptr`: Pointer,`name`: RustBuffer.ByValue,`value`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
@@ -2133,11 +2173,17 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_add_relay(
     ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_alpha_catalog_fetch(
+    ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_alpha_catalog_publish(
+    ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_alpha_feed_fetch(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_alpha_feed_key_ok(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_alpha_feed_publish(
+    ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_alpha_feed_remove(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_apply_relay_changes(
     ): Short
@@ -2148,6 +2194,12 @@ internal interface UniffiLib : Library {
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_arm_scheduled_send(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_arm_silent_send(
+    ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_assistant_conversations(
+    ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_assistant_new_conversation(
+    ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_assistant_open_conversation(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_auto_backup_ready(
     ): Short
@@ -2407,6 +2459,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_nostr_emoji_sets(
     ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_own_media_servers(
+    ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_own_member_id(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_peer_avatar_video(
@@ -2459,6 +2513,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_privacy_settings_json(
     ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_probe_media_server(
+    ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_process_device_inbox(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_publish_story(
@@ -2482,6 +2538,8 @@ internal interface UniffiLib : Library {
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_request_role_sync(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_reschedule_held(
+    ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_reserve_relay_changed(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_resolve_media_ref(
     ): Short
@@ -2592,6 +2650,8 @@ internal interface UniffiLib : Library {
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_set_network_available(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_set_no_store_default(
+    ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_set_own_media_servers(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_set_privacy(
     ): Short
@@ -2758,6 +2818,12 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_add_relay() != 32203.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_alpha_catalog_fetch() != 62051.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_alpha_catalog_publish() != 6998.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_alpha_feed_fetch() != 379.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2765,6 +2831,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_alpha_feed_publish() != 58211.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_alpha_feed_remove() != 64134.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_apply_relay_changes() != 8765.toShort()) {
@@ -2780,6 +2849,15 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_arm_silent_send() != 31284.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_assistant_conversations() != 32876.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_assistant_new_conversation() != 25822.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_assistant_open_conversation() != 38183.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_auto_backup_ready() != 7148.toShort()) {
@@ -3169,6 +3247,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_nostr_emoji_sets() != 5578.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_own_media_servers() != 34332.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_own_member_id() != 53466.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3247,6 +3328,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_privacy_settings_json() != 26127.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_probe_media_server() != 1110.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_process_device_inbox() != 30140.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3281,6 +3365,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_reschedule_held() != 9074.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_reserve_relay_changed() != 23301.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_resolve_media_ref() != 39420.toShort()) {
@@ -3446,6 +3533,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_set_no_store_default() != 51736.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_set_own_media_servers() != 43584.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_set_privacy() != 11310.toShort()) {
@@ -3619,7 +3709,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercallback_on_relay_status_change() != 61351.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercallback_on_sync_state() != 20147.toShort()) {
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercallback_on_sync_state() != 64642.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercallback_on_events_batch() != 27962.toShort()) {
@@ -4060,11 +4150,17 @@ public interface AlphaMessengerCoreInterface {
     
     fun `addRelay`(`url`: kotlin.String, `read`: kotlin.Boolean, `write`: kotlin.Boolean)
     
+    fun `alphaCatalogFetch`(): kotlin.String
+    
+    fun `alphaCatalogPublish`(`key`: kotlin.String, `d`: kotlin.String, `content`: kotlin.String)
+    
     fun `alphaFeedFetch`(`limit`: kotlin.UInt): kotlin.String
     
     fun `alphaFeedKeyOk`(`key`: kotlin.String): kotlin.Boolean
     
     fun `alphaFeedPublish`(`key`: kotlin.String, `d`: kotlin.String, `content`: kotlin.String)
+    
+    fun `alphaFeedRemove`(`key`: kotlin.String, `d`: kotlin.String, `at`: kotlin.ULong)
     
     fun `applyRelayChanges`(`add`: List<kotlin.String>, `enable`: List<kotlin.String>, `disable`: List<kotlin.String>, `remove`: List<kotlin.String>): kotlin.UInt
     
@@ -4075,6 +4171,12 @@ public interface AlphaMessengerCoreInterface {
     fun `armScheduledSend`(`chatId`: kotlin.String, `notBefore`: kotlin.Long)
     
     fun `armSilentSend`(`chatId`: kotlin.String)
+    
+    fun `assistantConversations`(`profileId`: kotlin.String): List<AssistantConversation>
+    
+    fun `assistantNewConversation`(`profileId`: kotlin.String): kotlin.Boolean
+    
+    fun `assistantOpenConversation`(`profileId`: kotlin.String, `chatId`: kotlin.String)
     
     fun `autoBackupReady`(): kotlin.Boolean
     
@@ -4340,6 +4442,8 @@ public interface AlphaMessengerCoreInterface {
     
     fun `nostrEmojiSets`(`input`: kotlin.String): kotlin.String
     
+    fun `ownMediaServers`(): List<kotlin.String>
+    
     fun `ownMemberId`(`chatId`: kotlin.String): kotlin.String
     
     fun `peerAvatarVideo`(`senderId`: kotlin.String): kotlin.String
@@ -4395,6 +4499,8 @@ public interface AlphaMessengerCoreInterface {
     
     fun `privacySettingsJson`(): kotlin.String
     
+    fun `probeMediaServer`(`url`: kotlin.String): kotlin.String
+    
     fun `processDeviceInbox`(): kotlin.UInt
     
     fun `publishStory`(`paramsJson`: kotlin.String): kotlin.String
@@ -4418,6 +4524,8 @@ public interface AlphaMessengerCoreInterface {
     fun `requestRoleSync`(`chatId`: kotlin.String)
     
     fun `rescheduleHeld`(`msgId`: kotlin.String, `notBefore`: kotlin.Long)
+    
+    fun `reserveRelayChanged`()
     
     fun `resolveMediaRef`(`mediaRefJson`: kotlin.String): kotlin.String
     
@@ -4531,6 +4639,8 @@ public interface AlphaMessengerCoreInterface {
     fun `setNetworkAvailable`(`available`: kotlin.Boolean)
     
     fun `setNoStoreDefault`(`enabled`: kotlin.Boolean)
+    
+    fun `setOwnMediaServers`(`urls`: List<kotlin.String>)
     
     fun `setPrivacy`(`name`: kotlin.String, `value`: kotlin.String): kotlin.Boolean
     
@@ -4765,6 +4875,31 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     
 
     
+    @Throws(MessengerException::class)override fun `alphaCatalogFetch`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCallWithError(MessengerException) { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_alpha_catalog_fetch(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MessengerException::class)override fun `alphaCatalogPublish`(`key`: kotlin.String, `d`: kotlin.String, `content`: kotlin.String)
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(MessengerException) { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_alpha_catalog_publish(
+        it, FfiConverterString.lower(`key`),FfiConverterString.lower(`d`),FfiConverterString.lower(`content`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(MessengerException::class)override fun `alphaFeedFetch`(`limit`: kotlin.UInt): kotlin.String {
             return FfiConverterString.lift(
     callWithPointer {
@@ -4796,6 +4931,18 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     uniffiRustCallWithError(MessengerException) { _status ->
     UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_alpha_feed_publish(
         it, FfiConverterString.lower(`key`),FfiConverterString.lower(`d`),FfiConverterString.lower(`content`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MessengerException::class)override fun `alphaFeedRemove`(`key`: kotlin.String, `d`: kotlin.String, `at`: kotlin.ULong)
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(MessengerException) { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_alpha_feed_remove(
+        it, FfiConverterString.lower(`key`),FfiConverterString.lower(`d`),FfiConverterULong.lower(`at`),_status)
 }
     }
     
@@ -4855,6 +5002,44 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_arm_silent_send(
         it, FfiConverterString.lower(`chatId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MessengerException::class)override fun `assistantConversations`(`profileId`: kotlin.String): List<AssistantConversation> {
+            return FfiConverterSequenceTypeAssistantConversation.lift(
+    callWithPointer {
+    uniffiRustCallWithError(MessengerException) { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_assistant_conversations(
+        it, FfiConverterString.lower(`profileId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MessengerException::class)override fun `assistantNewConversation`(`profileId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithPointer {
+    uniffiRustCallWithError(MessengerException) { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_assistant_new_conversation(
+        it, FfiConverterString.lower(`profileId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MessengerException::class)override fun `assistantOpenConversation`(`profileId`: kotlin.String, `chatId`: kotlin.String)
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(MessengerException) { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_assistant_open_conversation(
+        it, FfiConverterString.lower(`profileId`),FfiConverterString.lower(`chatId`),_status)
 }
     }
     
@@ -6462,6 +6647,18 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     }
     
 
+    override fun `ownMediaServers`(): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_own_media_servers(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
     override fun `ownMemberId`(`chatId`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     callWithPointer {
@@ -6780,6 +6977,18 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     }
     
 
+    override fun `probeMediaServer`(`url`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_probe_media_server(
+        it, FfiConverterString.lower(`url`),_status)
+}
+    }
+    )
+    }
+    
+
     override fun `processDeviceInbox`(): kotlin.UInt {
             return FfiConverterUInt.lift(
     callWithPointer {
@@ -6922,6 +7131,17 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     uniffiRustCallWithError(MessengerException) { _status ->
     UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_reschedule_held(
         it, FfiConverterString.lower(`msgId`),FfiConverterLong.lower(`notBefore`),_status)
+}
+    }
+    
+    
+
+    override fun `reserveRelayChanged`()
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_reserve_relay_changed(
+        it, _status)
 }
     }
     
@@ -7608,6 +7828,18 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     
     
 
+    
+    @Throws(MessengerException::class)override fun `setOwnMediaServers`(`urls`: List<kotlin.String>)
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(MessengerException) { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_set_own_media_servers(
+        it, FfiConverterSequenceString.lower(`urls`),_status)
+}
+    }
+    
+    
+
     override fun `setPrivacy`(`name`: kotlin.String, `value`: kotlin.String): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithPointer {
@@ -8140,6 +8372,46 @@ public object FfiConverterTypeAlphaMessengerCore: FfiConverter<AlphaMessengerCor
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(Pointer.nativeValue(lower(value)))
+    }
+}
+
+
+
+data class AssistantConversation (
+    var `chatId`: kotlin.String, 
+    var `title`: kotlin.String, 
+    var `lastAt`: kotlin.String, 
+    var `count`: kotlin.UInt
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAssistantConversation: FfiConverterRustBuffer<AssistantConversation> {
+    override fun read(buf: ByteBuffer): AssistantConversation {
+        return AssistantConversation(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AssistantConversation) = (
+            FfiConverterString.allocationSize(value.`chatId`) +
+            FfiConverterString.allocationSize(value.`title`) +
+            FfiConverterString.allocationSize(value.`lastAt`) +
+            FfiConverterUInt.allocationSize(value.`count`)
+    )
+
+    override fun write(value: AssistantConversation, buf: ByteBuffer) {
+            FfiConverterString.write(value.`chatId`, buf)
+            FfiConverterString.write(value.`title`, buf)
+            FfiConverterString.write(value.`lastAt`, buf)
+            FfiConverterUInt.write(value.`count`, buf)
     }
 }
 
@@ -8973,6 +9245,18 @@ sealed class MessengerException: kotlin.Exception() {
             get() = "peer=${ `peer` }"
     }
     
+    class MediaGone(
+        ) : MessengerException() {
+        override val message
+            get() = ""
+    }
+    
+    class MediaUnknownServer(
+        ) : MessengerException() {
+        override val message
+            get() = ""
+    }
+    
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<MessengerException> {
         override fun lift(error_buf: RustBuffer.ByValue): MessengerException = FfiConverterTypeMessengerError.lift(error_buf)
@@ -9007,6 +9291,8 @@ public object FfiConverterTypeMessengerError : FfiConverterRustBuffer<MessengerE
             6 -> MessengerException.KeyPackageExhausted(
                 FfiConverterString.read(buf),
                 )
+            7 -> MessengerException.MediaGone()
+            8 -> MessengerException.MediaUnknownServer()
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -9043,6 +9329,14 @@ public object FfiConverterTypeMessengerError : FfiConverterRustBuffer<MessengerE
                 4UL
                 + FfiConverterString.allocationSize(value.`peer`)
             )
+            is MessengerException.MediaGone -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is MessengerException.MediaUnknownServer -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
         }
     }
 
@@ -9076,6 +9370,14 @@ public object FfiConverterTypeMessengerError : FfiConverterRustBuffer<MessengerE
             is MessengerException.KeyPackageExhausted -> {
                 buf.putInt(6)
                 FfiConverterString.write(value.`peer`, buf)
+                Unit
+            }
+            is MessengerException.MediaGone -> {
+                buf.putInt(7)
+                Unit
+            }
+            is MessengerException.MediaUnknownServer -> {
+                buf.putInt(8)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -9154,7 +9456,7 @@ public interface AlphaMessengerCallback {
     
     fun `onRelayStatusChange`(`relayUrl`: kotlin.String, `status`: kotlin.String)
     
-    fun `onSyncState`(`connected`: kotlin.UInt, `relays`: kotlin.UInt, `catchingUp`: kotlin.Boolean)
+    fun `onSyncState`(`connected`: kotlin.UInt, `relays`: kotlin.UInt, `catchingUp`: kotlin.Boolean, `link`: kotlin.String)
     
     fun `onEventsBatch`(`events`: List<CoreEvent>)
     
@@ -9391,13 +9693,14 @@ internal object uniffiCallbackInterfaceAlphaMessengerCallback {
         }
     }
     internal object `onSyncState`: UniffiCallbackInterfaceAlphaMessengerCallbackMethod15 {
-        override fun callback(`uniffiHandle`: Long,`connected`: Int,`relays`: Int,`catchingUp`: Byte,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+        override fun callback(`uniffiHandle`: Long,`connected`: Int,`relays`: Int,`catchingUp`: Byte,`link`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeAlphaMessengerCallback.handleMap.get(uniffiHandle)
             val makeCall = { ->
                 uniffiObj.`onSyncState`(
                     FfiConverterUInt.lift(`connected`),
                     FfiConverterUInt.lift(`relays`),
                     FfiConverterBoolean.lift(`catchingUp`),
+                    FfiConverterString.lift(`link`),
                 )
             }
             val writeReturn = { _: Unit -> Unit }
@@ -9666,6 +9969,34 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeAssistantConversation: FfiConverterRustBuffer<List<AssistantConversation>> {
+    override fun read(buf: ByteBuffer): List<AssistantConversation> {
+        val len = buf.getInt()
+        return List<AssistantConversation>(len) {
+            FfiConverterTypeAssistantConversation.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<AssistantConversation>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeAssistantConversation.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<AssistantConversation>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeAssistantConversation.write(it, buf)
         }
     }
 }

@@ -84,6 +84,12 @@ enum class TransferStage {
     /** The last transfer failed → offer ↻ retry. */
     Failed,
 
+    /** No server holds the file any more → say so; a tap asks the servers once more. */
+    Gone,
+
+    /** Kept only on a server the sender named: fetched only through Tor, so that server never sees our IP. */
+    UnknownServer,
+
     /** Work could proceed but there is no connectivity → ✕ cancel, ring at the
      *  confirmed threshold, ↻ NOT offered. Separate from [Failed] and from [Idle]. */
     WaitingNetwork,

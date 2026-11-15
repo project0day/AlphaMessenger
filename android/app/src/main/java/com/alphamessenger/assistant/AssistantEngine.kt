@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
@@ -130,7 +131,34 @@ class AssistantEngine @Inject constructor(
         }
     }
 
-    fun stop(chatId: String) { jobs[chatId]?.cancel() }
+    /** Each chat's run number: Stop moves it on, so a run still stuck in a network call can no longer write or show. */
+    private val gens = ConcurrentHashMap<String, Long>()
+    private fun genOf(chatId: String) = gens[chatId] ?: 0L
+    private val boards = ConcurrentHashMap<String, Board>()
+    private val writing = kotlinx.coroutines.sync.Mutex()
+
+    /**
+     * Stop now, whatever the answer is doing: the pending restart goes too, the
+     * screen drops the live answer at once, and what tools already made is kept.
+     */
+    fun stop(chatId: String): Job {
+        checks.remove(chatId)?.cancel()
+        val board = boards.remove(chatId)
+        gens.merge(chatId, 1L, Long::plus)
+        jobs.remove(chatId)?.cancel()
+        _live.update { it - chatId }
+        board?.let { AssistantStore.profileOfChat(chatId)?.let { p -> AssistantStore.log(p.name, JournalEntry.Kind.ACT, "stopped", "") } }
+        return scope.launch(NonCancellable) {
+            if (board?.flushLater(stopped = true) == true) wrote(chatId)
+            _stored.tryEmit(chatId)
+        }
+    }
+
+    /** [stop], then wait until what it keeps is written: before the chat's history moves to another conversation. */
+    suspend fun stopAndSettle(chatId: String) {
+        stop(chatId).join()
+        writing.withLock { }
+    }
 
     /** The user tapped Apply on the relay plan in [messageId]; [done] gets how many steps failed. */
     fun applyRelays(chatId: String, messageId: String, plan: RelayPlan, done: (Int) -> Unit) {
@@ -160,16 +188,27 @@ class AssistantEngine @Inject constructor(
     /** What the chat shows of an answer on its way; written by the parts, read by the screen. */
     private inner class Board(val chatId: String) {
         private val started = System.currentTimeMillis()
+        /** The run this board belongs to; once Stop moves the chat on, nothing of it reaches the chat or the screen. */
+        val gen: Long = genOf(chatId)
+        val current: Boolean get() = genOf(chatId) == gen
         private val parts = ArrayList<Part>()
         /** Rows the tools made, written after the answer (see [AssistantTools.Run.post]). */
         private val later = ArrayList<suspend () -> Unit>()
 
         fun post(row: suspend () -> Unit) = synchronized(this) { later += row }
 
-        /** Writes what the tools made, in the order made; true when anything was written. */
-        suspend fun flushLater(): Boolean {
+        /** Every write of this run: one at a time, and refused once the run was stopped. */
+        suspend fun <T> write(block: suspend () -> T): T = writing.withLock {
+            if (!current) throw CancellationException("stopped")
+            block()
+        }
+
+        suspend fun insert(body: String, id: String? = null): String = write { repository.insertAssistantMessage(chatId, body, id) }
+
+        /** Writes what the tools made, in the order made; true when anything was written. [stopped]: Stop keeps them, written now. */
+        suspend fun flushLater(stopped: Boolean = false): Boolean {
             val rows = synchronized(this) { later.toList().also { later.clear() } }
-            for (r in rows) runCatching { r() }
+            for (r in rows) runCatching { if (stopped) writing.withLock { r() } else write { r() } }
             return rows.isNotEmpty()
         }
         @Volatile var generating: GenKind? = null
@@ -217,6 +256,7 @@ class AssistantEngine @Inject constructor(
         }
 
         private fun push(force: Boolean) {
+            if (!current) return
             val now = System.currentTimeMillis()
             val snap = synchronized(this) {
                 if (!force && now - pushed < PUSH_MS) return
@@ -234,6 +274,7 @@ class AssistantEngine @Inject constructor(
         val profile = AssistantStore.profileOfChat(chatId)
         val me = kotlinx.coroutines.currentCoroutineContext()[Job]
         val board = Board(chatId)
+        boards[chatId] = board
         val started = System.currentTimeMillis()
         // What a cancel or an error must still keep: the voices that already spoke.
         val partial = java.util.Collections.synchronizedList(ArrayList<Pair<String, Said>>())
@@ -246,7 +287,7 @@ class AssistantEngine @Inject constructor(
             AssistantStore.log(profile.name, JournalEntry.Kind.ACT, "reply", "${if (profile.isCouncil) "council" else profile.model} · ${(System.currentTimeMillis() - started) / 1000} s")
         } catch (e: AssistantFailure) {
             withContext(NonCancellable) {
-                runCatching { repository.insertAssistantMessage(chatId, AssistantMarks.error(e.error), board.openRowId()) }.getOrNull()?.let { board.endWith(it) }
+                runCatching { board.insert(AssistantMarks.error(e.error), board.openRowId()) }.getOrNull()?.let { board.endWith(it) }
                 wrote(chatId)
                 AssistantStore.log(profile?.name.orEmpty(), JournalEntry.Kind.ERR, e.error.kind.name, listOfNotNull(
                     e.error.code.takeIf { it > 0 }?.toString(), e.error.detail.takeIf { it.isNotBlank() }?.take(80),
@@ -255,12 +296,13 @@ class AssistantEngine @Inject constructor(
         } catch (e: CancellationException) {
             withContext(NonCancellable) {
                 if (superseded.remove(chatId)) { dropped = true; return@withContext }
-                AssistantStore.log(profile?.name.orEmpty(), JournalEntry.Kind.ACT, "stopped", "")
+                // Stop logs itself; this is a cancel from elsewhere (the chat closed, a restart).
+                if (board.current) AssistantStore.log(profile?.name.orEmpty(), JournalEntry.Kind.ACT, "stopped", "")
             }
             throw e
         } catch (e: Exception) {
             withContext(NonCancellable) {
-                runCatching { repository.insertAssistantMessage(chatId, AssistantMarks.error(AssistantError(AssistantError.Kind.SERVER, detail = AssistantError.redact(e.message.orEmpty()).take(160))), board.openRowId()) }
+                runCatching { board.insert(AssistantMarks.error(AssistantError(AssistantError.Kind.SERVER, detail = AssistantError.redact(e.message.orEmpty()).take(160))), board.openRowId()) }
                     .getOrNull()?.let { board.endWith(it) }
                 wrote(chatId)
             }
@@ -268,7 +310,8 @@ class AssistantEngine @Inject constructor(
             withContext(NonCancellable) {
                 // Stopped or failed after a tool made something: it is still the user's.
                 if (!dropped && board.flushLater()) wrote(chatId)
-                val mine = jobs[chatId].let { it == null || it === me }
+                boards.remove(chatId, board)
+                val mine = board.current && jobs[chatId].let { it == null || it === me }
                 if (mine) {
                     val ended = board.ended()
                     _live.value = if (ended != null) _live.value + (chatId to ended) else _live.value - chatId
@@ -312,7 +355,7 @@ class AssistantEngine @Inject constructor(
                             val said = speak(chatId, m, key, buildTurns(m, key, msgs, c), board, slot, tools = false, partial = partial, label = m.name)
                             kept = store(chatId, said, m.name, board, slot)
                         } catch (e: AssistantFailure) {
-                            val id = repository.insertAssistantMessage(chatId, AssistantMarks.error(e.error.copy(detail = (m.name + ": " + e.error.detail).trim())), board.rowId(slot))
+                            val id = board.insert(AssistantMarks.error(e.error.copy(detail = (m.name + ": " + e.error.detail).trim())), board.rowId(slot))
                             board.finish(slot, id)
                             kept = true
                             wrote(chatId)
@@ -366,9 +409,9 @@ class AssistantEngine @Inject constructor(
         // A theme the model typed out itself: working links become cards, broken ones a note.
         val (text, themes) = AssistantTools.liftThemeLinks(said.answer.trim())
         val answer = AssistantTools.checkThemeLinks(ctx, text).ifBlank { "🎨" }
-        val id = repository.insertAssistantMessage(chatId, AssistantMarks.reply(answer, said.thinking.trim(), said.seconds, agent), board.rowId(slot))
+        val id = board.insert(AssistantMarks.reply(answer, said.thinking.trim(), said.seconds, agent), board.rowId(slot))
         // Before the chat reloads: the cards come in with the answer, not as a later message.
-        for (link in themes) runCatching { repository.insertAssistantMessage(chatId, link) }
+        for (link in themes) runCatching { board.insert(link) }
         board.flushLater()
         // Marked before the chat reloads, so the live part and its row never both miss a frame.
         board.finish(slot, id)

@@ -9,7 +9,7 @@
 End-to-end encrypted with MLS, carried over Nostr, optionally through Tor.
 The core is written in Rust; the app is native Android.
 
-[![Build](https://github.com/Vincentdiligent/AlphaMessenger/actions/workflows/build.yml/badge.svg)](https://github.com/Vincentdiligent/AlphaMessenger/actions/workflows/build.yml)
+[![Build](https://github.com/project0day/AlphaMessenger/actions/workflows/build.yml/badge.svg)](https://github.com/project0day/AlphaMessenger/actions/workflows/build.yml)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 ![Android 8+](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)
 ![Rust](https://img.shields.io/badge/core-Rust-B7410E?logo=rust&logoColor=white)
@@ -17,7 +17,7 @@ The core is written in Rust; the app is native Android.
 ![Nostr](https://img.shields.io/badge/network-Nostr-8E44AD)
 ![Tor](https://img.shields.io/badge/Tor-built--in-7D4698?logo=torproject&logoColor=white)
 
-[Download](https://github.com/Vincentdiligent/AlphaMessenger/releases) · [Under the hood](#under-the-hood) · [What others can see](#what-others-can-see) · [Build](#build-it-yourself) · [Security](SECURITY.md)
+[Download](https://github.com/project0day/AlphaMessenger/releases) · [Under the hood](#under-the-hood) · [What others can see](#what-others-can-see) · [Build](#build-it-yourself) · [Security](SECURITY.md)
 
 </div>
 
@@ -80,7 +80,7 @@ Turn on private mode (Tor) to hide your IP from relays and media servers. Secret
 
 ## Download
 
-Signed builds will be published on the [Releases](https://github.com/Vincentdiligent/AlphaMessenger/releases) page together with their SHA-256 checksums. Every push is also built by [GitHub Actions](https://github.com/Vincentdiligent/AlphaMessenger/actions) from this source.
+Signed builds are published on the [Releases](https://github.com/project0day/AlphaMessenger/releases) page together with their SHA-256 checksums. Every push is also built by [GitHub Actions](https://github.com/project0day/AlphaMessenger/actions) from this source.
 
 ## Build it yourself
 

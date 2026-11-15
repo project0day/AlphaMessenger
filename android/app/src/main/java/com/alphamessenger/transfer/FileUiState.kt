@@ -42,6 +42,10 @@ sealed interface FileUiState {
      */
     @Immutable data class WaitingNetwork(val progress: TransferProgress) : FileUiState
 
+    /** No server holds the file any more. Draw the "gone" mark, never ↻ —
+     *  a tap still asks the servers once more, in case a copy reappeared. */
+    @Immutable data class Gone(val unknownServer: Boolean = false) : FileUiState
+
     /** Album item uploaded, the album not sent yet (others still going up): draw ✓. */
     data object Sent : FileUiState
 

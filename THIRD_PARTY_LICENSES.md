@@ -23,7 +23,8 @@ under its own license; the license texts are distributed with each component.
 | Lottie for Android (lottie-compose) | Apache-2.0 |
 | Animated Noto Emoji © Google LLC (animated emoji set, delivered through the Alpha feed) | CC BY 4.0 |
 | Fluent Emoji Animated © Microsoft Corporation (sticker packs, delivered through the Alpha feed) | MIT |
-| Tabler Icons (the app's icon shapes) © Paweł Kuna | MIT |
+| Tabler Icons (the app's icon shapes, and chat background pattern figures in `pattern_icons.json`) © Paweł Kuna | MIT |
+| Lucide icons (chat background pattern figures, `pattern_icons.json`) © Lucide Contributors; portions © Cole Bemis (Feather, MIT) | ISC |
 | Emoji names and order (`emoji_catalog.txt`), from Unicode emoji data | Unicode License v3 |
 
 ## Rust core

@@ -1,0 +1,17 @@
+{
+  "name": "blossom-worker",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@noble/curves": "1.8.1",
+    "@noble/hashes": "1.7.1",
+    "aws4fetch": "1.0.20"
+  },
+  "private": true
+}

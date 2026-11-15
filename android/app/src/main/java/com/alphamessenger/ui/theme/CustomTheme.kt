@@ -34,6 +34,8 @@ data class CustomTheme(
     val background2: Color? = null,
     /** Bars, cards, menus; null = from the background. */
     val panels: Color? = null,
+    /** A chat pattern that comes with the theme (applied with it); travels after a "." in the link. */
+    val pattern: PatternSpec? = null,
 ) {
     /** Light or dark: a chosen background decides, so text always reads on it. */
     val isLight: Boolean get() = background?.let { it.luminance() > 0.45f } ?: light
@@ -94,7 +96,7 @@ data class CustomTheme(
         return android.util.Base64.encodeToString(raw.toByteArray(), B64)
     }
 
-    fun link(): String = THEME_LINK_PREFIX + encode()
+    fun link(): String = THEME_LINK_PREFIX + encode() + (pattern?.let { "." + it.id().removePrefix(PATTERN_PREFIX) } ?: "")
 
     companion object {
         private const val B64 = android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP
@@ -114,7 +116,11 @@ data class CustomTheme(
         }.getOrNull()
 
         fun fromLink(link: String): CustomTheme? =
-            link.takeIf { it.startsWith(THEME_LINK_PREFIX) }?.let { decode(it.removePrefix(THEME_LINK_PREFIX)) }
+            link.takeIf { it.startsWith(THEME_LINK_PREFIX) }?.removePrefix(THEME_LINK_PREFIX)?.let { code ->
+                val (theme, pat) = code.split(".", limit = 2).let { it[0] to it.getOrNull(1) }
+                // A pattern that does not pass its checks is dropped; the colours still come.
+                decode(theme)?.copy(pattern = pat?.let { PatternSpec.fromId(PATTERN_PREFIX + it) })
+            }
 
         fun newId() = java.util.UUID.randomUUID().toString().replace("-", "").take(12)
 

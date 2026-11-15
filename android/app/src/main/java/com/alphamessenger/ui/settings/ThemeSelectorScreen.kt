@@ -61,6 +61,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -80,6 +81,7 @@ import com.alphamessenger.ui.theme.WALLPAPER_PRESETS
 import com.alphamessenger.ui.theme.WALLPAPER_SOLID_PRESETS
 import com.alphamessenger.ui.theme.azureColorScheme
 import com.alphamessenger.ui.theme.carbonColorScheme
+import com.alphamessenger.ui.theme.amoledColorScheme
 import com.alphamessenger.ui.theme.cosmosColorScheme
 import com.alphamessenger.ui.theme.daylightColorScheme
 import com.alphamessenger.ui.theme.emeraldColorScheme
@@ -116,8 +118,8 @@ fun ThemeSelectorScreen(
     val ctx = LocalContext.current
 
     val currentVariant by themeViewModel.themeVariant.collectAsState()
-    val uiFont by themeViewModel.uiFontSize.collectAsState()
-    val msgFont by themeViewModel.messageFontSize.collectAsState()
+    val msgScale by themeViewModel.messageFontScale.collectAsState()
+    val bubbleRadius by themeViewModel.bubbleRadius.collectAsState()
     val wallpaper by themeViewModel.chatWallpaper.collectAsState()
 
     val activeCustom by themeViewModel.activeCustom.collectAsState()
@@ -149,6 +151,18 @@ fun ThemeSelectorScreen(
         )
         return
     }
+    // A pattern (one of Alpha's, or a kept one to adjust) opens over Appearance too.
+    var patternEdit by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<Pair<com.alphamessenger.ui.theme.PatternSpec?, Int>?>(null) }
+    patternEdit?.let { (start, recipe) ->
+        androidx.activity.compose.BackHandler { patternEdit = null }
+        PatternEditorScreen(start, recipe, onBack = { patternEdit = null }, onSave = { s ->
+            com.alphamessenger.ui.theme.PatternStore.save(ctx, s)
+            themeViewModel.setChatWallpaper(ChatWallpaper.Pattern(s.id(), s))
+            patternEdit = null
+        })
+        return
+    }
+    com.alphamessenger.ui.theme.PatternStore.load(ctx)
     val mine by themeViewModel.customWallpapers.collectAsState()
 
     // "Own theme" editor: (theme, is it new).
@@ -156,7 +170,7 @@ fun ThemeSelectorScreen(
     var deletingTheme by remember { androidx.compose.runtime.mutableStateOf<CustomTheme?>(null) }
     editingTheme?.let { (start, isNew) ->
         CustomThemeEditor(
-            start = start, isNew = isNew, wallpaper = wallpaper, msgFontFactor = msgFont.factor,
+            start = start, isNew = isNew, wallpaper = wallpaper, msgFontFactor = msgScale,
             onBack = { editingTheme = null },
             onSave = { t -> hapticTick(ctx); themeViewModel.saveCustomTheme(t); editingTheme = null },
             onDelete = if (isNew) null else ({ themeViewModel.deleteCustomTheme(start.id); editingTheme = null }),
@@ -191,7 +205,7 @@ fun ThemeSelectorScreen(
             LiveChatPreview(
                 scheme = previewScheme,
                 wallpaper = wallpaper,
-                msgFontFactor = msgFont.factor,
+                msgFontFactor = msgScale,
             )
 
             // --- Follow the device's dark/light mode ---
@@ -533,32 +547,40 @@ fun ThemeSelectorScreen(
                 }
             }
 
-            // --- 3. Font size (UI) ---
-            SectionLabel(stringResource(R.string.theme_font_size), colors)
-            SectionCard(colors) {
-                FontSizeSelector(uiFont, colors) { themeViewModel.setUiFontSize(it) }
-            }
-
             // --- 4. Message text size ---
             SectionLabel(stringResource(R.string.theme_msg_text_size), colors)
             SectionCard(colors) {
-                FontSizeSelector(msgFont, colors) { themeViewModel.setMessageFontSize(it) }
-                Spacer(Modifier.height(12.dp))
-                // Live preview bubble.
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(
-                            Brush.linearGradient(listOf(colors.msgOutStart, colors.msgOutEnd))
-                        )
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                // The slider moves a local value; the setting is written once on release.
+                var scale by remember(msgScale) { mutableStateOf(msgScale) }
+                var radius by remember(bubbleRadius) { mutableStateOf(bubbleRadius) }
+                Column(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(previewScheme.bgChat)
+                        .padding(horizontal = 12.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Text(
-                        stringResource(R.string.theme_sample_title),
-                        color = colors.msgOutText,
-                        fontSize = (15f * msgFont.factor).sp,
-                    )
+                    Box(
+                        Modifier.clip(com.alphamessenger.ui.chat.bubbleShape(outgoing = false, showTail = false, radius = radius.dp))
+                            .background(previewScheme.msgIn).padding(horizontal = 12.dp, vertical = 8.dp),
+                    ) { Text(stringResource(R.string.theme_sample_in), color = previewScheme.textPrimary, fontSize = (15f * scale).sp) }
+                    Box(
+                        Modifier.align(Alignment.End)
+                            .clip(com.alphamessenger.ui.chat.bubbleShape(outgoing = true, showTail = false, radius = radius.dp))
+                            .background(Brush.linearGradient(listOf(previewScheme.msgOutStart, previewScheme.msgOutEnd)))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    ) { Text(stringResource(R.string.theme_sample_title), color = previewScheme.msgOutText, fontSize = (15f * scale).sp) }
                 }
+                Spacer(Modifier.height(10.dp))
+                ScaleSlider(
+                    small = "A", large = "A", value = scale,
+                    range = com.alphamessenger.ui.theme.MSG_FONT_MIN..com.alphamessenger.ui.theme.MSG_FONT_MAX,
+                    colors = colors, onChange = { scale = it }, onDone = { themeViewModel.setMessageFontScale(scale) },
+                )
+                SubLabel(stringResource(R.string.theme_bubble_corners), colors)
+                ScaleSlider(
+                    small = "▢", large = "◯", value = radius,
+                    range = com.alphamessenger.ui.theme.BUBBLE_RADIUS_MIN..com.alphamessenger.ui.theme.BUBBLE_RADIUS_MAX,
+                    colors = colors, onChange = { radius = it }, onDone = { themeViewModel.setBubbleRadius(radius) },
+                )
             }
 
             // --- 5. Chat background: a few ready ones, yours, a photo ---
@@ -585,6 +607,38 @@ fun ThemeSelectorScreen(
                             modifier = Modifier.weight(1f).padding(bottom = 15.dp),
                             onClick = { themeViewModel.setChatWallpaper(g) },
                         )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                // Patterns: Alpha's open the editor; kept ones go on with a tap (tap again to adjust, hold to remove).
+                SubLabel(stringResource(R.string.wp_patterns), colors)
+                val onPattern = (wallpaper as? ChatWallpaper.Pattern)?.id
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(androidx.compose.foundation.rememberScrollState()).padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    com.alphamessenger.ui.theme.PatternStore.mine.forEach { s ->
+                        val id = s.id()
+                        val on = onPattern == id
+                        Box(
+                            Modifier.size(64.dp, 54.dp).clip(RoundedCornerShape(12.dp))
+                                .border(if (on) 2.dp else 1.dp, if (on) colors.accent else colors.alphaBorder, RoundedCornerShape(12.dp))
+                                .combinedClickable(
+                                    onClick = { if (on) patternEdit = s to 0 else themeViewModel.setChatWallpaper(ChatWallpaper.Pattern(id, s)) },
+                                    onLongClick = { com.alphamessenger.ui.theme.PatternStore.delete(ctx, s) },
+                                ),
+                        ) {
+                            com.alphamessenger.ui.theme.PatternWallpaper(s.copy(scale = s.scale * 0.5f), Modifier.fillMaxSize())
+                            if (on) SelectedBadge(colors)
+                        }
+                    }
+                    com.alphamessenger.ui.theme.PATTERN_RECIPES.forEachIndexed { i, r ->
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(64.dp).clickable { patternEdit = null to i }) {
+                            Box(Modifier.size(64.dp, 54.dp).clip(RoundedCornerShape(12.dp)).border(1.dp, colors.alphaBorder, RoundedCornerShape(12.dp))) {
+                                com.alphamessenger.ui.theme.PatternWallpaper(r.thumb, Modifier.fillMaxSize())
+                            }
+                            Text(r.name, color = colors.textSecondary, fontSize = 10.sp, maxLines = 1, modifier = Modifier.padding(top = 3.dp))
+                        }
                     }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -775,6 +829,8 @@ internal fun LiveChatPreview(
                     is ChatWallpaper.Custom -> {
                         Box(Modifier.fillMaxSize().customWallpaperBackground(wallpaper.colors, wallpaper.degrees))
                     }
+                    is ChatWallpaper.Pattern -> com.alphamessenger.ui.theme.PatternWallpaper(
+                        wallpaper.spec, Modifier.fillMaxSize(), dark = scheme.bgPrimary.luminance() < 0.5f)
                     is ChatWallpaper.Gallery -> {
                         val ctx = LocalContext.current
                         val bitmap = remember(wallpaper.uri) {
@@ -1246,6 +1302,7 @@ private val DARK_THEMES = listOf(
     ThemeChip(AlphaThemeVariant.GREY, "Grey", greyColorScheme().accent, greyColorScheme().bgSecondary),
     ThemeChip(AlphaThemeVariant.MIDNIGHT, "Midnight", midnightColorScheme().accent, midnightColorScheme().bgSecondary),
     ThemeChip(AlphaThemeVariant.CARBON, "Carbon", carbonColorScheme().accent, carbonColorScheme().bgSecondary),
+    ThemeChip(AlphaThemeVariant.AMOLED, "Black", amoledColorScheme().accent, amoledColorScheme().bgSecondary),
     ThemeChip(AlphaThemeVariant.VIOLET, "Violet", violetColorScheme().accent, violetColorScheme().bgSecondary),
     ThemeChip(AlphaThemeVariant.COSMOS, "Cosmos", cosmosColorScheme().accent, cosmosColorScheme().bgSecondary),
     ThemeChip(AlphaThemeVariant.EMERALD, "Emerald", emeraldColorScheme().accent, emeraldColorScheme().bgSecondary),
@@ -1265,6 +1322,7 @@ private fun schemeFor(variant: AlphaThemeVariant): AlphaColorScheme = when (vari
     AlphaThemeVariant.GREY     -> greyColorScheme()
     AlphaThemeVariant.MIDNIGHT -> midnightColorScheme()
     AlphaThemeVariant.CARBON   -> carbonColorScheme()
+    AlphaThemeVariant.AMOLED   -> amoledColorScheme()
     AlphaThemeVariant.VIOLET   -> violetColorScheme()
     AlphaThemeVariant.COSMOS   -> cosmosColorScheme()
     AlphaThemeVariant.EMERALD  -> emeraldColorScheme()
@@ -1303,35 +1361,27 @@ private fun SectionCard(colors: AlphaColorScheme, content: @Composable () -> Uni
     ) { content() }
 }
 
+/** A slider between a small and a large mark; [onDone] once the finger lifts. */
 @Composable
-private fun FontSizeSelector(
-    current: FontSize,
+private fun ScaleSlider(
+    small: String,
+    large: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
     colors: AlphaColorScheme,
-    onSelect: (FontSize) -> Unit,
+    onChange: (Float) -> Unit,
+    onDone: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        FontSize.entries.forEach { size ->
-            val on = size == current
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(if (on) colors.accent else colors.bgTertiary)
-                    .clickable { onSelect(size) }
-                    .padding(vertical = 11.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    stringResource(size.labelRes),
-                    color = if (on) colors.msgOutText else colors.textSecondary,
-                    fontSize = (14f * size.factor).sp,
-                    fontWeight = FontWeight.Medium,
-                )
-            }
-        }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(small, color = colors.textMuted, fontSize = 13.sp, modifier = Modifier.width(22.dp), textAlign = TextAlign.Center)
+        androidx.compose.material3.Slider(
+            value = value, onValueChange = onChange, onValueChangeFinished = onDone, valueRange = range,
+            modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
+            colors = androidx.compose.material3.SliderDefaults.colors(
+                thumbColor = colors.accent, activeTrackColor = colors.accent, inactiveTrackColor = colors.bgTertiary,
+            ),
+        )
+        Text(large, color = colors.textMuted, fontSize = 20.sp, modifier = Modifier.width(22.dp), textAlign = TextAlign.Center)
     }
 }
 

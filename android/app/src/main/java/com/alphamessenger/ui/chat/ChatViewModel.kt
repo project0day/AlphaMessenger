@@ -128,8 +128,6 @@ data class ChatState(
     val peerCanVideo: Boolean = true,
     /** A plain group whose owner forbade forwarding, copying and screenshots. */
     val groupProtect: Boolean = false,
-    /** Forward picker: which targets are channels (only those we may post in are listed). */
-    val forwardChannelIds: Set<String> = emptySet(),
     /** Channel post id → how many subscribers saw it. */
     val channelViews: Map<String, Int> = emptyMap(),
     /** Channel post id → how many times it was forwarded. */
@@ -179,11 +177,6 @@ data class ChatState(
      *  gradient. Populated whenever messages reload and refreshed when a
      *  `ProfileUpdate` lands for one of these senders. */
     val peerProfiles: Map<String, ChatBubblePeer> = emptyMap(),
-    /** Chats the user can forward a message to (excludes current chat). */
-    val forwardTargets: List<ChatInfo> = emptyList(),
-    // chatId → (displayName, avatarPath) resolved for 1:1 targets (same resolver as
-    // ChatList), so the forward picker shows real names/avatars, never a raw key.
-    val forwardTargetProfiles: Map<String, Pair<String, String>> = emptyMap(),
  /** classic: messages staged to forward INTO this chat (preview above
      *  the composer). Empty = no pending forward. */
     val pendingForward: List<MessageUi> = emptyList(),
@@ -1074,8 +1067,8 @@ class ChatViewModel @Inject constructor(
                 val (writeRestricted, closedForMe) = computeWriteState(chatId, isGroup, removed)
                 val amAdmin = isGroup && isGroupAdmin(chatId)
                 val reactionPolicy = if (isGroup) repository.groupReactionPolicy(chatId) else ReactionPolicy.ALL
-                val pinnedIds = repository.pinnedMessages(chatId)
-                val canPin = !isGroup || amAdmin || repository.groupPermissions(chatId).third == "all"
+                val pinnedIds = if (thread != null) emptyList() else repository.pinnedMessages(chatId)
+                val canPin = thread == null && (!isGroup || amAdmin || repository.groupPermissions(chatId).third == "all")
                 val channelCfg = if (isGroup) repository.channelCfg(chatId).takeIf { it.on } else null
                 val myRole = if (isGroup) myGroupRole(chatId) else ""
                 val amOwner = myRole == "owner"
@@ -1368,12 +1361,12 @@ class ChatViewModel @Inject constructor(
      *  the 1:1 peer's real displayName + avatar (same resolver as ChatList) so the picker
      *  never shows a raw public key. */
     fun loadForwardTargets() {
-        viewModelScope.launch(Dispatchers.IO) {
-            val set = loadForwardTargetSet(repository, currentChatId)
-            _uiState.value = _uiState.value.copy(forwardTargets = set.chats, forwardTargetProfiles = set.profiles,
-                forwardChannelIds = set.channelIds)
-        }
+        viewModelScope.launch(Dispatchers.IO) { _forwardSet.value = loadForwardTargetSet(repository, currentChatId) }
     }
+
+    // Apart from the chat state: its many quick copy-writes (a bot answering) used to drop the list, so the picker opened empty.
+    private val _forwardSet = MutableStateFlow<ForwardTargetSet?>(null)
+    val forwardSet: StateFlow<ForwardTargetSet?> = _forwardSet
 
     /** Forward selected messages (by text content) to a target chat. */
     fun forwardMessages(messageIds: List<String>, targetChatId: String) {
@@ -3405,8 +3398,9 @@ class ChatViewModel @Inject constructor(
     private suspend fun refreshChatSettings(chatId: String) {
         val isGroup = _uiState.value.isGroup
         val policy = if (isGroup) repository.groupReactionPolicy(chatId) else ReactionPolicy.ALL
-        val pins = repository.pinnedMessages(chatId)
-        val canPin = !isGroup || isGroupAdmin(chatId) || repository.groupPermissions(chatId).third == "all"
+        // Pins belong to the whole chat, so a discussion neither shows nor sets them.
+        val pins = if (thread != null) emptyList() else repository.pinnedMessages(chatId)
+        val canPin = thread == null && (!isGroup || isGroupAdmin(chatId) || repository.groupPermissions(chatId).third == "all")
         val channel = if (isGroup) repository.channelCfg(chatId).also { com.alphamessenger.ui.channel.ChannelCfgCache.put(chatId, it) }.takeIf { it.on } else null
         val postIds = _uiState.value.messages.map { it.id.substringBefore("#al") }.distinct().takeLast(500)
         val views = if (channel != null) repository.channelViews(chatId, postIds) else emptyMap()
@@ -4201,6 +4195,41 @@ class ChatViewModel @Inject constructor(
             ConversationSnapshotCache.clear(id)
             _uiState.value = _uiState.value.copy(messages = emptyList())
         }
+    }
+
+    /** A bot's chat: start a new conversation, the current one is kept in its list. */
+    fun newAssistantConversation(onDone: (Boolean) -> Unit = {}) {
+        val id = currentChatId
+        val profile = com.alphamessenger.assistant.AssistantStore.profileOfChat(id) ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            // What the stopped answer keeps lands in this conversation, before it moves to the list.
+            assistant.stopAndSettle(id)
+            val moved = runCatching { repository.assistantNewConversation(profile.id) }.getOrDefault(false)
+            ConversationSnapshotCache.clear(id)
+            if (moved) _uiState.value = _uiState.value.copy(messages = emptyList())
+            kotlinx.coroutines.withContext(Dispatchers.Main) { onDone(moved) }
+        }
+    }
+
+    fun openAssistantConversation(conversationId: String) {
+        val id = currentChatId
+        val profile = com.alphamessenger.assistant.AssistantStore.profileOfChat(id) ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            assistant.stopAndSettle(id)
+            runCatching { repository.assistantOpenConversation(profile.id, conversationId) }
+            ConversationSnapshotCache.clear(id)
+            reloadNow()
+        }
+    }
+
+    suspend fun assistantConversations(): List<uniffi.alphamessenger.AssistantConversation> {
+        val profile = com.alphamessenger.assistant.AssistantStore.profileOfChat(currentChatId) ?: return emptyList()
+        return runCatching { repository.assistantConversations(profile.id) }.getOrDefault(emptyList())
+    }
+
+    suspend fun deleteAssistantConversation(conversationId: String) {
+        if (!conversationId.startsWith(currentChatId + "~")) return
+        runCatching { repository.deleteChat(conversationId, false) }
     }
 
     /** Top-bar menu: delete this chat entirely (Delete chat). */

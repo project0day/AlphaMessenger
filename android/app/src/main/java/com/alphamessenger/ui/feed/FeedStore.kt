@@ -8,6 +8,7 @@ import androidx.compose.runtime.setValue
 import com.alphamessenger.data.AlphaCoreRepository
 import com.alphamessenger.ui.gif.GifEntry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -111,13 +112,27 @@ object FeedStore {
     }
 
     /** Fetch the latest posts (anonymously); false when offline — the cached ones stay. */
-    suspend fun refresh(ctx: Context, repo: AlphaCoreRepository): Boolean {
+    suspend fun refresh(ctx: Context, repo: AlphaCoreRepository): Boolean = kotlinx.coroutines.coroutineScope {
         load(ctx)
-        val json = repo.alphaFeedFetch() ?: return false
-        val fresh = runCatching { parse(json) }.getOrNull() ?: return false
+        val catalog = async { StickerCatalog.refresh(ctx, repo) }
+        val json = repo.alphaFeedFetch()
+        catalog.await()
+        val fresh = json?.let { runCatching { parse(it) }.getOrNull() } ?: return@coroutineScope false
         withContext(Dispatchers.IO) { runCatching { cache(ctx).writeText(json) } }
         posts = fresh
-        return true
+        true
+    }
+
+    /** Owner: every post the relays hold (more than the readers' first page), for clean-ups. */
+    suspend fun fetchAll(repo: AlphaCoreRepository): List<FeedPost>? =
+        repo.alphaFeedFetch(3000)?.let { runCatching { parse(it) }.getOrNull() }
+
+    /** Owner: remove [post] with a tombstone at its own time, then forget it here. */
+    suspend fun removeQuietly(ctx: Context, repo: AlphaCoreRepository, post: FeedPost): Boolean {
+        val key = ownerKey(ctx) ?: return false
+        val ok = repo.alphaFeedRemove(key, post.id, post.at)
+        if (ok) posts = posts.filter { it.id != post.id }
+        return ok
     }
 
     private var refreshedAt = 0L
@@ -163,7 +178,7 @@ object FeedStore {
         isOwner = false
     }
 
-    private fun ownerKey(ctx: Context): String? = secure(ctx)?.getString("k", null)
+    internal fun ownerKey(ctx: Context): String? = secure(ctx)?.getString("k", null)
 
     /**
      * Publish a post (or replace [post.id]): a picture or GIF is uploaded once

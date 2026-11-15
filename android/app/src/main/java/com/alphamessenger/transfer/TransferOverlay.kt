@@ -239,6 +239,8 @@ private fun OverlayControl(
             TransferDirection.DOWNLOAD -> ({ onDownloadAction(TransferAction.Retry) })
         }
         FileUiState.NeedDownload -> ({ onDownloadAction(TransferAction.Start) })
+        // Asks the servers once more: a copy may have come back.
+        is FileUiState.Gone -> ({ onDownloadAction(TransferAction.Start) })
         is FileUiState.Ready -> if (state.playable) ({ onOpen() }) else null
         FileUiState.Sent, FileUiState.Hidden -> null
     }
@@ -301,6 +303,7 @@ private fun OverlayControl(
             state is FileUiState.Paused -> Icon(AlphaIcons.Outlined.Download, stringResource(R.string.transfer_download), tint = Color.White, modifier = Modifier.size(iconSize))
             state is FileUiState.Failed -> Icon(AlphaIcons.Filled.Refresh, stringResource(R.string.transfer_retry), tint = Color.White, modifier = Modifier.size(iconSize))
             state is FileUiState.NeedDownload -> Icon(AlphaIcons.Outlined.Download, stringResource(R.string.transfer_download), tint = Color.White, modifier = Modifier.size(iconSize))
+            state is FileUiState.Gone -> Icon(AlphaIcons.Outlined.CloudOff, stringResource(if (state.unknownServer) R.string.media_unknown_server else R.string.media_gone), tint = Color.White, modifier = Modifier.size(iconSize))
             state is FileUiState.Ready && state.playable -> Icon(AlphaIcons.Filled.PlayArrow, stringResource(R.string.editor_play), tint = Color.White, modifier = Modifier.size(iconSize))
             state is FileUiState.Sent -> Icon(AlphaIcons.Outlined.Check, null, tint = Color.White, modifier = Modifier.size(iconSize))
             else -> Unit
@@ -345,6 +348,7 @@ private fun overlayBytesLabel(state: FileUiState, idleSizeBytes: Long): String? 
         if (state.progress.isDeterminate) "${humanBytes(state.progress.bytes)} / ${humanBytes(state.progress.total)}"
         else idleSizeBytes.takeIf { it > 0 }?.let(::humanBytes)
     FileUiState.NeedDownload -> idleSizeBytes.takeIf { it > 0 }?.let(::humanBytes)
+    is FileUiState.Gone -> stringResource(if (state.unknownServer) R.string.media_unknown_server else R.string.media_gone)
     else -> null
 }
 

@@ -236,6 +236,10 @@ sealed interface TransferState {
      *  user can still tap ↓ to re-download manually. Persisted via the
      *  Repository (marker file on disk) — NOT SharedPreferences. */
     data object CacheEvicted : TransferState
+
+    /** Terminal: every server answered that it no longer holds the file. Not a
+     *  network fault — the bubble says the file is gone instead of offering ↻. */
+    data class Gone(val unknownServer: Boolean = false) : TransferState
 }
 
 // --- Derived helpers — the UI asks these instead of pattern-matching everywhere ---
@@ -257,7 +261,7 @@ val TransferState.isActive: Boolean
 /** Nothing more happens without user input. */
 val TransferState.isTerminal: Boolean
     get() = this is TransferState.Completed || this is TransferState.Failed ||
-        this is TransferState.Cancelled || this is TransferState.CacheEvicted
+        this is TransferState.Cancelled || this is TransferState.CacheEvicted || this is TransferState.Gone
 
 /** The file is on disk and openable. */
 val TransferState.isReady: Boolean

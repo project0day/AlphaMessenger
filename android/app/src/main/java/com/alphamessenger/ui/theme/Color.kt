@@ -592,6 +592,22 @@ fun carbonColorScheme() = greyColorScheme().copy(
     badgeBg     = Color(0xFFFF8A34),
 )
 
+/** Black — true #000 for OLED screens (dark pixels are switched off). */
+fun amoledColorScheme() = greyColorScheme().copy(
+    bgPrimary   = Color(0xFF000000),
+    bgSecondary = Color(0xFF000000),
+    bgTertiary  = Color(0xFF161616),
+    bgChat      = Color(0xFF000000),
+    accent      = Color(0xFF4F8DFF),
+    accentDim   = Color(0x264F8DFF),
+    accentGlow  = Color(0x664F8DFF),
+    msgOutStart = Color(0xFF3F7BFF),
+    msgOutEnd   = Color(0xFF2A5FD8),
+    msgIn       = Color(0xFF1A1A1A),
+    badgeBg     = Color(0xFF4F8DFF),
+    alphaBorder = Color(0x1FFFFFFF),
+)
+
 /** Violet — dark purple mystique (dark). */
 fun violetColorScheme() = greyColorScheme().copy(
     bgPrimary   = Color(0xFF1A1426),

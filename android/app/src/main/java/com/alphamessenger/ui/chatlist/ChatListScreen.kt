@@ -141,6 +141,8 @@ fun ChatListScreen(
     onOpenChatAt: (chatId: String, messageId: String) -> Unit = { c, _ -> onChatClick(c) },
     /** A found message: its chat, at that message, searching for [query]. */
     onOpenFound: (chatId: String, messageId: String, query: String) -> Unit = { c, m, _ -> onOpenChatAt(c, m) },
+    /** Relay settings: where the "no connection" line leads. */
+    onOpenRelays: () -> Unit = onSettingsClick,
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val colors = AlphaTheme.colorScheme
@@ -525,6 +527,7 @@ fun ChatListScreen(
             if (TabDockPrefs.top) {
                 TopTabDock(dockShown, dockTabs, uiState.selectedTab, viewModel::selectTab, colors)
             }
+            RelayLinkBanner(viewModel, colors, onOpenRelays)
             // Active-call banner — shows when a call is minimized.
             com.alphamessenger.calls.ui.CallBanner()
             com.alphamessenger.calls.group.GroupCallReturnBar()
@@ -574,7 +577,7 @@ fun ChatListScreen(
         val openFolder = ChatFolders.folders.firstOrNull { it.id == ChatFolders.selected }
         val chatsShown = if (openFolder == null) allChatsActive else {
             val recency = compareByDescending<ChatInfo> { it.pinnedAt > 0u }.thenByDescending { it.lastMessageAt.ifBlank { it.createdAt } }
-            (uiState.chats + uiState.groups).filter { it.id in openFolder.chats }
+            (uiState.chats + uiState.groups).filter { it.id in openFolder.chats && it.archivedAt == 0uL }
                 .filterByQuery(uiState.searchQuery, uiState.peerByChat).sortedWith(recency)
         }
         val unreadIn: (ChatFolder?) -> Int = { f ->
@@ -855,6 +858,7 @@ fun ChatListScreen(
         val archived = (uiState.chats + uiState.groups).filter { it.archivedAt > 0uL }
         ArchiveSheet(
             chats = archived,
+            peerByChat = uiState.peerByChat,
             colors = colors,
             onDismiss = { archiveOpen = false },
             onChatClick = { id -> archiveOpen = false; onChatClick(id) },
@@ -3088,6 +3092,7 @@ private fun MuteDurationSheet(
 @Composable
 private fun ArchiveSheet(
     chats: List<ChatInfo>,
+    peerByChat: Map<String, ChatPeerSnapshot>,
     colors: AlphaColorScheme,
     onDismiss: () -> Unit,
     onChatClick: (String) -> Unit,
@@ -3135,6 +3140,7 @@ private fun ArchiveSheet(
                             onClick = { onChatClick(chat.id) },
                             onLongClick = { onLongClick(chat) },
                             colors = colors,
+                            peer = peerByChat[chat.id],
                         )
                     }
                 }

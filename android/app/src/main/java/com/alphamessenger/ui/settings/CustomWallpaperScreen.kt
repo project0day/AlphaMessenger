@@ -49,7 +49,7 @@ import com.alphamessenger.ui.theme.customWallpaper
 import com.alphamessenger.ui.theme.customWallpaperBackground
 
 /** One colour of the background being made, as hue / saturation / brightness. */
-private class Hsv(h: Float, s: Float, v: Float) {
+internal class Hsv(h: Float, s: Float, v: Float) {
     var h by mutableFloatStateOf(h)
     var s by mutableFloatStateOf(s)
     var v by mutableFloatStateOf(v)
@@ -67,7 +67,7 @@ private class Hsv(h: Float, s: Float, v: Float) {
 }
 
 /** Deep tones that read well under bubbles, then a few bright ones. */
-private val PALETTE = listOf(
+internal val PALETTE = listOf(
     0xFF0F172A, 0xFF1E293B, 0xFF1F2A44, 0xFF1E3A5F, 0xFF0F3B4C, 0xFF0F2A2E, 0xFF12372A, 0xFF1F3A2E,
     0xFF3B2A6B, 0xFF4C1D95, 0xFF5B21B6, 0xFF6D28D9, 0xFF831843, 0xFF3A1C2E, 0xFF5A2B1B, 0xFF7C2D12,
     0xFF0EA5E9, 0xFF6366F1, 0xFF8B5CF6, 0xFFEC4899, 0xFFF97316, 0xFFEAB308, 0xFF10B981, 0xFF14B8A6,

@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import com.alphamessenger.data.AlphaCoreRepository
 import uniffi.alphamessenger.ChatInfo
@@ -113,6 +114,21 @@ class ChatListViewModel @Inject constructor(
 
     /** What the list header says instead of the logo; null — nothing to say. */
     enum class SyncStatus { WAITING_NETWORK, CONNECTING, UPDATING }
+
+    /** The user's relays as the core sees them (see [RelayLinkBanner]). */
+    enum class RelayLink { OK, OFF, NONE, RESERVE }
+
+    val relayLink: StateFlow<RelayLink> = repository.syncState
+        .map { s ->
+            when (s?.link) {
+                "off" -> RelayLink.OFF
+                "none" -> RelayLink.NONE
+                "reserve" -> RelayLink.RESERVE
+                else -> RelayLink.OK
+            }
+        }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000), RelayLink.OK)
 
     /** From the device's network and the core's own report. A state shorter
      *  than [STATUS_SHOW_AFTER_MS] never shows, so a quick reconnect or a short

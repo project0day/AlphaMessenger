@@ -131,6 +131,11 @@ fun CreateChannelSheet(
                 OptionSwitchRow(stringResource(R.string.history_newcomers), stringResource(R.string.history_newcomers_channel_hint),
                     checked = cfg.history ?: true, onCheckedChange = { cfg = cfg.copy(history = it) })
             }
+            Text(
+                stringResource(R.string.channel_storage_note),
+                color = colors.textMuted, fontSize = 12.sp, lineHeight = 16.sp,
+                modifier = Modifier.padding(start = 6.dp, end = 6.dp, top = 10.dp),
+            )
             Spacer(Modifier.height(14.dp))
             val ready = name.isNotBlank() && !busy
             Box(

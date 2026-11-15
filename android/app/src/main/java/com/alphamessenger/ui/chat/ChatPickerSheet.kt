@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -301,17 +302,27 @@ fun ChatPickerSheet(
                         }
                         Spacer(Modifier.width(8.dp))
                         val ready = selected.isNotEmpty()
-                        Box(
-                            Modifier.height(44.dp).clip(RoundedCornerShape(22.dp))
-                                .background(if (ready) colors.accent else colors.bgSecondary)
-                                .clickable(enabled = ready) { onConfirm(selected.toList(), comment, plain) }
-                                .padding(horizontal = 18.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                if (ready) stringResource(R.string.picker_send_count, selected.size) else stringResource(R.string.common_send),
-                                color = if (ready) Color.White else colors.textMuted, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                            )
+                        // Round send, like the chat's own; the count rides on it as a badge.
+                        Box {
+                            Box(
+                                Modifier.size(44.dp).clip(CircleShape)
+                                    .background(if (ready) colors.accent else colors.bgSecondary)
+                                    .clickable(enabled = ready) { onConfirm(selected.toList(), comment, plain) },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                androidx.compose.material3.Icon(
+                                    com.alphamessenger.ui.icons.AlphaIcons.AutoMirrored.Outlined.Send,
+                                    if (ready) stringResource(R.string.picker_send_count, selected.size) else stringResource(R.string.common_send),
+                                    tint = if (ready) Color.White else colors.textMuted, modifier = Modifier.size(21.dp),
+                                )
+                            }
+                            if (selected.size > 1) Box(
+                                Modifier.align(Alignment.TopEnd).offset(x = 4.dp, y = (-4).dp)
+                                    .heightIn(min = 18.dp).widthIn(min = 18.dp).clip(CircleShape)
+                                    .background(colors.bgPrimary).padding(1.5.dp).clip(CircleShape).background(colors.accent)
+                                    .padding(horizontal = 4.dp),
+                                contentAlignment = Alignment.Center,
+                            ) { Text("${selected.size}", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
                         }
                     }
                 }

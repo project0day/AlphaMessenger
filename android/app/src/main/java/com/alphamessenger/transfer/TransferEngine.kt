@@ -70,6 +70,15 @@ interface TransferRepository {
     /** Was this ref deliberately evicted by the user? Checks the marker file. */
     fun isCacheEvicted(ref: String): Boolean
 
+    /** Every server told the last download that the copies are gone. */
+    fun isGone(ref: String): Boolean = false
+
+    /** The copies are not gone, only kept on a server the sender named (reached through Tor). */
+    fun goneUnknownServer(ref: String): Boolean = false
+
+    /** The user asked to try again: drop the "gone" verdict. */
+    fun forgetGone(ref: String) {}
+
     /** Byte-level progress: (opId, done, total). Collected ONCE — by the engine. */
     val progress: SharedFlow<Triple<String, Long, Long>>
 
@@ -362,7 +371,8 @@ class TransferEngine(
             // auto-download; otherwise Idle. The bubble's `streamable` flag turns a
             // streamable ref into a Ready(▶) — that is message metadata, not disk.
             else -> {
-                if (repo.isCacheEvicted(key.ref)) put(key, TransferState.CacheEvicted)
+                if (repo.isGone(key.ref)) put(key, TransferState.Gone(repo.goneUnknownServer(key.ref)))
+                else if (repo.isCacheEvicted(key.ref)) put(key, TransferState.CacheEvicted)
                 else if (cur == null) put(key, TransferState.Idle)
             }
         }
@@ -395,6 +405,8 @@ class TransferEngine(
         if (isOutgoing) return
         val s = stateOf(key)
         if (s is TransferState.Completed) return
+        // The servers already said the copies are gone; only a tap asks them again.
+        if (s is TransferState.Gone) return
         // Already active (downloading/queued/etc.) — never start a duplicate.
         if (s.isActive) return
         // User paused this download — don't auto-resume on re-trigger.
@@ -522,6 +534,7 @@ class TransferEngine(
         if (!inOrder) waitingTurn.remove(key.value)?.complete(Unit)
         if (stateOf(key) is TransferState.Completed) return
         cancelled.remove(key.value)
+        repo.forgetGone(key.ref)
         // The user explicitly tapped ↓ — clear the eviction marker so future
         // consider() calls (after a re-download completes and is evicted again)
         // work correctly.
@@ -595,6 +608,10 @@ class TransferEngine(
                 }
                 wasCancelled -> put(key, TransferState.Cancelled)
                 wasPaused -> put(key, TransferState.Idle)
+                repo.isGone(key.ref) -> {
+                    put(key, TransferState.Gone(repo.goneUnknownServer(key.ref)))
+                    logEvent(key.value, TransferEvent.Kind.Failed, "gone")
+                }
                 else -> {
                     put(key, TransferState.Failed())
                     logEvent(key.value, TransferEvent.Kind.Failed)
@@ -1036,6 +1053,10 @@ class TransferEngine(
             done == all.size -> TransferState.Completed(null)
             all.any { it is TransferState.Failed } ->
                 all.first { it is TransferState.Failed }
+            // Everything still missing is gone from the servers: nothing to fetch.
+            all.none { it.isActive } && all.any { it is TransferState.Gone } &&
+                all.all { it is TransferState.Gone || it is TransferState.Completed } ->
+                TransferState.Gone(all.any { (it as? TransferState.Gone)?.unknownServer == true })
             all.none { it.isActive } ->
                 if (all.any { it is TransferState.Cancelled }) TransferState.Cancelled
                 else TransferState.Idle

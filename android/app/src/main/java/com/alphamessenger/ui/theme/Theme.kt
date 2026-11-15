@@ -20,6 +20,7 @@ enum class AlphaThemeVariant(val displayName: String, val isLight: Boolean = fal
     GREY("Grey"),
     MIDNIGHT("Midnight"),
     CARBON("Carbon"),
+    AMOLED("Black"),
     VIOLET("Violet"),
     COSMOS("Cosmos"),
     EMERALD("Emerald"),
@@ -122,6 +123,7 @@ fun AlphaTheme(
         AlphaThemeVariant.GREY     -> greyColorScheme()
         AlphaThemeVariant.MIDNIGHT -> midnightColorScheme()
         AlphaThemeVariant.CARBON   -> carbonColorScheme()
+        AlphaThemeVariant.AMOLED   -> amoledColorScheme()
         AlphaThemeVariant.VIOLET   -> violetColorScheme()
         AlphaThemeVariant.COSMOS   -> cosmosColorScheme()
         AlphaThemeVariant.EMERALD  -> emeraldColorScheme()

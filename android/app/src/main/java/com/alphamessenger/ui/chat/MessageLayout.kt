@@ -279,10 +279,11 @@ fun MessageLayout(
             val reportBounds = LocalBubbleBounds.current
             val tail = hasTail(message)
             val plain = LocalPlainIncoming.current && !message.isOutgoing
-            val spotShape = remember(postWidth != null, message.isOutgoing, tail, plain) {
+            val bubbleRadius = com.alphamessenger.ui.theme.LocalBubbleRadius.current
+            val spotShape = remember(postWidth != null, message.isOutgoing, tail, plain, bubbleRadius) {
                 if (plain) androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
                 else if (postWidth != null) androidx.compose.foundation.shape.RoundedCornerShape(com.alphamessenger.ui.channel.CHANNEL_BUBBLE_RADIUS)
-                else bubbleShape(outgoing = message.isOutgoing, showTail = tail)
+                else bubbleShape(outgoing = message.isOutgoing, showTail = tail, radius = bubbleRadius)
             }
             val boundsModifier = if (reportBounds != null)
                 Modifier.onGloballyPositioned { reportBounds(BubbleSpot(it.boundsInRoot(), spotShape)) } else Modifier

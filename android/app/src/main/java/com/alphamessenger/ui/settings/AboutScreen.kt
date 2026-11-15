@@ -51,7 +51,7 @@ import com.alphamessenger.ui.icons.AlphaIcons
 import com.alphamessenger.ui.theme.AlphaTheme
 
 /** The public repository. Empty: the source rows say "soon" and the GitHub links hide. */
-const val SOURCE_URL = "https://github.com/Vincentdiligent/AlphaMessenger"
+const val SOURCE_URL = "https://github.com/project0day/AlphaMessenger"
 
 /** Where people can support the project. Empty: the row hides. */
 const val DONATE_URL = ""

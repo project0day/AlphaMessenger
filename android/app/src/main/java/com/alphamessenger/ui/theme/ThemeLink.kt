@@ -58,11 +58,14 @@ fun ThemeLinkHost() {
             )
             if (theme != null) {
                 val scheme = remember(theme) { theme.scheme() }
-                com.alphamessenger.ui.settings.LiveChatPreview(scheme = scheme, wallpaper = wallpaper, msgFontFactor = 1f)
+                // The theme's own pattern, when it brings one, instead of the background set now.
+                val shown = theme.pattern?.let { ChatWallpaper.Pattern(it.id(), it) } ?: wallpaper
+                com.alphamessenger.ui.settings.LiveChatPreview(scheme = scheme, wallpaper = shown, msgFontFactor = 1f)
                 Box(
                     Modifier.fillMaxWidth().padding(top = 14.dp).height(52.dp).clip(RoundedCornerShape(16.dp)).background(scheme.accent)
                         .clickable {
                             vm.saveCustomTheme(theme)
+                            theme.pattern?.let { p -> PatternStore.save(ctx, p); vm.setChatWallpaper(ChatWallpaper.Pattern(p.id(), p)) }
                             android.widget.Toast.makeText(ctx, ctx.getString(R.string.theme_applied), android.widget.Toast.LENGTH_SHORT).show()
                             ThemeUi.request = null
                         },
@@ -76,7 +79,7 @@ fun ThemeLinkHost() {
 
 /** The first theme link in [text], if any. */
 fun extractThemeLink(text: String): String? =
-    Regex(Regex.escape(THEME_LINK_PREFIX) + """[A-Za-z0-9_\-]+""").find(text)?.value
+    Regex(Regex.escape(THEME_LINK_PREFIX) + """[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)?""").find(text)?.value
 
 /**
  * A theme in a message: its colours on a tiny chat, its name, and "View" (the
@@ -98,8 +101,10 @@ fun ThemeLinkCard(link: String, colors: AlphaColorScheme, onAccentBubble: Boolea
             val chatBg = theme.background?.let { b1 ->
                 androidx.compose.ui.graphics.Brush.verticalGradient(listOf(b1, theme.background2 ?: b1))
             } ?: androidx.compose.ui.graphics.SolidColor(scheme.bgChat)
+            Box(Modifier.fillMaxWidth().height(92.dp).clip(RoundedCornerShape(10.dp)).background(chatBg)) {
+            theme.pattern?.let { PatternWallpaper(it, Modifier.matchParentSize(), dark = !theme.isLight) }
             Column(
-                Modifier.fillMaxWidth().height(92.dp).clip(RoundedCornerShape(10.dp)).background(chatBg).padding(8.dp),
+                Modifier.fillMaxWidth().height(92.dp).padding(8.dp),
                 verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
             ) {
                 Box(Modifier.width(118.dp).height(20.dp).clip(RoundedCornerShape(10.dp)).background(scheme.msgIn))
@@ -108,6 +113,7 @@ fun ThemeLinkCard(link: String, colors: AlphaColorScheme, onAccentBubble: Boolea
                         .background(androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(scheme.msgOutStart, scheme.msgOutEnd))),
                 )
                 Box(Modifier.width(84.dp).height(20.dp).clip(RoundedCornerShape(10.dp)).background(scheme.msgIn))
+            }
             }
             Spacer(Modifier.height(8.dp))
         }

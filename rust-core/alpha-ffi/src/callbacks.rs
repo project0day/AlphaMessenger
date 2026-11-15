@@ -78,7 +78,7 @@ pub trait AlphaMessengerCallback: Send + Sync {
 
     /// How far the receiving side is: `connected` live relays out of the
     /// `relays` enabled ones, and whether a catch-up is running.
-    fn on_sync_state(&self, connected: u32, relays: u32, catching_up: bool);
+    fn on_sync_state(&self, connected: u32, relays: u32, catching_up: bool, link: String);
 
     /// BLOCK K — Unified Event Dispatcher. A COALESCED BATCH of high-frequency
     /// events (media progress, typing/recording, delivery updates) delivered in
@@ -223,9 +223,9 @@ impl CallbackDispatcher {
     }
 
     /// Fire `on_sync_state` on the registered callback.
-    pub fn on_sync_state(&self, connected: u32, relays: u32, catching_up: bool) {
+    pub fn on_sync_state(&self, connected: u32, relays: u32, catching_up: bool, link: String) {
         if let Some(cb) = self.current() {
-            cb.on_sync_state(connected, relays, catching_up);
+            cb.on_sync_state(connected, relays, catching_up, link);
         }
     }
 
@@ -328,7 +328,7 @@ mod tests {
         fn on_member_leave_requested(&self, _chat_id: String, _leaver_npub: String) {
             // Test stub.
         }
-        fn on_sync_state(&self, _connected: u32, _relays: u32, _catching_up: bool) {}
+        fn on_sync_state(&self, _connected: u32, _relays: u32, _catching_up: bool, _link: String) {}
         fn on_relay_status_change(&self, _relay_url: String, _status: String) {
             self.relay_status_changes.fetch_add(1, Ordering::SeqCst);
         }

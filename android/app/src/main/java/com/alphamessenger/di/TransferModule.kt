@@ -99,6 +99,12 @@ object TransferModule {
 
         override fun isCacheEvicted(ref: String): Boolean = evictedFile(ref).exists()
 
+        override fun isGone(ref: String): Boolean = repository.isMediaGone(ref)
+
+        override fun goneUnknownServer(ref: String): Boolean = repository.isMediaOnUnknownServer(ref)
+
+        override fun forgetGone(ref: String) = repository.forgetMediaGone(ref)
+
         override val progress get() = repository.mediaProgress
         override val blobServer get() = "blossom.primal.net"
     }

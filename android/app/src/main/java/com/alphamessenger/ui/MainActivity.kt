@@ -208,19 +208,20 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
             val systemDark = androidx.compose.foundation.isSystemInDarkTheme()
             androidx.compose.runtime.LaunchedEffect(systemDark) { themeViewModel.onSystemDarkChanged(systemDark) }
             val variant by themeViewModel.themeVariant.collectAsState()
-            val uiFontSize by themeViewModel.uiFontSize.collectAsState()
-            val msgFontSize by themeViewModel.messageFontSize.collectAsState()
+            val msgFontScale by themeViewModel.messageFontScale.collectAsState()
+            val bubbleRadius by themeViewModel.bubbleRadius.collectAsState()
             val chatWallpaper by themeViewModel.chatWallpaper.collectAsState()
             val customTheme by themeViewModel.activeCustom.collectAsState()
             AlphaTheme(
                 variant = variant,
                 custom = customTheme,
-                typography = com.alphamessenger.ui.theme.AlphaTypography
-                    .scaledBy(uiFontSize.factor),
+                // Interface text follows the system font size; only messages have their own.
+                typography = com.alphamessenger.ui.theme.AlphaTypography,
             ) {
               com.alphamessenger.ui.theme.ProvideAppearance(
-                messageFontScale = msgFontSize.factor,
+                messageFontScale = msgFontScale,
                 chatWallpaper = chatWallpaper,
+                bubbleRadius = bubbleRadius,
               ) {
                 // Joining through a link always waits for a yes.
                 inviteToConfirm.value?.let { link ->

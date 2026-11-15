@@ -1,0 +1,6 @@
+node_modules/
+.wrangler/
+dist/
+.upload-token
+.dev.vars
+.b2key

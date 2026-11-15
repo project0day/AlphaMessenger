@@ -20,7 +20,7 @@ object TextParser {
 
     // Alpha links, and a Nostr emoji set's address (opens the Nostr emoji import).
     private val INVITE_RE =
-        Regex("""alpha://(?:group/invite|group|channel|stickers|theme)/[A-Za-z0-9_\-]+|nostr:naddr1[02-9ac-hj-np-z]+""")
+        Regex("""alpha://(?:group/invite|group|channel|stickers)/[A-Za-z0-9_\-]+|alpha://theme/[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)?|nostr:naddr1[02-9ac-hj-np-z]+""")
 
     private val URL_RE =
         Regex("""(https?://|www\.)[^\s<>"']+""", RegexOption.IGNORE_CASE)

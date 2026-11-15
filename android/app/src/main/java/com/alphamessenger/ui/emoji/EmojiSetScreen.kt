@@ -86,9 +86,10 @@ fun EmojiSetCard(post: FeedPost, colors: AlphaColorScheme, repo: AlphaCoreReposi
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     val set = rememberSet()
     val ready by AnimatedEmoji.ready.collectAsState()
-    val installed = remember(ready, set) { AnimatedEmoji.installedRef(ctx) }
+    val hasThis = remember(ready, set, post.set) { post.set?.let { AnimatedEmoji.has(ctx, it) } ?: true }
     var fetching by remember { mutableStateOf(false) }
-    val behind = set.isNotEmpty() && post.set != null && installed != null && installed != post.set
+    // Another set is on the phone but not this one: one tap adds it to them.
+    val behind = set.isNotEmpty() && !hasThis
     Column(
         modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(colors.bgSecondary).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),

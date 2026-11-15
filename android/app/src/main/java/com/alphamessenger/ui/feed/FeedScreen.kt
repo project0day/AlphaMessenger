@@ -132,6 +132,8 @@ fun FeedScreen(colors: AlphaColorScheme, repo: AlphaCoreRepository, onDismiss: (
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     FeedStore.load(ctx)
+    StickerCatalog.load(ctx)
+    var packQuery by rememberSaveable { mutableStateOf("") }
     var tab by rememberSaveable { mutableStateOf(FeedTab.NEWS) }
     var loading by remember { mutableStateOf(false) }
     var composing by remember { mutableStateOf(false) }
@@ -179,13 +181,20 @@ fun FeedScreen(colors: AlphaColorScheme, repo: AlphaCoreRepository, onDismiss: (
                     }
                 }
                 val posts = FeedStore.posts
+                val catalog = StickerCatalog.packs
+                // The catalog, then pack posts from before it that it does not hold yet.
+                val allPacks = remember(catalog, posts) {
+                    val known = catalog.mapTo(HashSet()) { it.link }
+                    catalog.map { FeedPost(CATALOG_ID + it.link, it.at, FeedKind.PACK, it.name, "", pack = it.link) } +
+                        posts.filter { it.kind == FeedKind.PACK && it.pack != null && it.pack !in known }
+                }
                 when (tab) {
                     FeedTab.NEWS -> LazyColumn(
                         Modifier.fillMaxWidth().weight(1f),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        val packs = posts.filter { it.kind == FeedKind.PACK && it.pack != null }
+                        val packs = allPacks
                         if (packs.isNotEmpty()) item(key = "packs") {
                             Column {
                                 Row(Modifier.fillMaxWidth().padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -205,7 +214,11 @@ fun FeedScreen(colors: AlphaColorScheme, repo: AlphaCoreRepository, onDismiss: (
                         }
                     }
                     FeedTab.PACKS -> {
-                        val packs = posts.filter { it.kind == FeedKind.PACK && it.pack != null }
+                        val q = packQuery.trim()
+                        val packs = if (q.isEmpty()) allPacks else allPacks.filter { it.title.contains(q, ignoreCase = true) }
+                        if (allPacks.size > 12) OutlinedTextField(value = packQuery, onValueChange = { packQuery = it.take(60) }, singleLine = true,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                            placeholder = { Text(stringResource(R.string.feed_search_packs), color = colors.textMuted) })
                         if (packs.isEmpty()) Box(Modifier.weight(1f)) { Empty(colors, loading) }
                         else LazyVerticalGrid(
                             columns = GridCells.Fixed(2), modifier = Modifier.fillMaxWidth().weight(1f),
@@ -213,7 +226,9 @@ fun FeedScreen(colors: AlphaColorScheme, repo: AlphaCoreRepository, onDismiss: (
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             items(packs, key = { it.id }) { p ->
-                                PackCard(p, colors, repo, Modifier.combinedClickable(onClick = {}, onLongClick = { if (FeedStore.isOwner) removing = p }))
+                                // Catalog packs are not posts: nothing to remove by holding them.
+                                PackCard(p, colors, repo, Modifier.combinedClickable(onClick = {},
+                                    onLongClick = { if (FeedStore.isOwner && !p.id.startsWith(CATALOG_ID)) removing = p }))
                             }
                         }
                     }
@@ -494,7 +509,49 @@ private fun FeedComposer(colors: AlphaColorScheme, repo: AlphaCoreRepository, on
     var deletingPack by remember { mutableStateOf<com.alphamessenger.ui.sticker.StickerPack?>(null) }
     // Several packs at once (a hold starts picking): each goes out as its own post, under its own name.
     var picked by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var removingPicked by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf<String?>(null) }
+    val publishing by PackPublishService.state.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(publishing) {
+        (publishing as? PackPublishState.Done)?.let { r ->
+            android.widget.Toast.makeText(ctx, ctx.resources.getQuantityString(R.plurals.feed_published_packs, r.done, r.done, r.total), android.widget.Toast.LENGTH_LONG).show()
+            // What did not go out stays picked, for one more tap.
+            picked = r.failed; packId = null
+            PackPublishService.consume()
+        }
+    }
+    val packRunning = publishing as? PackPublishState.Running
+    // Several packs at once out of the channel's catalog, and off this phone too if asked.
+    if (removingPicked) {
+        val chosen = ownPacks.filter { it.id in picked }
+        fun remove(alsoPhone: Boolean) {
+            removingPicked = false
+            scope.launch {
+                busy = true
+                val key = FeedStore.ownerKey(ctx)
+                val links = chosen.mapNotNull { it.link }.toSet()
+                val ok = key != null && (links.isEmpty() || StickerCatalog.remove(ctx, repo, key, links))
+                if (ok && alsoPhone) chosen.forEach { StickerStore.delete(ctx, it.id) }
+                if (ok) picked = emptySet()
+                busy = false
+                android.widget.Toast.makeText(ctx, ctx.getString(if (ok) R.string.feed_removed_packs else R.string.feed_publish_failed, chosen.size),
+                    android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+        AlertDialog(
+            onDismissRequest = { removingPicked = false },
+            containerColor = colors.bgSecondary,
+            title = { Text(stringResource(R.string.feed_remove_packs_title, chosen.size), color = colors.textPrimary) },
+            text = { Text(stringResource(R.string.feed_remove_packs_body), color = colors.textSecondary, fontSize = 14.sp) },
+            confirmButton = {
+                Column(horizontalAlignment = Alignment.End) {
+                    TextButton(onClick = { remove(false) }) { Text(stringResource(R.string.feed_remove_from_channel), color = colors.danger) }
+                    TextButton(onClick = { remove(true) }) { Text(stringResource(R.string.feed_remove_everywhere), color = colors.danger) }
+                    TextButton(onClick = { removingPicked = false }) { Text(stringResource(R.string.common_cancel), color = colors.textMuted) }
+                }
+            },
+        )
+    }
     deletingPack?.let { p ->
         AlertDialog(
             onDismissRequest = { deletingPack = null },
@@ -547,7 +604,7 @@ private fun FeedComposer(colors: AlphaColorScheme, repo: AlphaCoreRepository, on
             Text(stringResource(R.string.feed_new_post), color = colors.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             val ready = !busy && when (kind) {
                 FeedKind.NEWS -> title.isNotBlank() || body.isNotBlank()
-                FeedKind.PACK -> packId != null || picked.isNotEmpty()
+                FeedKind.PACK -> (packId != null || picked.isNotEmpty()) && packRunning == null
                 FeedKind.GIF -> gif != null
                 FeedKind.EMOJI -> setFile != null && title.isNotBlank()
                 FeedKind.UPDATE -> apkInfo != null
@@ -558,23 +615,13 @@ private fun FeedComposer(colors: AlphaColorScheme, repo: AlphaCoreRepository, on
                     .clickable(enabled = ready) {
                         busy = true
                         scope.launch {
-                            if (kind == FeedKind.PACK && picked.isNotEmpty()) {
-                                val chosen = ownPacks.filter { it.id in picked }
-                                var done = 0
-                                for ((i, p) in chosen.withIndex()) {
-                                    progress = ctx.getString(R.string.feed_publishing_of, i + 1, chosen.size)
-                                    val link = StickerStore.publishLatest(ctx, repo, p.id) ?: continue
-                                    val post = FeedPost("p${System.currentTimeMillis()}_$i", 0, FeedKind.PACK, p.name, body.trim(), pack = link)
-                                    if (FeedStore.publish(ctx, repo, post, null, null)) done++
-                                }
-                                progress = null
+                            // Packs go into the catalog, in the background: the owner may leave meanwhile.
+                            if (kind == FeedKind.PACK) {
+                                PackPublishService.start(ctx, picked.ifEmpty { setOfNotNull(packId) })
                                 busy = false
-                                android.widget.Toast.makeText(ctx, ctx.resources.getQuantityString(R.plurals.feed_published_packs, done, done, chosen.size),
-                                    android.widget.Toast.LENGTH_LONG).show()
-                                if (done == chosen.size) onClose() else picked = chosen.map { it.id }.toSet()
+                                android.widget.Toast.makeText(ctx, ctx.getString(R.string.pack_publish_background), android.widget.Toast.LENGTH_SHORT).show()
                                 return@launch
                             }
-                            val pack = packId?.let { StickerStore.publishLatest(ctx, repo, it) }
                             val imgFile = image?.let { uri ->
                                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                     val f = File(ctx.cacheDir, "feed_img_${System.currentTimeMillis()}.jpg")
@@ -582,11 +629,11 @@ private fun FeedComposer(colors: AlphaColorScheme, repo: AlphaCoreRepository, on
                                 }
                             }
                             val apk = if (kind == FeedKind.UPDATE) apkInfo else null
-                            val post = FeedPost("p" + System.currentTimeMillis(), 0, kind, title.trim(), body.trim(), pack = if (kind == FeedKind.PACK) pack else null,
+                            val post = FeedPost("p" + System.currentTimeMillis(), 0, kind, title.trim(), body.trim(),
                                 versionCode = apk?.versionCode ?: 0, versionName = apk?.versionName, sha256 = apk?.sha256,
                                 level = if (kind == FeedKind.ALERT) alertLevel else null,
                                 until = if (kind == FeedKind.ALERT && alertDays > 0) System.currentTimeMillis() / 1000 + alertDays * 86_400L else 0)
-                            val ok = (kind != FeedKind.PACK || pack != null) && FeedStore.publish(ctx, repo, post,
+                            val ok = FeedStore.publish(ctx, repo, post,
                                 if (kind == FeedKind.NEWS) imgFile else null,
                                 if (kind == FeedKind.GIF) gif?.let { File(it) } else null,
                                 if (kind == FeedKind.EMOJI) setFile else null,
@@ -601,9 +648,13 @@ private fun FeedComposer(colors: AlphaColorScheme, repo: AlphaCoreRepository, on
                         }
                     }.padding(horizontal = 18.dp, vertical = 9.dp),
             ) {
-                if (busy) Row(verticalAlignment = Alignment.CenterVertically) {
+                val running = packRunning?.takeIf { kind == FeedKind.PACK }
+                if (busy || running != null) Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
-                    progress?.let { Spacer(Modifier.width(8.dp)); Text(it, color = Color.White, fontSize = 13.sp) }
+                    (running?.let { stringResource(if (it.moving) R.string.pack_publish_moving_short else R.string.feed_publishing_of, it.done, it.total) } ?: progress)?.let { Spacer(Modifier.width(8.dp)); Text(it, color = Color.White, fontSize = 13.sp) }
+                    // Stop from here too, not only from the notification.
+                    if (running != null) Text("  ✕", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.clickable { PackPublishService.cancel(ctx) }.padding(start = 6.dp))
                 }
                 else Text(stringResource(R.string.feed_publish), color = if (ready) Color.White else colors.textMuted, fontWeight = FontWeight.Bold)
             }
@@ -663,6 +714,23 @@ private fun FeedComposer(colors: AlphaColorScheme, repo: AlphaCoreRepository, on
                         }
                     }
                     if (ownPacks.isEmpty()) item { Text(stringResource(R.string.feed_no_own_packs), color = colors.textMuted, fontSize = 13.sp) }
+                    // After a mass import: everything, or only what the feed does not have yet.
+                    val inFeed = StickerCatalog.packs.mapTo(HashSet()) { it.link }.apply { FeedStore.posts.mapNotNullTo(this) { it.pack } }
+                    val fresh = ownPacks.filter { it.link == null || it.link !in inFeed }
+                    if (ownPacks.size > 1) item {
+                        Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()).padding(horizontal = 6.dp, vertical = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Choice(colors, picked.size == ownPacks.size, stringResource(R.string.feed_pick_all, ownPacks.size), colors.accent) {
+                                picked = ownPacks.map { it.id }.toSet(); packId = null
+                            }
+                            if (fresh.isNotEmpty() && fresh.size < ownPacks.size)
+                                Choice(colors, picked == fresh.map { it.id }.toSet(), stringResource(R.string.feed_pick_fresh, fresh.size), colors.accent) {
+                                    picked = fresh.map { it.id }.toSet(); packId = null
+                                }
+                            if (picked.isNotEmpty()) Choice(colors, false, stringResource(R.string.feed_pick_none), colors.accent) { picked = emptySet() }
+                            if (picked.isNotEmpty()) Choice(colors, false, stringResource(R.string.feed_pick_remove, picked.size), colors.danger) { removingPicked = true }
+                        }
+                    }
                     if (picked.isNotEmpty()) item {
                         Text(pluralStringResource(R.plurals.feed_packs_picked, picked.size, picked.size),
                             color = colors.textSecondary, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
@@ -688,7 +756,10 @@ private fun FeedComposer(colors: AlphaColorScheme, repo: AlphaCoreRepository, on
                             }
                             p.cover?.let { StickerImage(it.file, Modifier.size(44.dp), 96) }
                             Spacer(Modifier.width(12.dp))
-                            Text(p.name, color = colors.textPrimary, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                            Column(Modifier.weight(1f)) {
+                                Text(p.name, color = colors.textPrimary, fontSize = 15.sp)
+                                if (p.link != null && p.link in inFeed) Text(stringResource(R.string.feed_pack_in_feed), color = colors.textMuted, fontSize = 12.sp)
+                            }
                             // A pack made by mistake or twice goes from here, with the question first.
                             IconButton(onClick = { deletingPack = p }) {
                                 Icon(AlphaIcons.Outlined.Delete, stringResource(R.string.common_delete), tint = colors.textMuted)
@@ -783,3 +854,4 @@ private val SET_ENTRY = Regex("""^[0-9a-f_]{1,64}\.json$""")
 
 /** Files that make an archive a sticker pack (for the Stickers tab, not the emoji set). */
 private val STICKER_KINDS = setOf("tgs", "lottie", "json", "webp", "gif", "png")
+private const val CATALOG_ID = "cat:"

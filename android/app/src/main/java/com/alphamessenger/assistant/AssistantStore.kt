@@ -142,7 +142,9 @@ object AssistantStore {
 
     fun profile(id: String): AssistantProfile? = _profiles.value.firstOrNull { it.id == id }
     fun profileOfChat(chatId: String): AssistantProfile? =
-        chatId.removePrefix(AssistantProfile.CHAT_PREFIX).takeIf { chatId.startsWith(AssistantProfile.CHAT_PREFIX) }?.let(::profile)
+        // A past conversation is "<profile chat>~<id>".
+        chatId.removePrefix(AssistantProfile.CHAT_PREFIX).substringBefore('~')
+            .takeIf { chatId.startsWith(AssistantProfile.CHAT_PREFIX) }?.let(::profile)
 
     fun apiKey(id: String): String = prefs?.getString("key:$id", null).orEmpty()
 

@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 // ══════════════════════════════════════════════════════════════════════
@@ -124,6 +125,9 @@ sealed class ChatWallpaper {
      */
     data class Custom(override val id: String, val colors: List<Color>, val degrees: Float) : ChatWallpaper()
 
+    /** Figures repeated over a colour or gradient ([PatternSpec]); the whole spec lives in [id]. */
+    data class Pattern(override val id: String, val spec: PatternSpec) : ChatWallpaper()
+
     /** A user-picked photo. [uri] points at a file in app-private storage. */
     data class Gallery(override val id: String, val uri: String) : ChatWallpaper()
 
@@ -215,6 +219,7 @@ fun resolveWallpaper(id: String?, galleryUri: String?): ChatWallpaper = when {
     WALLPAPER_SOLID_PRESETS.firstOrNull { it.id == id } != null ->
         WALLPAPER_SOLID_PRESETS.first { it.id == id }
     id.startsWith("custom:") -> parseCustomWallpaper(id) ?: ChatWallpaper.Default
+    id.startsWith(PATTERN_PREFIX) -> PatternSpec.fromId(id)?.let { ChatWallpaper.Pattern(id, it) } ?: ChatWallpaper.Default
     else -> ChatWallpaper.Default
 }
 
@@ -235,6 +240,16 @@ fun ChatWallpaper.persistId(): String = when (this) {
  * `fontSize = 15.spScaled(LocalMessageFontScale.current)`.
  */
 val LocalMessageFontScale = staticCompositionLocalOf { 1.0f }
+
+/** Message text scale range for the slider; 1.0 = the design size. */
+const val MSG_FONT_MIN = 0.85f
+const val MSG_FONT_MAX = 1.45f
+
+/** Corner radius of chat bubbles, set by the user (default = the design's 18dp). */
+val LocalBubbleRadius = staticCompositionLocalOf { BUBBLE_RADIUS_DEFAULT.dp }
+const val BUBBLE_RADIUS_DEFAULT = 18f
+const val BUBBLE_RADIUS_MIN = 4f
+const val BUBBLE_RADIUS_MAX = 24f
 
 /**
  * The currently selected chat wallpaper. Read it where the chat surface
@@ -261,10 +276,12 @@ object Appearance {
 fun ProvideAppearance(
     messageFontScale: Float,
     chatWallpaper: ChatWallpaper,
+    bubbleRadius: Float = BUBBLE_RADIUS_DEFAULT,
     content: @Composable () -> Unit,
 ) {
     CompositionLocalProvider(
         LocalMessageFontScale provides messageFontScale,
+        LocalBubbleRadius provides bubbleRadius.dp,
         LocalChatWallpaper provides chatWallpaper,
         content = content,
     )
@@ -315,6 +332,8 @@ fun ChatWallpaperBackground(
                 modifier = modifier.customWallpaperBackground(wallpaper.colors, wallpaper.degrees)
             )
         }
+
+        is ChatWallpaper.Pattern -> PatternWallpaper(wallpaper.spec, modifier)
 
         is ChatWallpaper.Gallery -> {
             // Coil decodes off the Main thread + downsamples to the viewport +

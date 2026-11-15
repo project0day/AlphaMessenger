@@ -481,7 +481,10 @@ object StickerStore {
         try {
             var p = ensureKeys(ctx, repo, packId) ?: return@withContext null
             if (!p.own || p.builtin) return@withContext null
-            val refs = p.stickers.map { s -> refFor(ctx, repo, packId, s) ?: return@withContext null }
+            val gate = kotlinx.coroutines.sync.Semaphore(6)
+            val refs = kotlinx.coroutines.coroutineScope {
+                p.stickers.map { s -> async { gate.withPermit { refFor(ctx, repo, packId, s) } } }.map { it.await() }
+            }.map { it ?: return@withContext null }
             val sig = (refs + p.stickers.map { it.emoji } + p.name).joinToString("|").hashCode().toString()
             p = pack(ctx, packId) ?: return@withContext null
             if (p.linkOf == sig && p.version != null) return@withContext p.link

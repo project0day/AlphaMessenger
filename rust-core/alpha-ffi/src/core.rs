@@ -156,6 +156,8 @@ const KV_NO_STORE_PREFIX: &str = "no_store:";
 const KV_MEDIA_VAULT_KEY: &str = "media_vault_key";
 /// Global "don't keep on servers" default for every chat.
 const KV_NO_STORE_DEFAULT: &str = "no_store_default";
+/// The user's own media servers, one base URL per line.
+const KV_OWN_MEDIA_SERVERS: &str = "own_media_servers";
 /// Prefix: media scheduled for deletion from storage servers.
 const KV_PURGE_PREFIX: &str = alpha_database::whispers::MEDIA_PURGE_PREFIX;
 /// Keep media this long after every recipient got the message (time to download).
@@ -174,6 +176,7 @@ fn expired_media() -> &'static std::sync::Mutex<Vec<String>> {
 /// Alpha's feed key (public half): only posts it signed are shown.
 const ALPHA_FEED_PUBKEY: &str = "68e4444782adfea8a2c1bd66a75569b81cb2ef33543c86d5613e538a3f8f44aa";
 const ALPHA_FEED_TAG: &str = "alpha-feed";
+const ALPHA_CATALOG_TAG: &str = "alpha-catalog";
 
 /// A 32-byte key from hex.
 fn read_key32(hex_str: &str) -> Result<[u8; 32], MessengerError> {
@@ -993,7 +996,7 @@ mod secret_chat;
 mod devices;
 mod relay_routes;
 mod assistant;
-pub use assistant::{is_local_chat, is_assistant_chat};
+pub use assistant::{is_local_chat, is_assistant_chat, is_assistant_conversation, AssistantConversation};
 
 /// Running catch-ups and live relays, reported to the app as they change — the
 /// app shows "connecting" / "updating" from it.
@@ -1025,7 +1028,19 @@ impl SyncGauge {
             let relays = statuses.iter().filter(|s| s.enabled).count() as u32;
             let connected = statuses.iter().filter(|s| s.enabled && s.connected).count() as u32;
             let catching_up = g.running.load(std::sync::atomic::Ordering::SeqCst) > 0;
-            g.callback.on_sync_state(connected, relays, catching_up);
+            // What the user must know about their relays: "reserve" (we sit on
+            // ours), "none" (all deleted), "off" (all switched off), else "ok".
+            let own: Vec<_> = statuses.iter().filter(|s| users_relay(&s.url)).collect();
+            let link = if alpha_transport::nostr_relay_client::reserve_active() {
+                "reserve"
+            } else if own.is_empty() {
+                "none"
+            } else if own.iter().all(|s| !s.enabled) {
+                "off"
+            } else {
+                "ok"
+            };
+            g.callback.on_sync_state(connected, relays, catching_up, link.to_string());
         });
     }
 }
@@ -1061,6 +1076,21 @@ pub enum MessengerError {
     NetworkError { description: String },
     #[error("KeyPackage exhausted for peer {peer} — they must publish fresh KeyPackages")]
     KeyPackageExhausted { peer: String },
+    /// No media server holds the file any more: the copies were deleted.
+    #[error("Media is no longer stored on any server")]
+    MediaGone,
+    /// The file is only on a server the sender named; reached only through Tor.
+    #[error("Media is only on an unknown server")]
+    MediaUnknownServer,
+}
+
+/// A failed download, with "the copies are gone" kept apart from network faults.
+fn media_download_error(what: &str, e: alpha_media::MediaError) -> MessengerError {
+    match e {
+        alpha_media::MediaError::Gone => MessengerError::MediaGone,
+        alpha_media::MediaError::UnknownServer => MessengerError::MediaUnknownServer,
+        e => MessengerError::NetworkError { description: format!("{what}: {e}") },
+    }
 }
 
 impl From<String> for MessengerError {
@@ -2173,6 +2203,10 @@ impl AlphaMessengerCore {
                 alpha_database::devices::set_own_account(&conn, &id.nostr().public_key_hex());
                 alpha_database::devices::load_cache(&conn);
             }
+        }
+
+        if let Some(list) = KeyValueRepo::get(&db.connection(), KV_OWN_MEDIA_SERVERS).ok().flatten() {
+            alpha_media::set_own_servers(list.lines().map(str::to_string).collect());
         }
 
         // Create the media pipeline. Blossom is HTTP blob storage — it is a
@@ -4080,27 +4114,49 @@ impl AlphaMessengerCore {
     /// The Alpha feed: its posts, newest first, as `[{"d","at","c"}]` (post id,
     /// time, content). Only events signed by Alpha's key count — the key is built
     /// into the app — and they are read over a separate anonymous connection, so
-    /// no relay learns who reads the feed.
+    /// no relay learns who reads the feed. Above one page it reads older pages too.
     pub fn alpha_feed_fetch(&self, limit: u32) -> Result<String, MessengerError> {
+        self.alpha_events(ALPHA_FEED_TAG, limit.clamp(1, 5000) as usize)
+    }
+
+    /// The sticker catalog: pages of packs, apart from the feed so they never push posts out of it.
+    pub fn alpha_catalog_fetch(&self) -> Result<String, MessengerError> {
+        self.alpha_events(ALPHA_CATALOG_TAG, 400)
+    }
+
+    fn alpha_events(&self, tag: &str, limit: usize) -> Result<String, MessengerError> {
+        const PAGE: usize = 200;
         let alpha = nostr::PublicKey::from_hex(ALPHA_FEED_PUBKEY)
             .map_err(|e| MessengerError::InternalError { description: format!("feed key: {}", e) })?;
-        let filter = nostr::Filter::new()
-            .author(alpha)
-            .kind(nostr::Kind::Custom(30078))
-            .hashtag(ALPHA_FEED_TAG)
-            .limit(limit.clamp(1, 200) as usize);
         let rt = runtime();
         let urls = rt.block_on(self.transport.enabled_relay_urls());
-        let events = rt.block_on(alpha_transport::NostrRelayClient::fetch_anonymous(urls, filter, std::time::Duration::from_secs(15)))
-            .map_err(|e| MessengerError::NetworkError { description: format!("feed fetch: {}", e) })?;
         // One post per id (a re-published post replaces its older version).
         let mut latest: std::collections::HashMap<String, nostr::Event> = std::collections::HashMap::new();
-        for e in events.into_iter() {
-            if e.pubkey != alpha || e.verify().is_err() { continue; }
-            let d = e.tags.identifier().map(|s| s.to_string()).unwrap_or_default();
-            if d.is_empty() { continue; }
-            if latest.get(&d).map(|old| old.created_at < e.created_at).unwrap_or(true) {
-                latest.insert(d, e);
+        let mut until: Option<nostr::Timestamp> = None;
+        for _ in 0..(limit.div_ceil(PAGE)).max(1) {
+            let mut filter = nostr::Filter::new()
+                .author(alpha)
+                .kind(nostr::Kind::Custom(30078))
+                .hashtag(tag)
+                .limit(PAGE.min(limit));
+            if let Some(u) = until { filter = filter.until(u); }
+            let events = rt.block_on(alpha_transport::NostrRelayClient::fetch_anonymous(urls.clone(), filter, std::time::Duration::from_secs(15)))
+                .map_err(|e| MessengerError::NetworkError { description: format!("feed fetch: {}", e) })?;
+            let got = events.len();
+            let mut oldest: Option<nostr::Timestamp> = None;
+            for e in events.into_iter() {
+                if e.pubkey != alpha || e.verify().is_err() { continue; }
+                oldest = Some(oldest.map_or(e.created_at, |o| o.min(e.created_at)));
+                let d = e.tags.identifier().map(|s| s.to_string()).unwrap_or_default();
+                if d.is_empty() { continue; }
+                if latest.get(&d).map(|old| old.created_at < e.created_at).unwrap_or(true) {
+                    latest.insert(d, e);
+                }
+            }
+            // A short page is the last one; relays may cap a page below ours, hence the half.
+            match oldest {
+                Some(o) if got >= PAGE / 2 && latest.len() < limit && Some(o) != until => until = Some(o - 1),
+                _ => break,
             }
         }
         let mut posts: Vec<_> = latest.into_iter().collect();
@@ -4119,15 +4175,32 @@ impl AlphaMessengerCore {
     /// Publish (or replace) post [d] of the Alpha feed. Refused for any key but
     /// Alpha's.
     pub fn alpha_feed_publish(&self, key: String, d: String, content: String) -> Result<(), MessengerError> {
+        self.alpha_publish(&key, d, content, ALPHA_FEED_TAG, None)
+    }
+
+    /// Publish (or replace) page [d] of the sticker catalog. Alpha's key only.
+    pub fn alpha_catalog_publish(&self, key: String, d: String, content: String) -> Result<(), MessengerError> {
+        self.alpha_publish(&key, d, content, ALPHA_CATALOG_TAG, None)
+    }
+
+    /// Remove feed post [d] that was published at [at]: the tombstone keeps the
+    /// post's own time, so a mass removal never buries the posts that stay.
+    pub fn alpha_feed_remove(&self, key: String, d: String, at: u64) -> Result<(), MessengerError> {
+        let when = if at > 0 { Some(nostr::Timestamp::from(at + 1)) } else { None };
+        self.alpha_publish(&key, d, r#"{"del":true}"#.to_string(), ALPHA_FEED_TAG, when)
+    }
+
+    fn alpha_publish(&self, key: &str, d: String, content: String, tag: &str, at: Option<nostr::Timestamp>) -> Result<(), MessengerError> {
         let keys = nostr::Keys::parse(key.trim())
             .map_err(|e| MessengerError::InvalidArgument { description: format!("feed key: {}", e) })?;
         if keys.public_key().to_hex() != ALPHA_FEED_PUBKEY {
             return Err(MessengerError::InvalidArgument { description: "not the Alpha feed key".to_string() });
         }
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(30078), content)
+        let mut builder = nostr::EventBuilder::new(nostr::Kind::Custom(30078), content)
             .tag(nostr::Tag::identifier(d))
-            .tag(nostr::Tag::hashtag(ALPHA_FEED_TAG))
-            .sign_with_keys(&keys)
+            .tag(nostr::Tag::hashtag(tag));
+        if let Some(t) = at { builder = builder.custom_created_at(t); }
+        let event = builder.sign_with_keys(&keys)
             .map_err(|e| MessengerError::CryptoError { description: format!("feed sign: {}", e) })?;
         runtime().block_on(self.transport.publish(event))
             .map_err(|e| MessengerError::NetworkError { description: format!("feed publish: {}", e) })?;
@@ -6093,6 +6166,7 @@ impl AlphaMessengerCore {
 
         let mut out = Vec::with_capacity(chats.len());
         for c in chats {
+            if is_assistant_conversation(&c.id) { continue; }
             let latest = MessageRepo::latest_in_chat_skipping(&conn, &c.id, &held_ids).ok().flatten();
             let unread = MessageRepo::count_unread(&conn, &c.id).unwrap_or(0) as u32;
             // Status of the latest message (only meaningful when it's ours).
@@ -8106,18 +8180,29 @@ impl AlphaMessengerCore {
             // unavailable — a copy can be found on any of our storages. Without
             // this step chunk discovery is useless: there is no way to reach
             // the chunk list.
-            let blob = match rt.block_on(self.blossom_for(media_ref.tor).download(&url)) {
+            // A server only the sender named is not contacted without Tor (it would see our IP).
+            let client = self.blossom_for(media_ref.tor);
+            let direct = if client.via_tor() || client.is_known(&url) {
+                rt.block_on(client.download(&url))
+            } else {
+                Err(alpha_media::MediaError::UnknownServer)
+            };
+            let blob = match direct {
                 Ok(b) => b,
                 Err(primary) => {
-                    let recovered = current.manifest_hash.as_deref().and_then(|id| {
-                        rt.block_on(self.blossom_for(media_ref.tor).discover_by_content_id(id)).ok()
-                    });
+                    let recovered = current.manifest_hash.as_deref()
+                        .map(|id| rt.block_on(self.blossom_for(media_ref.tor).discover_by_content_id(id)));
                     match recovered {
-                        Some(b) => {
+                        Some(Ok(b)) => {
                             tracing::info!(target: "alpha_ffi", "MANIFEST_DISCOVER recovered by content-id");
                             b
                         }
-                        None => return Err(MessengerError::NetworkError {
+                        // Its own server and every other one said "not here": the file list is gone.
+                        Some(Err(alpha_media::MediaError::Gone)) if matches!(primary, alpha_media::MediaError::NotOnServer(_)) =>
+                            return Err(MessengerError::MediaGone),
+                        _ if matches!(primary, alpha_media::MediaError::UnknownServer) =>
+                            return Err(MessengerError::MediaUnknownServer),
+                        _ => return Err(MessengerError::NetworkError {
                             description: format!("manifest download: {primary}"),
                         }),
                     }
@@ -9406,6 +9491,44 @@ impl AlphaMessengerCore {
         }
     }
 
+    /// The user's own media servers, used before the public ones.
+    pub fn own_media_servers(&self) -> Vec<String> {
+        alpha_media::own_servers()
+    }
+
+    pub fn set_own_media_servers(&self, urls: Vec<String>) -> Result<(), MessengerError> {
+        alpha_media::set_own_servers(urls);
+        let kept = alpha_media::own_servers().join("\n");
+        KeyValueRepo::set(&self.db.connection(), KV_OWN_MEDIA_SERVERS, &kept)
+            .map_err(|e| MessengerError::DatabaseError { description: e.to_string() })
+    }
+
+    /// Whether `url` stores a blob and gives it back unchanged: "" when it does,
+    /// else why not. Uses a throwaway signing key, so the test says nothing about us.
+    pub fn probe_media_server(&self, url: String) -> String {
+        let base = url.trim().trim_end_matches('/').to_string();
+        if !base.starts_with("https://") && !base.contains(".onion") {
+            return "https://".into();
+        }
+        let client = alpha_media::BlossomClient::with_servers(&[base.clone()]).listed_only();
+        let signer = alpha_media::MediaSigner::generate();
+        let mut body = vec![0u8; 512];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut body);
+        runtime().block_on(async {
+            let d = match client.upload(&body, &signer, "application/octet-stream").await {
+                Ok(d) => d,
+                Err(e) => return format!("upload: {e}"),
+            };
+            let back = client.download(&format!("{base}/{}", d.sha256)).await;
+            let _ = client.delete(&d.sha256, &signer).await;
+            match back {
+                Ok(b) if b == body => String::new(),
+                Ok(_) => "download: different bytes".into(),
+                Err(e) => format!("download: {e}"),
+            }
+        })
+    }
+
     pub fn download_media(&self, media_ref_json: String, output_path: String) -> Result<(), MessengerError> {
         self.download_media_inner(&media_ref_json, &output_path, None)
     }
@@ -9496,7 +9619,7 @@ impl AlphaMessengerCore {
                 vault.as_ref(),
             ))
             .ok_or_else(cancelled)?
-            .map_err(|e| MessengerError::NetworkError { description: format!("streaming download failed: {}", e) })?;
+            .map_err(|e| media_download_error("streaming download failed", e))?;
             return Ok(());
         }
         let plaintext = match op_id {
@@ -9521,7 +9644,7 @@ impl AlphaMessengerCore {
                 upload_result.original_size,
             )),
         }
-        .map_err(|e| MessengerError::NetworkError { description: format!("media download failed: {}", e) })?;
+        .map_err(|e| media_download_error("media download failed", e))?;
 
         // Same rule as the streaming path: the final name appears only complete.
         let part = format!("{}.part", output_path);
@@ -10524,6 +10647,7 @@ impl AlphaMessengerCore {
         // Captured so the heartbeat can signal the Android layer to run
         // catchUp + outbox replay when it detects a stale subscription.
         let hb_callback = self.callback.clone();
+        let hb_gauge = self.sync_gauge.clone();
         let hb_db = Arc::clone(&self.db);
         let hb_ring_synced = Arc::clone(&self.ring_synced);
         let hb_beat = Arc::clone(&self.heartbeat_at);
@@ -10582,8 +10706,23 @@ impl AlphaMessengerCore {
                         .collect();
                     tracing::info!(target: "TRANSPORT", "RELAY_STATS {}", up.join(" "));
                 }
+                // The reserve relay joins or leaves: listen there at once, tell
+                // contacts (the app follows up with a KeyPackage and our profile).
+                if let Ok(Some(joined)) = tokio::time::timeout(HB_STEP, hb_transport.reserve_tick()).await {
+                    if joined {
+                        let _ = tokio::time::timeout(HB_STEP, hb_transport.wait_until_connected(std::time::Duration::from_secs(8))).await;
+                        let _ = tokio::time::timeout(HB_STEP, hb_transport.subscribe_mls_and_giftwrap(&hb_pubkey)).await;
+                        PENDING_WAKE.store(true, std::sync::atomic::Ordering::Relaxed);
+                        hb_callback.on_notification_received();
+                    }
+                    alpha_database::peer_relays::mark_changed();
+                    hb_gauge.report();
+                }
                 if alpha_database::peer_relays::take_changed() {
-                    relay_routes::refresh(&hb_db, &hb_transport);
+                    let extra = relay_routes::refresh(&hb_db, &hb_transport);
+                    if hb_transport.set_listen_extra(extra).await && connected {
+                        let _ = tokio::time::timeout(HB_STEP, hb_transport.subscribe_mls_and_giftwrap(&hb_pubkey)).await;
+                    }
                 }
                 // A relay closed our subscription (it asked us to slow down, or
                 // restarted): ask again once it is no longer paused. The same
@@ -14932,7 +15071,7 @@ impl AlphaMessengerCore {
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| MessengerError::InternalError { description: format!("runtime: {}", e) })?;
         let snaps = rt.block_on(self.transport.relay_statuses());
-        Ok(snaps.into_iter().map(relay_snapshot_to_info).collect())
+        Ok(snaps.into_iter().filter(|s| users_relay(&s.url)).map(relay_snapshot_to_info).collect())
     }
 
     /// Measure TCP ping (ms) to every configured relay in parallel.
@@ -14948,7 +15087,7 @@ impl AlphaMessengerCore {
             (snaps, pings)
         });
         let pings: std::collections::HashMap<String, Option<u64>> = pings.into_iter().collect();
-        let out = snaps.into_iter().map(|s| {
+        let out = snaps.into_iter().filter(|s| users_relay(&s.url)).map(|s| {
             let mut info = relay_snapshot_to_info(s);
             if let Some(Some(ms)) = pings.get(&info.url) {
                 info.ping_ms = (*ms).min(u64::from(u32::MAX)) as u32;
@@ -14984,6 +15123,12 @@ impl AlphaMessengerCore {
         tracing::info!("add_relay persisted: {}", url);
         self.relays_changed();
         Ok(())
+    }
+
+    /// The reserve relay joined or left (the app hears it as `on_sync_state`):
+    /// our KeyPackage goes there, so whoever only reaches us there can add us.
+    pub fn reserve_relay_changed(&self) {
+        self.relays_changed();
     }
 
     /// The relay set grew: subscribe on it now (not after a restart) and put
@@ -15087,10 +15232,18 @@ impl AlphaMessengerCore {
                 } else {
                     tracing::debug!("Persisted {} relay(s) to DB", list.len());
                 }
+                // All switched off or all deleted shows at once, not at the next catch-up.
+                self.sync_gauge.report();
             }
             Err(e) => tracing::warn!("persist_relays_to_db: serialize failed: {}", e),
         }
     }
+}
+
+/// Not the reserve relay while we sit on it: that one is ours, not in the user's list.
+fn users_relay(url: &str) -> bool {
+    use alpha_transport::nostr_relay_client::{reserve_active, RESERVE_RELAY};
+    !(reserve_active() && url.trim_end_matches('/').eq_ignore_ascii_case(RESERVE_RELAY))
 }
 
 /// Map a transport-layer relay snapshot to the FFI-friendly form.

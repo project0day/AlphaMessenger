@@ -91,6 +91,23 @@ class AlphaCoreRepository @Inject constructor(
     /** The receiving side's progress (see [CallbackBridge.syncState]). */
     val syncState: StateFlow<SyncState?> get() = callbackBridge.syncState
 
+    // The core joined or left the reserve relay: our KeyPackage goes there and
+    // contacts learn where we listen now.
+    init {
+        scope.launch {
+            var wasReserve: Boolean? = null
+            callbackBridge.syncState.collect { s ->
+                if (s == null) return@collect
+                val reserve = s.link == "reserve"
+                if (wasReserve != null && reserve != wasReserve) {
+                    runCatching { core.`reserveRelayChanged`() }
+                    announceRelaysSoon()
+                }
+                wasReserve = reserve
+            }
+        }
+    }
+
     private val _chatCreated = MutableSharedFlow<ChatInfo>(extraBufferCapacity = 16)
     val chatCreated: SharedFlow<ChatInfo> = _chatCreated.asSharedFlow()
 
@@ -1431,6 +1448,20 @@ class AlphaCoreRepository @Inject constructor(
         core.`insertAssistantMessage`(chatId, body, id)
     }
 
+    /** Puts the bot's current conversation aside; false when it was empty. */
+    suspend fun assistantNewConversation(profileId: String): Boolean = withContext(Dispatchers.IO) {
+        core.`assistantNewConversation`(profileId).also { notifyChatListDirty() }
+    }
+
+    suspend fun assistantOpenConversation(profileId: String, chatId: String) = withContext(Dispatchers.IO) {
+        core.`assistantOpenConversation`(profileId, chatId)
+        notifyChatListDirty()
+    }
+
+    suspend fun assistantConversations(profileId: String): List<uniffi.alphamessenger.AssistantConversation> = withContext(Dispatchers.IO) {
+        core.`assistantConversations`(profileId)
+    }
+
     // --- Unsent drafts (ENCRYPTED in the core DB under draft:<chatId>) ---
     // A draft is content the user is typing but hasn't sent — never goes to MLS
     // or a relay, but also must not sit in plaintext on disk. It lives in the
@@ -1605,6 +1636,18 @@ class AlphaCoreRepository @Inject constructor(
     /** Publish (or replace) feed post [d]. True when it went out. */
     suspend fun alphaFeedPublish(key: String, d: String, content: String): Boolean =
         withContext(Dispatchers.IO) { runCatching { core.`alphaFeedPublish`(key, d, content) }.isSuccess }
+
+    /** Remove feed post [d] published at [at] (epoch s): its tombstone keeps that time. */
+    suspend fun alphaFeedRemove(key: String, d: String, at: Long): Boolean =
+        withContext(Dispatchers.IO) { runCatching { core.`alphaFeedRemove`(key, d, at.coerceAtLeast(0).toULong()) }.isSuccess }
+
+    /** The sticker catalog's pages as `[{"d","at","c"}]`, or null when offline. */
+    suspend fun alphaCatalogFetch(): String? =
+        withContext(Dispatchers.IO) { runCatching { core.`alphaCatalogFetch`() }.getOrNull() }
+
+    /** Publish (or replace) catalog page [d]. True when it went out. */
+    suspend fun alphaCatalogPublish(key: String, d: String, content: String): Boolean =
+        withContext(Dispatchers.IO) { runCatching { core.`alphaCatalogPublish`(key, d, content) }.isSuccess }
 
     // --- Sticker packs that update themselves ---
 
@@ -2598,9 +2641,40 @@ class AlphaCoreRepository @Inject constructor(
                 if (opId != null) core.`downloadMediaWithProgress`(mediaRefJson, out.absolutePath, opId)
                 else core.`downloadMedia`(mediaRefJson, out.absolutePath)
             }
+            goneMark(hash).delete()
             out.absolutePath.takeIf { out.exists() && out.length() > 0L }
+        }.onFailure {
+            // Every server said the copies are gone: remembered, so the bubble says so
+            // instead of offering a retry that cannot work.
+            val why = when (it) {
+                is uniffi.alphamessenger.MessengerException.MediaGone -> "gone"
+                is uniffi.alphamessenger.MessengerException.MediaUnknownServer -> "unknown"
+                else -> null
+            }
+            if (why != null) goneMark(hash).apply { parentFile?.mkdirs(); writeText(why) }
         }.getOrNull()
     }
+
+    private fun goneMark(hash: String) = java.io.File(java.io.File(context.cacheDir, "media"), "$hash.gone")
+
+    /** No server holds this file any more (the last download attempt was told so). */
+    fun isMediaGone(mediaRefJson: String): Boolean = goneMark(blobHashOf(mediaRefJson)).exists()
+
+    /** Not on any server we know; only the sender's own server, reached through Tor alone. */
+    fun isMediaOnUnknownServer(mediaRefJson: String): Boolean =
+        runCatching { goneMark(blobHashOf(mediaRefJson)).readText() == "unknown" }.getOrDefault(false)
+
+    suspend fun ownMediaServers(): List<String> = withContext(Dispatchers.IO) { runCatching { core.ownMediaServers() }.getOrDefault(emptyList()) }
+
+    suspend fun setOwnMediaServers(urls: List<String>) = withContext(Dispatchers.IO) { runCatching { core.setOwnMediaServers(urls) } }
+
+    /** "" when [url] stores and returns a test file, else the reason. */
+    suspend fun probeMediaServer(url: String): String = withContext(Dispatchers.IO) {
+        runCatching { core.probeMediaServer(url) }.getOrElse { it.message ?: "error" }
+    }
+
+    /** A deliberate new attempt: forget the "gone" verdict until the servers repeat it. */
+    fun forgetMediaGone(mediaRefJson: String) { goneMark(blobHashOf(mediaRefJson)).delete() }
 
     /** Fast, synchronous "is this blob already decrypted on disk?" check — the
      *  SAME path logic as [downloadMediaToCache] but WITHOUT ever downloading.

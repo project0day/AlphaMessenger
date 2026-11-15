@@ -100,5 +100,5 @@ private fun Path.roundedRect(w: Float, h: Float, r: Float) {
 }
 
 /** Friendly factory mirroring the helper-function name used at call sites. */
-fun bubbleShape(outgoing: Boolean, showTail: Boolean): Shape =
-    BubbleShape(outgoing = outgoing, showTail = showTail)
+fun bubbleShape(outgoing: Boolean, showTail: Boolean, radius: Dp = 18.dp): Shape =
+    BubbleShape(outgoing = outgoing, showTail = showTail, cornerR = radius)

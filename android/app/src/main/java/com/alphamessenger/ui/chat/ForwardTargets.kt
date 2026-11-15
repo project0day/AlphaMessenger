@@ -1,5 +1,6 @@
 package com.alphamessenger.ui.chat
 
+import androidx.compose.runtime.collectAsState
 import com.alphamessenger.data.AlphaCoreRepository
 import uniffi.alphamessenger.ChatInfo
 
@@ -61,3 +62,18 @@ fun isReusableMediaRef(json: String): Boolean = runCatching {
     val hasBlobs = (o.optJSONArray("blob_urls")?.length() ?: 0) > 0
     hasBlobs || o.has("chunks") || o.has("stream_chunks") || o.has("manifest_url")
 }.getOrDefault(false)
+
+/** The forward picker over [ChatViewModel.forwardSet], refreshed each time it opens (chats may have come since). */
+@androidx.compose.runtime.Composable
+fun ForwardTargetsPicker(
+    viewModel: ChatViewModel,
+    summary: String?,
+    colors: com.alphamessenger.ui.theme.AlphaColorScheme,
+    onDismiss: () -> Unit,
+    onConfirm: (targetIds: List<String>, comment: String, plain: Boolean) -> Unit,
+) {
+    androidx.compose.runtime.LaunchedEffect(Unit) { viewModel.loadForwardTargets() }
+    val set = viewModel.forwardSet.collectAsState().value ?: ForwardTargetSet()
+    ChatPickerSheet(chats = set.chats, profiles = set.profiles, channelIds = set.channelIds,
+        summary = summary, colors = colors, onDismiss = onDismiss, onConfirm = onConfirm)
+}
