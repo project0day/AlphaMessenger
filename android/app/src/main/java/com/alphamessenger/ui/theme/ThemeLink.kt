@@ -29,6 +29,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.alphamessenger.R
+import kotlinx.coroutines.launch
+import androidx.compose.foundation.combinedClickable
 
 /** Is [link] a shared theme (`alpha://theme/…`)? */
 fun isThemeLink(link: String) = link.startsWith(THEME_LINK_PREFIX)
@@ -71,6 +73,30 @@ fun ThemeLinkHost() {
                         },
                     contentAlignment = Alignment.Center,
                 ) { Text(stringResource(R.string.theme_link_apply), color = readableOn(scheme.accent), fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+                // The channel's owner can put the theme into Alpha's channel for everyone.
+                if (com.alphamessenger.ui.feed.FeedStore.isOwner) {
+                    val scope = androidx.compose.runtime.rememberCoroutineScope()
+                    var sending by remember { mutableStateOf(false) }
+                    val inChannel = com.alphamessenger.ui.feed.ThemeCatalog.has(link)
+                    Box(
+                        Modifier.fillMaxWidth().padding(top = 8.dp).height(46.dp).clip(RoundedCornerShape(16.dp)).background(colors.bgTertiary)
+                            .clickable(enabled = !sending && !inChannel) {
+                                val repo = com.alphamessenger.ui.emoji.AnimatedEmoji.repo ?: return@clickable
+                                val key = com.alphamessenger.ui.feed.FeedStore.ownerKey(ctx) ?: return@clickable
+                                sending = true
+                                scope.launch {
+                                    val ok = com.alphamessenger.ui.feed.ThemeCatalog.add(ctx, repo, key, link, theme.name)
+                                    sending = false
+                                    android.widget.Toast.makeText(ctx, ctx.getString(if (ok) R.string.theme_to_channel_done else R.string.feed_publish_failed),
+                                        android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(stringResource(when { inChannel -> R.string.theme_in_channel; sending -> R.string.theme_to_channel_sending; else -> R.string.theme_to_channel }),
+                            color = if (inChannel) colors.textMuted else colors.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                    }
+                }
             }
         }
     }
@@ -85,8 +111,9 @@ fun extractThemeLink(text: String): String? =
  * A theme in a message: its colours on a tiny chat, its name, and "View" (the
  * preview with Apply) and "Share" — never the long raw link.
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-fun ThemeLinkCard(link: String, colors: AlphaColorScheme, onAccentBubble: Boolean) {
+fun ThemeLinkCard(link: String, colors: AlphaColorScheme, onAccentBubble: Boolean, onLongClick: (() -> Unit)? = null) {
     val ctx = LocalContext.current
     val theme = remember(link) { CustomTheme.fromLink(link) }
     val scheme = remember(theme) { theme?.scheme() }
@@ -95,7 +122,7 @@ fun ThemeLinkCard(link: String, colors: AlphaColorScheme, onAccentBubble: Boolea
     val sub = if (onAccentBubble) androidx.compose.ui.graphics.Color.White.copy(alpha = 0.85f) else colors.textSecondary
     Column(
         Modifier.widthIn(min = 220.dp, max = 280.dp).clip(RoundedCornerShape(14.dp)).background(bg)
-            .clickable { ThemeUi.open(link) }.padding(10.dp),
+            .combinedClickable(onClick = { ThemeUi.open(link) }, onLongClick = onLongClick).padding(10.dp),
     ) {
         if (scheme != null && theme != null) {
             val chatBg = theme.background?.let { b1 ->

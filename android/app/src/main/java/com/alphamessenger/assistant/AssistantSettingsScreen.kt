@@ -239,6 +239,11 @@ fun AssistantProfileScreen(
             }
         }
 
+        if (!council) {
+            OptionSection(stringResource(R.string.assistant_check_section))
+            OptionGroup { ModelCheck(profile = { current() }, key = { key.trim() }) }
+        }
+
         OptionSection(stringResource(R.string.assistant_behaviour))
         OptionGroup {
             Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {

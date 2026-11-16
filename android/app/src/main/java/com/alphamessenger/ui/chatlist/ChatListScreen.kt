@@ -91,6 +91,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
@@ -432,7 +433,18 @@ fun ChatListScreen(
                 dockHaze, androidx.compose.ui.graphics.RectangleShape,
                 tint = colors.bgPrimary.copy(alpha = if (colors.bgPrimary.luminance() > 0.5f) 0.78f else 0.6f), backdrop = colors.bgPrimary,
             // Seasonal decorations over the glass, behind the header's content.
-            ).starryHeader().matrixHeader().seasonalDecor(isDarkSurface(colors.bgPrimary))) {
+            // Seasonal decorations over the glass, behind the header's content.
+            ).starryHeader().matrixHeader().seasonalDecor(isDarkSurface(colors.bgPrimary))
+                // The header does not end in a line: its colour trails off over the list.
+                .drawBehind {
+                    val trail = 28.dp.toPx()
+                    drawRect(
+                        androidx.compose.ui.graphics.Brush.verticalGradient(listOf(colors.bgPrimary, colors.bgPrimary.copy(alpha = 0f)),
+                            startY = size.height, endY = size.height + trail),
+                        topLeft = androidx.compose.ui.geometry.Offset(0f, size.height),
+                        size = androidx.compose.ui.geometry.Size(size.width, trail),
+                    )
+                }) {
             // When the Calls tab is in selection mode, REPLACE the main top bar
             // (Alpha title + search + avatar) with a selection bar.
             if (selecting) {

@@ -137,12 +137,12 @@ fun assistantRows(newestFirst: List<MessageUi>, live: AssistantEngine.Live?, now
         shown.reversed().forEach { p ->
             // The keys the stored rows will have: the list sees one item grow, then settle.
             if (p.answer.isNotEmpty()) out += MessageUi(id = p.rowId, text = p.answer, timestamp = nowIso, isOutgoing = false, assistantWriting = true)
-            if (p.thinking.isNotEmpty() || p.answer.isEmpty() || p.agent.isNotEmpty()) {
+            if (p.thinking.isNotEmpty() || p.answer.isEmpty() || p.agent.isNotEmpty() || p.waiting) {
                 out += MessageUi(
                     id = p.rowId + THINK_SUFFIX, text = "", timestamp = nowIso, isOutgoing = false, assistantWriting = true,
                     assistantThinking = AssistantThinkingUi(
                         p.thinking, p.thoughtSeconds,
-                        live = p.answer.isEmpty(), connecting = p.phase == AssistantEngine.Phase.CONNECTING, agent = p.agent,
+                        live = p.answer.isEmpty() || p.waiting, connecting = p.phase == AssistantEngine.Phase.CONNECTING, agent = p.agent,
                     ),
                 )
             }
@@ -223,7 +223,14 @@ class AnswerReveal {
         val now = frame
         val row = rows[id] ?: run {
             if (!writing || full.isEmpty()) return null
-            Row(full, true).also { rows[id] = it; busy = true }
+            Row(full, true).also { r ->
+                // Seen on an earlier visit to the chat: what is written so far shows at once,
+                // only what comes from now on is paced (no replay from the first letter).
+                if (id in seen) { r.shown = full.length.toFloat(); r.end = full.length; r.base = full.length }
+                seen += id
+                rows[id] = r
+                busy = true
+            }
         }
         row.full = full
         row.writing = writing
@@ -282,6 +289,8 @@ class AnswerReveal {
     }
 
     private companion object {
+        /** Answers already on screen once: kept past the chat screen, which is made anew on every visit. */
+        val seen: MutableSet<String> = java.util.Collections.synchronizedSet(LinkedHashSet())
         /** How far behind the service the screen may fall before it speeds up. */
         const val LAG_S = 0.7f
         const val MIN_CPS = 45f

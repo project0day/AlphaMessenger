@@ -42,6 +42,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -239,7 +240,13 @@ fun BottomTabDock(
         exit = slideOutVertically(tween(220)) { it } + fadeOut(tween(160)),
     ) {
         Row(
-            Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 12.dp, end = 12.dp, bottom = 14.dp, top = 12.dp),
+            Modifier.fillMaxWidth()
+                // A haze under the dock and the navigation buttons: the list fades out, no band.
+                .drawBehind {
+                    drawRect(androidx.compose.ui.graphics.Brush.verticalGradient(
+                        0f to colors.bgPrimary.copy(alpha = 0f), 0.55f to colors.bgPrimary.copy(alpha = 0.6f), 1f to colors.bgPrimary.copy(alpha = 0.9f)))
+                }
+                .navigationBarsPadding().padding(start = 12.dp, end = 12.dp, bottom = 14.dp, top = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {

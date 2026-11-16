@@ -183,6 +183,10 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
         // Animated emoji fetch their set through the core, wherever they first show.
         com.alphamessenger.ui.emoji.AnimatedEmoji.repo = coreRepository
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        // No system scrim under the navigation buttons: its hard edge showed as a band.
+        // The screens fade into the bar themselves (the dock's haze, the chat's).
+        if (android.os.Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
+        @Suppress("DEPRECATION") window.navigationBarColor = android.graphics.Color.TRANSPARENT
         com.alphamessenger.ui.components.ScreenSecurity.load(this)
         com.alphamessenger.ui.components.ScreenSecurity.apply(this)
 

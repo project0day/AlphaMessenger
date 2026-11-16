@@ -75,7 +75,9 @@ fun OptionScreen(
 fun OptionTopBar(title: String, onBack: () -> Unit, actions: @Composable () -> Unit = {}) {
     val cs = AlphaTheme.colorScheme
     Row(
-        Modifier.fillMaxWidth().background(cs.bgPrimary).statusBarsPadding().height(56.dp).padding(horizontal = 4.dp),
+        // Inside the chat's floating pill: no fill and no status bar room of its own.
+        Modifier.fillMaxWidth().then(if (com.alphamessenger.ui.chat.LocalFloatingTop.current) Modifier else Modifier.background(cs.bgPrimary).statusBarsPadding())
+            .height(56.dp).padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {

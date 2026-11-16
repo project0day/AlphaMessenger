@@ -453,6 +453,9 @@ fun ThemeSelectorScreen(
                 }
             }
 
+            Spacer(Modifier.height(12.dp))
+            ChatPanelsSettings(colors)
+
             // --- 2. Theme cards — Dark ---
             SectionLabel(stringResource(R.string.theme_dark), colors)
             ThemeCardRow(

@@ -132,7 +132,9 @@ private fun DrawScope.drawRain(field: Array<Rain?>, t: Float, strength: Float) {
                     val f = 1f - k.toFloat() / (d.trail + 1)
                     0.85f * f * f
                 }
-                val alpha = (a * fade * 255).toInt().coerceIn(0, 255)
+                // The last rows fade out: the rain does not end in a cut at the header's edge.
+                val edge = ((r.rows - row).toFloat() / 2.5f).coerceIn(0f, 1f)
+                val alpha = (a * fade * edge * 255).toInt().coerceIn(0, 255)
                 r.paint.color = (alpha shl 24) or (if (k == 0) headArgb else tintArgb)
                 canvas.drawText(glyph, 0, 1, x, (row + 1) * r.cell, r.paint)
             }

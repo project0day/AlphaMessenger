@@ -4,6 +4,7 @@ import android.content.Context
 import kotlinx.coroutines.async
 import com.alphamessenger.R
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import com.alphamessenger.data.AlphaCoreRepository
 import com.alphamessenger.data.MediaVault
 import org.json.JSONArray
@@ -29,7 +30,19 @@ enum class GenKind { IMAGE, VIDEO, VOICE }
  */
 object AssistantTools {
 
-    fun specs(p: AssistantProfile, memory: Boolean = false): JSONArray = JSONArray().apply {
+    /** The tools offered; with [only], just those (fewer to choose from, fewer wrong choices). */
+    fun specs(p: AssistantProfile, memory: Boolean = false, only: Set<String>? = null): JSONArray {
+        val all = allSpecs(p, memory)
+        if (only == null) return all
+        return JSONArray().apply {
+            for (i in 0 until all.length()) {
+                val o = all.getJSONObject(i)
+                if (o.getJSONObject("function").getString("name") in only) put(o)
+            }
+        }
+    }
+
+    private fun allSpecs(p: AssistantProfile, memory: Boolean): JSONArray = JSONArray().apply {
         if (memory) {
             put(fn(
                 "remember",
@@ -55,27 +68,40 @@ object AssistantTools {
         if (AssistantPerm.THEMES in p.perms) {
             put(fn(
                 "propose_theme",
-                "Offer the user a colour theme for the app. They see a preview and decide whether to apply it. " +
-                    "This is the only way to give a theme: never write alpha://theme/ links yourself. " +
-                    "Give it a chat background pattern too (\"pattern\"), in the theme's colours: the card shows it and Apply puts both on.",
+                "Offer the user a colour theme for the app, with a chat background of drawn figures. They see a preview card " +
+                    "and decide; Apply puts both on. Each request for a theme is a new call. Only colours and a few words are needed: " +
+                    "the app draws the background itself from \"pattern\".",
                 props(
-                    "name" to str("Short theme name."),
+                    "name" to str("Short theme name in English (1-3 words, e.g. \"Coffee Night\"), whatever language the chat is in: themes are shared with people of every language."),
                     "dark" to JSONObject().put("type", "boolean"),
                     "accent" to str("Accent colour, #RRGGBB."),
                     "outgoing" to str("Own message bubbles, #RRGGBB."),
+                    "background" to str("Chat background, #RRGGBB."),
                     "outgoing2" to str("Second colour of own bubbles for a gradient, #RRGGBB (optional)."),
-                    "background" to str("Screen background, #RRGGBB (optional)."),
-                    "background2" to str("Second background colour, top-to-bottom gradient, #RRGGBB (optional)."),
+                    "background2" to str("Second background colour, #RRGGBB (optional): makes the chat background a gradient."),
+                    "background3" to str("Third background colour, #RRGGBB (optional)."),
+                    "background4" to str("Fourth background colour, #RRGGBB (optional)."),
+                    "gradient" to JSONObject().put("type", "string").put("enum", JSONArray(listOf("vertical", "diagonal", "horizontal", "mesh")))
+                        .put("description", "How the background colours blend: top to bottom, diagonal, left to right, or mesh (soft patches of each colour in the corners, best with 3-4 colours)."),
                     "incoming" to str("Other people's bubbles, #RRGGBB (optional)."),
-                    "pattern" to patternProps().put("description", "The chat background that comes with the theme (optional)."),
+                    "pattern" to str("What the background figures show, 2-5 English words on the theme's subject (e.g. \"coffee desserts\", \"space rockets stars\")."),
+                    "density" to enumOf("sparse", "normal", "dense"),
                 ),
-                "name", "dark", "accent", "outgoing",
+                "name", "dark", "accent", "outgoing", "background", "pattern",
             ))
             put(fn(
                 "propose_pattern",
-                "Make a chat background pattern on its own: it is kept among the user's patterns " +
-                    "(Appearance → Chat background → Patterns) and the user decides whether to put it on. For a theme, use propose_theme's pattern instead.",
-                patternProps(), "name", "light_bg", "light_ink",
+                "Make a chat background of drawn figures on its own (no theme). It is kept among the user's patterns " +
+                    "(Appearance → Chat background → Patterns); the user decides whether to put it on.",
+                props(
+                    "name" to str("Short name in English (1-3 words), whatever language the chat is in."),
+                    "subject" to str("What the figures show, 2-5 English words (e.g. \"cats fish\")."),
+                    "background" to str("Background colour, #RRGGBB (optional)."),
+                    "ink" to str("Figure colour, #RRGGBB (optional)."),
+                    "density" to enumOf("sparse", "normal", "dense"),
+                    "size" to enumOf("small", "medium", "large"),
+                ),
+                "name", "subject",
             ))
             put(fn(
                 "find_icons",
@@ -187,15 +213,20 @@ object AssistantTools {
                 "propose_theme" -> {
                     val base = themeOf(a) ?: return "error: accent and outgoing must be colours like #F59E0B; got accent=\"" +
                         a.optString("accent").take(24) + "\", outgoing=\"" + a.optString("outgoing").take(24) + "\". Call propose_theme again."
-                    val pat = a.optJSONObject("pattern")
-                    val spec = pat?.let { patternOf(it) ?: return PATTERN_REFUSED + " Call propose_theme again (or without the pattern)." }
+                    val subject = a.optString("pattern").ifBlank { a.optString("name") }
+                    // Every theme comes with its own background, drawn here from the theme's colours.
+                    val spec = com.alphamessenger.ui.theme.ThemePattern.forTheme(base, subject,
+                        density = com.alphamessenger.ui.theme.ThemePattern.densityOf(a.optString("density")),
+                        more = listOfNotNull(colourOf(a.optString("background3")), colourOf(a.optString("background4"))),
+                        degrees = com.alphamessenger.ui.theme.ThemePattern.degreesOf(a.optString("gradient")))
                     val t = base.copy(pattern = spec)
                     run.step("🎨 " + t.name)
                     val link = t.link()
                     run.post { run.repository.insertAssistantMessage(run.chatId, link) }
                     AssistantStore.log(p.name, JournalEntry.Kind.ACT, "theme", t.name)
                     run.stored()
-                    "The theme is in the chat" + (if (spec != null) " with its pattern" else "") + "; the user sees a preview and decides."
+                    "Done: the theme card \"" + t.name + "\" with its chat background is in the chat; the user previews it and applies it there. " +
+                        "Say a word about it; do not repeat any link."
                 }
                 "find_icons" -> {
                     val found = com.alphamessenger.ui.theme.PatternIcons.search(a.optString("query"), 60)
@@ -203,11 +234,16 @@ object AssistantTools {
                     else found.joinToString(", ")
                 }
                 "propose_pattern" -> {
-                    val spec = patternOf(a) ?: return "$PATTERN_REFUSED Call propose_pattern again."
+                    val bg = colourOf(a.optString("background"))
+                    val spec = com.alphamessenger.ui.theme.ThemePattern.standalone(
+                        a.optString("name").ifBlank { "AI" }, a.optString("subject").ifBlank { a.optString("name") }, emptyList(),
+                        bg, colourOf(a.optString("ink")), dark = bg?.let { it.luminance() < 0.45f } ?: false,
+                        com.alphamessenger.ui.theme.ThemePattern.densityOf(a.optString("density")),
+                        com.alphamessenger.ui.theme.ThemePattern.sizeOf(a.optString("size")))
                     run.step("🧩 " + spec.name)
                     run.post { com.alphamessenger.ui.theme.PatternStore.save(run.ctx, spec) }
                     AssistantStore.log(p.name, JournalEntry.Kind.ACT, "pattern", spec.name)
-                    "The pattern is kept in Appearance → Chat background → Patterns; tell the user to tap it there to put it on."
+                    "Done: the pattern is kept in Appearance → Chat background → Patterns; tell the user to tap it there to put it on."
                 }
                 "remember" -> {
                     val owner = run.memoryOwner ?: return "error: memory is off"
@@ -334,67 +370,8 @@ object AssistantTools {
     private fun mediaFile(ctx: Context, prefix: String, ext: String): File =
         File(ctx.filesDir, "assistant_media").apply { mkdirs() }.let { File(it, "${prefix}_${System.currentTimeMillis()}.$ext") }
 
-    private const val PATTERN_REFUSED = "error: the pattern was refused. Colours must be #RRGGBB; give \"icons\" (names from find_icons) " +
-        "or \"keywords\"; own \"items\" only with known names or path data of M L H V C S Q T A Z commands and numbers (≤600 chars)."
-
-    /** A pattern's fields, for propose_pattern and propose_theme's "pattern". */
-    private fun patternProps() = props(
-        "name" to str("Short pattern name."),
-        "light_bg" to str("Background in a light theme, #RRGGBB."),
-        "light_ink" to str("Figure colour in a light theme, #RRGGBB (a darker shade of the background reads best)."),
-        "dark_bg" to str("Background in a dark theme, #RRGGBB."),
-        "dark_ink" to str("Figure colour in a dark theme, #RRGGBB (a lighter shade of the background)."),
-        "icons" to arr("8–30 figure names from find_icons (or built-in: " + com.alphamessenger.ui.theme.MOTIFS.keys.filterNot { it.matches(Regex("g\\d")) }.joinToString() +
-            "), all on one subject. The app lays them out evenly, like a drawn wallpaper."),
-        "keywords" to str("English words for the subject (e.g. \"coffee dessert cake\"), when no icons are given: the app picks the figures."),
-        "density" to enumOf("sparse", "normal", "dense"),
-        "size" to enumOf("small", "medium", "large"),
-        "rotate" to JSONObject().put("type", "number").put("description", "How far figures turn either way, 0–60 degrees (30 is lively)."),
-        "seed" to JSONObject().put("type", "integer").put("description", "Another number gives another arrangement."),
-        "opacity" to JSONObject().put("type", "number").put("description", "Figure opacity, 0.05–0.6 (0.18 is calm, 0.3 bold)."),
-        "blur" to JSONObject().put("type", "number").put("description", "Softness, 0 (sharp) to 14."),
-        "stroke" to JSONObject().put("type", "number").put("description", "Line weight, 0.8–4 (1.7 is usual)."),
-        "items" to JSONObject().put("type", "array").put("description",
-            "Only for a hand-placed layout instead of icons: figures in a tile of \"tile\" units, each a name or own 24×24 path data.")
-            .put("items", JSONObject().put("type", "object").put("properties", JSONObject()
-                .put("m", str("A figure name."))
-                .put("d", str("Own path data instead of m."))
-                .put("x", JSONObject().put("type", "number")).put("y", JSONObject().put("type", "number"))
-                .put("s", JSONObject().put("type", "number").put("description", "Scale, 0.4–2."))
-                .put("r", JSONObject().put("type", "number").put("description", "Rotation, degrees."))
-                .put("a", JSONObject().put("type", "number").put("description", "Opacity of this figure, 0.1–1 (optional).")))),
-        "tile" to JSONObject().put("type", "number").put("description", "Tile size for hand-placed items, 120–300."),
-    )
-
-    /**
-     * The model's pattern: its figures laid out by the app (or its own items),
-     * then checked like any foreign pattern: plain geometry within limits, or refused whole.
-     */
-    private fun patternOf(a: JSONObject): com.alphamessenger.ui.theme.PatternSpec? {
-
-        val own = a.optJSONArray("items")?.takeIf { it.length() > 0 }
-        val tile = if (own != null) a.optDouble("tile", 220.0) else 300.0
-        val items = own ?: run {
-            val named = a.optJSONArray("icons")?.let { arr -> (0 until arr.length()).map { arr.optString(it).trim().lowercase() } }.orEmpty()
-                .filter { com.alphamessenger.ui.theme.motifPath(it) != null }
-            val icons = named.ifEmpty { com.alphamessenger.ui.theme.PatternIcons.search(a.optString("keywords").ifBlank { a.optString("name") }, 24) }
-            if (icons.size < 3) return null
-            val density = when (a.optString("density")) { "sparse" -> com.alphamessenger.ui.theme.PatternLayout.Density.SPARSE; "dense" -> com.alphamessenger.ui.theme.PatternLayout.Density.DENSE; else -> com.alphamessenger.ui.theme.PatternLayout.Density.NORMAL }
-            val size = when (a.optString("size")) { "small" -> com.alphamessenger.ui.theme.PatternLayout.Size.SMALL; "large" -> com.alphamessenger.ui.theme.PatternLayout.Size.LARGE; else -> com.alphamessenger.ui.theme.PatternLayout.Size.MEDIUM }
-            val placed = com.alphamessenger.ui.theme.PatternLayout.scatter(icons, tile.toFloat(), density.fill, size.range, a.optDouble("rotate", 30.0).toFloat().coerceIn(0f, 60f),
-                a.optLong("seed", System.nanoTime()))
-            JSONArray().apply { placed.forEach { put(JSONObject().put("m", it.motif).put("x", it.x.toDouble()).put("y", it.y.toDouble()).put("s", it.s.toDouble()).put("r", it.r.toDouble())) } }
-        }
-        return com.alphamessenger.ui.theme.PatternSpec.parse(JSONObject()
-            .put("name", a.optString("name").ifBlank { "AI" })
-            .put("tile", tile)
-            .put("light", JSONObject().put("bg", JSONArray().put(a.optString("light_bg"))).put("ink", a.optString("light_ink")))
-            .put("dark", JSONObject().put("bg", JSONArray().put(a.optString("dark_bg").ifBlank { a.optString("light_bg") }))
-                .put("ink", a.optString("dark_ink").ifBlank { a.optString("light_ink") }))
-            .put("opacity", a.optDouble("opacity", 0.2)).put("blur", a.optDouble("blur", 0.0))
-            .put("stroke", a.optDouble("stroke", 1.7)).put("items", items)
-            .toString())
-    }
+    /** Whether a propose_theme call's arguments make a theme (for the model check). */
+    fun themeArgsOk(json: String): Boolean = runCatching { themeOf(JSONObject(json)) != null }.getOrDefault(false)
 
     private fun themeOf(a: JSONObject): com.alphamessenger.ui.theme.CustomTheme? {
         fun c(k: String): Color? = colourOf(a.optString(k))

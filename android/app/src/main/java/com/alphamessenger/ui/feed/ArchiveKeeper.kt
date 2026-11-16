@@ -45,8 +45,8 @@ object ArchiveKeeper {
             val items = ArrayList<JSONObject>()
             val done = ArrayList<String>()
             for (ref in fresh) {
-                val blobs = repo.mediaRefBlobs(ref) ?: continue
-                val arr = runCatching { JSONArray(blobs) }.getOrNull() ?: continue
+                // Plain refs are read here; only a large file's separate chunk list needs the core.
+                val arr = localBlobs(ref) ?: repo.mediaRefBlobs(ref)?.let { runCatching { JSONArray(it) }.getOrNull() } ?: continue
                 for (i in 0 until arr.length()) arr.optJSONObject(i)?.let { items += it }
                 done += mark(ref)
                 if (items.size >= BATCH) {
@@ -62,6 +62,27 @@ object ArchiveKeeper {
             e.apply()
         }
     }
+
+    /** A self-contained ref's blobs (its URLs end in the blob's sha256), or null when its chunk list lives in a manifest. */
+    private fun localBlobs(ref: String): JSONArray? = runCatching {
+        val o = JSONObject(ref)
+        if (o.optInt("format_version", 1) == 2 && o.has("manifest_url")) return null
+        val urls = ArrayList<String>()
+        o.optJSONArray("blob_urls")?.let { a -> for (i in 0 until a.length()) urls += a.optString(i) }
+        o.optJSONArray("thumbnail_urls")?.let { a -> for (i in 0 until a.length()) urls += a.optString(i) }
+        o.optJSONArray("chunks")?.let { a ->
+            for (i in 0 until a.length()) a.optJSONObject(i)?.optJSONArray("locations")?.let { l ->
+                for (j in 0 until l.length()) l.optJSONObject(j)?.optString("url")?.let { urls += it }
+            }
+        }
+        val bySha = LinkedHashMap<String, MutableList<String>>()
+        for (u in urls) {
+            if (!u.startsWith("https://")) continue
+            val sha = u.substringAfterLast('/').substringBefore('.').lowercase()
+            if (sha.length == 64 && sha.all { it in '0'..'9' || it in 'a'..'f' }) bySha.getOrPut(sha) { ArrayList() }.add(u)
+        }
+        JSONArray().apply { bySha.forEach { (sha, us) -> put(JSONObject().put("sha", sha).put("urls", JSONArray(us.distinct()))) } }
+    }.getOrNull()
 
     private fun mark(ref: String) = Integer.toHexString(ref.hashCode()) + ":" + ref.length
 

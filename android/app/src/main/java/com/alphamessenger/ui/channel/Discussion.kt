@@ -214,7 +214,7 @@ fun CommenterAvatars(senders: List<String>, profiles: Map<String, ChatBubblePeer
 fun DiscussionTopBar(subtitle: String, colors: AlphaColorScheme, onBack: () -> Unit, accent: Boolean = false) {
     Row(
         Modifier.fillMaxWidth()
-            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(top = com.alphamessenger.ui.chat.chatStatusPad())
             .height(58.dp)
             .padding(end = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -250,7 +250,7 @@ fun CommentModerationSection(
     onAction: (ModerationChoice) -> Unit,
 ) {
     var picking by remember { mutableStateOf(false) }
-    androidx.compose.material3.HorizontalDivider(thickness = 0.5.dp, color = colors.alphaBorder)
+    if (!com.alphamessenger.ui.chat.LocalFloatingTop.current) androidx.compose.material3.HorizontalDivider(thickness = 0.5.dp, color = colors.alphaBorder)
     Text(
         authorName.uppercase(), color = colors.textMuted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
         maxLines = 1, overflow = TextOverflow.Ellipsis,

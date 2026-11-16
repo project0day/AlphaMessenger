@@ -1562,11 +1562,12 @@ fun ChatScreen(
         }
     }
     // The newest bubble comes out of the input panel's top edge and is never drawn
-    // under its glass: whatever of it still sits below that edge is cut off.
+    // under its glass: whatever of it still sits below that edge is cut off. Not with the
+    // floating input: every bubble passes under that pill and into the haze alike.
     val panelGapPx = with(androidx.compose.ui.platform.LocalDensity.current) { 8.dp.roundToPx() }
     val newestClip = Modifier.drawWithContent {
         val item = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == typingLead }
-        val hidden = if (item == null) 0 else (-item.offset - panelGapPx).coerceAtLeast(0)
+        val hidden = if (item == null || ChatPanels.floating) 0 else (-item.offset - panelGapPx).coerceAtLeast(0)
         if (hidden == 0) drawContent()
         else clipRect(bottom = size.height - hidden) { this@drawWithContent.drawContent() }
     }
@@ -1802,10 +1803,8 @@ fun ChatScreen(
         contentWindowInsets = WindowInsets(0),
         topBar = {
             Column {
-            Column(Modifier.glassPanel(
-                chatHaze, androidx.compose.ui.graphics.RectangleShape,
-                tint = colors.bgPrimary.copy(alpha = if (colors.bgPrimary.luminance() > 0.5f) 0.78f else 0.6f), backdrop = colors.bgChat,
-            )) {
+            // Floating glass pill over the haze, or the full-width glass (Appearance).
+            ChatTopGlass(chatHaze, colors) {
             // The network status banner goes at the VERY TOP. At the bottom it
             // would fight the input bar: the bottom surface is the single owner
             // of its layout, and a foreign element there either steals space or
@@ -2843,12 +2842,7 @@ fun ChatScreen(
             // bar, the recording bar — and on down under the navigation bar: no seams.
             // Opaque underneath, so nothing dark flashes through while screens change.
             Column(
-                Modifier.fillMaxWidth().glassPanel(
-                    chatHaze, androidx.compose.ui.graphics.RectangleShape,
-                    tint = colors.bgSecondary.copy(alpha = if (colors.bgSecondary.luminance() > 0.5f) 0.74f else 0.6f),
-                    backdrop = colors.bgChat,
-                    extendBottom = navBarDp,
-                ),
+                Modifier.fillMaxWidth().chatBottomGlass(chatHaze, colors, navBarDp, v2State),
             ) {
             Column(Modifier.fillMaxWidth().onSizeChanged { aboveBarHpx = it.height }) {
             BottomArea(
@@ -2894,7 +2888,7 @@ fun ChatScreen(
                         )
                     },
                     inputBar = {
-                        Box(Modifier.onSizeChanged { inputBarHpx = it.height }) {
+                        Box(Modifier.onSizeChanged { inputBarHpx = it.height }.chatInputPill(chatHaze, colors, v2State)) {
                         InputBarV2(
                             onGlass = true,
                             onStop = if (isAssistant && assistantLive != null) ({ viewModel.assistant.stop(chatId) }) else null,
@@ -4745,11 +4739,7 @@ private fun ChatTopBar(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(
-                top = WindowInsets.statusBars
-                    .asPaddingValues()
-                    .calculateTopPadding(),
-            ),
+            .padding(top = chatStatusPad()),
     ) {
         Row(
             modifier = Modifier
@@ -4972,8 +4962,9 @@ private fun ChatTopBar(
                 }
             }
         }
-        // Thin divider under the top bar — separates from the chat area.
-        HorizontalDivider(
+        // Thin divider under the full-width top bar — separates it from the chat area.
+        // The floating pill has its own edge: a straight line under its rounded corners would show.
+        if (!LocalFloatingTop.current) HorizontalDivider(
             modifier = Modifier.align(Alignment.BottomCenter),
             thickness = 0.5.dp,
             color = colors.alphaBorder,
@@ -8735,7 +8726,7 @@ private fun SelectionTopBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding())
+            .padding(top = chatStatusPad())
             .height(56.dp)
             .padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -8861,10 +8852,10 @@ private fun PinnedBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 8.dp, end = 8.dp, top = 6.dp)
+            .padding(horizontal = if (ChatPanels.floating) 16.dp else 8.dp).padding(top = 6.dp)
             .then(
                 LocalPinnedHaze.current?.let { haze ->
-                    Modifier.glassPanel(haze, pill, tint = colors.bgSecondary.copy(alpha = if (colors.bgSecondary.luminance() > 0.5f) 0.74f else 0.55f), backdrop = colors.bgChat, blur = 22.dp)
+                    Modifier.glassPanel(haze, pill, tint = tintOf(colors.bgSecondary, ChatPanels.opacity), backdrop = colors.bgChat, blur = ChatPanels.blur.dp)
                 } ?: Modifier.clip(pill).background(colors.bgSecondary)
             )
             .clip(pill)

@@ -41,6 +41,8 @@ object StickerCatalog {
     suspend fun refresh(ctx: Context, repo: AlphaCoreRepository): Boolean {
         load(ctx)
         val json = repo.alphaCatalogFetch() ?: return false
+        // Theme pages travel in the same events: read once, for both.
+        ThemeCatalog.ingest(ctx, json)
         val fresh = runCatching { parse(json) }.getOrNull() ?: return false
         withContext(Dispatchers.IO) { runCatching { cache(ctx).writeText(json) } }
         packs = fresh

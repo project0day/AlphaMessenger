@@ -137,7 +137,7 @@ data class PatternSpec(
             }
             PatternSpec(
                 o.optString("name").take(32), tile, light.first, light.second, dark.first, dark.second,
-                num("deg", 0f, 360f, 180f), num("opacity", 0.03f, 0.7f, 0.18f), num("scale", 0.5f, 2f, 1f),
+                num("deg", MESH, 360f, 180f), num("opacity", 0.03f, 0.7f, 0.18f), num("scale", 0.5f, 2f, 1f),
                 num("stroke", 0.6f, 5f, 1.8f), num("blur", 0f, 16f, 0f), items,
             )
         }.getOrNull()
@@ -152,6 +152,22 @@ data class PatternSpec(
 }
 
 const val PATTERN_PREFIX = "pattern:"
+
+/** [PatternSpec.degrees] for a mesh: soft patches of the colours in the corners (older apps draw it as a plain gradient). */
+const val MESH = -1f
+
+/** A pattern's ground: flat, a gradient at its angle, or the mesh of up to four colours. */
+fun Modifier.patternBackground(colors: List<Color>, degrees: Float): Modifier =
+    if (degrees >= 0f || colors.size < 2) customWallpaperBackground(colors, degrees.coerceAtLeast(0f)) else drawBehind {
+        drawRect(colors[0])
+        val r = maxOf(size.width, size.height) * 0.85f
+        val spots = listOf(androidx.compose.ui.geometry.Offset(0f, 0f), androidx.compose.ui.geometry.Offset(size.width, size.height * 0.15f),
+            androidx.compose.ui.geometry.Offset(0f, size.height), androidx.compose.ui.geometry.Offset(size.width, size.height))
+        spots.forEachIndexed { i, at ->
+            val c = colors[i % colors.size]
+            drawRect(androidx.compose.ui.graphics.Brush.radialGradient(listOf(c, c.copy(alpha = 0f)), center = at, radius = r))
+        }
+    }
 
 /** The figures the app ships, in a 24×24 box; a pattern names them or brings its own contour. */
 val MOTIFS: Map<String, String> = mapOf(
@@ -180,6 +196,35 @@ val MOTIFS: Map<String, String> = mapOf(
     "g5" to "M10 6c-1 5-3 9-5 12M14 6c1 5 3 9 5 12",
     "g6" to "M7 7h10l-3 4M9 11h7c-1 4-4 7-8 8",
     "g7" to "M12 5v14M7 9h10M8 15l4-3 4 3",
+    // Alpha's own drawn figures.
+    "d_ghost" to "M6 21V11a6 6 0 0 1 12 0v10l-2-1.6-2 1.6-2-1.6-2 1.6-2-1.6zM9.5 11.2v1.4M14.5 11.2v1.4M11 15.4c.6.5 1.4.5 2 0",
+    "d_ghostwave" to "M5 21V12a5.5 5.5 0 0 1 11 0v9l-1.8-1.5-1.9 1.5-1.8-1.5-1.8 1.5-1.9-1.5zM8.3 12v1.2M12.7 12v1.2M9.6 15.6c.5.4 1.3.4 1.8 0M16 13.5c1.6-.3 2.8-1.5 3.2-3.2M18.2 8.8l1 1.5 1.6-.6",
+    "d_onion" to "M12 3.5c-.4 1.5-1.2 2.4-1.2 4M12 3.5c.4 1.5 1.2 2.4 1.2 4M12 7.5c4 2 7 5 7 8.8 0 2.6-3.1 4.4-7 4.4s-7-1.8-7-4.4C5 12.5 8 9.5 12 7.5zM12 9.3c-2.3 1.8-3.6 4.2-3.6 7.6M12 9.3c2.3 1.8 3.6 4.2 3.6 7.6M12 9.6v11",
+    "d_bubbleheart" to "M4 4.5h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9l-4 3v-3H4a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zM12 14.6s-3.4-2-3.4-4.3a1.7 1.7 0 0 1 3.4-.8 1.7 1.7 0 0 1 3.4.8c0 2.3-3.4 4.3-3.4 4.3z",
+    "d_locksmile" to "M6 11h12a1.5 1.5 0 0 1 1.5 1.5v7A1.5 1.5 0 0 1 18 21H6a1.5 1.5 0 0 1-1.5-1.5v-7A1.5 1.5 0 0 1 6 11zM8.5 11V8a3.5 3.5 0 0 1 7 0v3M9.5 14.6v.8M14.5 14.6v.8M10 17.4c1.1.9 2.9.9 4 0",
+    "d_keyheart" to "M7.5 6a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM10.8 12.3l9.2 6.2M17.2 16.6l-1.5 2.2M19.4 18.1l-1.4 2M7.5 11.6s-1.6-.9-1.6-2a.8.8 0 0 1 1.6-.4.8.8 0 0 1 1.6.4c0 1.1-1.6 2-1.6 2z",
+    "d_wingmail" to "M7 9h10v8H7zM7 9l5 4 5-4M7 10.5C4.5 9 2.6 9.6 2 11.4c1.6-.1 3 .4 5 1.8M7 13c-2-.6-3.4 0-4 1.4 1.4.2 2.7.4 4 .1M17 10.5c2.5-1.5 4.4-.9 5 .9-1.6-.1-3 .4-5 1.8M17 13c2-.6 3.4 0 4 1.4-1.4.2-2.7.4-4 .1",
+    "d_tower" to "M12 10v11M9 21h6M12 10l-3 11M12 10l3 11M10.3 16h3.4M11 9a1 1 0 1 0 2 0 1 1 0 1 0-2 0zM8.3 6.6a5 5 0 0 1 7.4 0M5.8 4.2a8.5 8.5 0 0 1 12.4 0",
+    "d_planet" to "M7 12a5 5 0 1 0 10 0 5 5 0 1 0-10 0zM4.2 15.6c-1.3-1.6 1.9-3.7 7.8-5.3s9.8-1.5 8.6.3M19.5 3.5v2.4M18.3 4.7h2.4M4.5 6.5v1.6M3.7 7.3h1.6",
+    "d_rocket" to "M12 2.8c3 2 4.5 5 4.5 9l-2 3.6h-5L7.5 11.8c0-4 1.5-7 4.5-9zM10.5 10a1.5 1.5 0 1 0 3 0 1.5 1.5 0 1 0-3 0zM9.5 15.4 7 18.2l3-.6M14.5 15.4 17 18.2l-3-.6M11 18.6c0 1.2.5 2 1 2.6.5-.6 1-1.4 1-2.6",
+    "d_cat" to "M5 8.2 6 4l3.5 3a8 8 0 0 1 5 0L18 4l1 4.2c1 1.3 1.5 2.8 1.5 4.4 0 4.4-3.8 7.4-8.5 7.4s-8.5-3-8.5-7.4c0-1.6.5-3.1 1.5-4.4zM9 11.8v1M15 11.8v1M11.2 14.4h1.6l-.8.9zM12 15.3c0 .9-1 1.5-2 1.2M12 15.3c0 .9 1 1.5 2 1.2M4.2 14.3l-2.6-.4M4.6 16l-2.3.9M19.8 14.3l2.6-.4M19.4 16l2.3.9",
+    "d_coffee" to "M5 10h11v5a5 5 0 0 1-5 5h-1a5 5 0 0 1-5-5zM16 11.5h1.4a2.2 2.2 0 0 1 0 4.4H15.7M8.5 7.5c0-1 1-1.5 1-2.6M12 7.5c0-1 1-1.5 1-2.6M10.5 15.3s-1.7-1-1.7-2.1a.85.85 0 0 1 1.7-.4.85.85 0 0 1 1.7.4c0 1.1-1.7 2.1-1.7 2.1z",
+    "d_headphones" to "M4 15v-3a8 8 0 0 1 16 0v3M4 14h2.5a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1zM20 14h-2.5a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1H19a1 1 0 0 0 1-1z",
+    "d_camera" to "M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1zM8.5 13a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0zM17.5 10.5h1",
+    "d_crown" to "M4 19h16M4.5 16.5 3 8l5 3.6L12 5l4 6.6L21 8l-1.5 8.5zM12 13.6v.4",
+    "d_bolt" to "M13 3 6 13.5h5L10 21l8-11.5h-5.2z",
+    "d_rain" to "M7 16a4 4 0 0 1-.6-8 5.5 5.5 0 0 1 10.6 1.3A3.4 3.4 0 0 1 17 16zM9 19l-.8 2M12.5 19l-.8 2M16 19l-.8 2",
+    "d_moonstars" to "M15 4.5a7.5 7.5 0 1 0 4.5 13.4A8 8 0 0 1 15 4.5zM18.5 5v2.4M17.3 6.2h2.4M20.5 10.2v1.6M19.7 11h1.6",
+    "d_plant" to "M8 15h8l-1 6H9zM12 15V9M12 11.5c-1-3-4-4.2-6-3.2 1 2.6 3.5 3.6 6 3.2zM12 9.5c1-3 3.5-4.6 6-4-.6 2.6-3 4.2-6 4z",
+    "d_cactus" to "M10 20V7a2 2 0 0 1 4 0v13M10 14H8a2 2 0 0 1-2-2V9M14 11.5h2a2 2 0 0 0 2-2V7.5M7 20h10M11.2 9.5h.3M12.8 12.5h.3",
+    "d_icecream" to "M8 11.5h8L12 21zM8 11.5a4 4 0 0 1 8 0M9.4 7a3 3 0 0 1 5.4.5M10 14l2 2M13.4 13.4l.8.8",
+    "d_pizza" to "M4 6c5-2 11-2 16 0L12 21zM5.6 8.8c4.3-1.4 8.5-1.4 12.8 0M9.5 11.5a1 1 0 1 0 2 0 1 1 0 1 0-2 0zM12.5 14.5a1 1 0 1 0 2 0 1 1 0 1 0-2 0zM13.5 10.8h.4",
+    "d_donut" to "M4 12a8 8 0 1 0 16 0 8 8 0 1 0-16 0zM10 12a2 2 0 1 0 4 0 2 2 0 1 0-4 0zM6.6 9.4l1 .6M15.8 7.3l.5 1M17.6 13l1-.3M8 15.6l-.6.9M13 17l.3 1",
+    "d_notes" to "M9 17V6l10-2v11M9 17a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM19 15a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM9 9.5l10-2",
+    "d_gamepad" to "M7 9h10a4 4 0 0 1 3.9 4.9l-.7 3.2a2 2 0 0 1-3.5.8L15 16H9l-1.7 1.9a2 2 0 0 1-3.5-.8l-.7-3.2A4 4 0 0 1 7 9zM7.5 11.5v3M6 13h3M15.4 12.2h.2M17 14h.2",
+    "d_cool" to "M3.5 12a8.5 8.5 0 1 0 17 0 8.5 8.5 0 1 0-17 0zM6.5 10h4.5l-.5 2a1.6 1.6 0 0 1-3.2 0zM13 10h4.5l-.5 2a1.6 1.6 0 0 1-3.2 0zM11 10.5h2M9 16c1.8 1.4 4.2 1.4 6 0",
+    "d_sparkle2" to "M12 3c.6 4.5 2.4 6.3 7 7-4.6.7-6.4 2.5-7 7-.6-4.5-2.4-6.3-7-7 4.6-.7 6.4-2.5 7-7zM19 16.5v3M17.5 18h3",
+    "d_shieldok" to "M12 3l7 2.8v5.4c0 4.6-3 8-7 9.8-4-1.8-7-5.2-7-9.8V5.8zM9 12l2.2 2.2L15.5 10",
 )
 
 
@@ -274,7 +319,52 @@ object PatternLayout {
                 break
             }
         }
+        fillGaps(out, placed, tile, size, rotate, gap, ::reach, ::next, ::r)
         return out
+    }
+
+    /**
+     * Random throws leave holes. Each round puts a figure into the largest empty
+     * spot left (on a grid of candidate points, measured across the tile edges),
+     * sized to fit it, down to a small filler, until no hole that big remains.
+     * Clearances are updated only against the newest figure, so it stays fast.
+     */
+    private fun fillGaps(
+        out: MutableList<PatternItem>, placed: MutableList<FloatArray>, tile: Float,
+        size: ClosedFloatingPointRange<Float>, rotate: Float, gap: Float,
+        reach: (Float) -> Float, next: () -> String, r: () -> Float,
+    ) {
+        val n = 40
+        val step = tile / n
+        val minReach = reach(size.start * 0.6f)
+        val maxReach = reach(size.endInclusive)
+        fun dist(x: Float, y: Float, p: FloatArray): Float {
+            var dx = kotlin.math.abs(x - p[0]); var dy = kotlin.math.abs(y - p[1])
+            dx = minOf(dx, tile - dx); dy = minOf(dy, tile - dy)
+            return hypot(dx, dy) - p[2]
+        }
+        val clear = FloatArray(n * n) { i ->
+            val x = (i % n + 0.5f) * step; val y = (i / n + 0.5f) * step
+            placed.minOfOrNull { dist(x, y, it) } ?: Float.MAX_VALUE
+        }
+        while (out.size < PatternSpec.MAX_ITEMS - 2) {
+            var best = -1
+            for (i in clear.indices) if (best < 0 || clear[i] > clear[best]) best = i
+            val room = clear[best] - gap
+            if (room < minReach) break
+            val rr = minOf(room, maxReach)
+            val x = (best % n + 0.5f) * step
+            val y = (best / n + 0.5f) * step
+            val p = floatArrayOf(x, y, rr)
+            placed += p
+            val m = next()
+            val sc = rr / (12f * 1.15f * 0.9f)
+            out += PatternItem(motifPath(m)!!, x, y, sc, ((r() * 2f - 1f) * rotate).roundToInt().toFloat(), motif = m)
+            for (i in clear.indices) {
+                val d = dist((i % n + 0.5f) * step, (i / n + 0.5f) * step, p)
+                if (d < clear[i]) clear[i] = d
+            }
+        }
     }
 }
 
@@ -345,6 +435,9 @@ class PatternRecipe(
 private fun pal(vararg p: Long): List<List<Long>> = p.toList().chunked(4)
 
 val PATTERN_RECIPES: List<PatternRecipe> = listOf(
+    PatternRecipe("drawn", "Рисунки Альфы", 300f, listOf("d_ghost", "d_ghostwave", "d_onion", "d_bubbleheart", "d_locksmile", "d_keyheart", "d_wingmail", "d_tower", "d_planet", "d_rocket", "d_cat", "d_coffee", "d_headphones", "d_camera", "d_crown", "d_bolt", "d_rain", "d_moonstars", "d_plant", "d_cactus", "d_icecream", "d_pizza", "d_donut", "d_notes", "d_gamepad", "d_cool", "d_sparkle2", "d_shieldok"), 0.95f..1.35f,
+        pal(0xFFECE7FB, 0xFF6D4FD6, 0xFF121019, 0xFFA78BFA, 0xFFE8F1EC, 0xFF2F7A5A, 0xFF0E1612, 0xFF8FD6B4, 0xFFF6ECE4, 0xFFA35A2C, 0xFF1B130E, 0xFFEAB08A),
+        fill = 0.3f),
     PatternRecipe("matrix", "Матрица", 192f, listOf("g0", "g1", "g2", "g3", "g4", "g5", "g6", "g7", "alpha"), 0.62f..0.78f,
         pal(0xFFE7F5EA, 0xFF138A36, 0xFF030A05, 0xFF3DFF7A, 0xFFE6F3F7, 0xFF0E7490, 0xFF02090C, 0xFF5EEBFF, 0xFFF1EAFB, 0xFF7C3AED, 0xFF07030D, 0xFFC084FC),
         rain = true, opacity = 0.42f),
@@ -442,7 +535,7 @@ fun PatternWallpaper(spec: PatternSpec, modifier: Modifier = Modifier, dark: Boo
     val tile by produceState<ImageBitmap?>(null, spec, ink, density) {
         value = withContext(Dispatchers.Default) { runCatching { renderPatternTile(spec, ink, density) }.getOrNull() }
     }
-    Box(modifier.clipToBounds().customWallpaperBackground(spec.bg(dark), spec.degrees)) {
+    Box(modifier.clipToBounds().patternBackground(spec.bg(dark), spec.degrees)) {
         val bmp = tile ?: return@Box
         // The layer reaches past the edges by the blur, so the softened edge falls outside the screen.
         val reach = (spec.blur * 2.5f).dp

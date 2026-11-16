@@ -346,6 +346,7 @@ fun ProfileContent(
             subtitleOverride = groupSubtitle ?: subtitle ?: if (isBot) stringResource(R.string.profile_bot) else null,
             secret = secret,
             isBot = isBot,
+            isGroup = groupSubtitle != null,
         )
         val isGroup = groupSubtitle != null
 
@@ -468,6 +469,7 @@ private fun ProfileHeader(
     subtitleOverride: String? = null,
     secret: Boolean = false,
     isBot: Boolean = false,
+    isGroup: Boolean = false,
 ) {
     val grad = remember(avatarSeed, isSaved, colors.accent) {
         if (isSaved) colors.accent to colors.accent.copy(alpha = 0.55f).compositeOver(Color(0xFF101418))
@@ -550,6 +552,9 @@ private fun ProfileHeader(
                     // The video avatar plays over its still cover.
                     val hasVideo = remember(videoPath, mediaVersion) { videoPath.isNotBlank() && java.io.File(videoPath).length() > 0 }
                     if (hasVideo) LoopingVideoAvatar(videoPath, 84.dp)
+                } else if (isGroup) {
+                    // The same stand-in the chat list shows for a group without a photo.
+                    com.alphamessenger.ui.components.GroupAvatarPlaceholder(Modifier.matchParentSize())
                 } else {
                     Text(
                         com.alphamessenger.ui.components.avatarInitial(displayName),

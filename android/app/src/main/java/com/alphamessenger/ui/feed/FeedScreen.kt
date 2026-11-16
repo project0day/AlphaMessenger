@@ -78,7 +78,7 @@ import com.alphamessenger.ui.theme.AlphaColorScheme
 import kotlinx.coroutines.launch
 import java.io.File
 
-private enum class FeedTab { NEWS, PACKS, GIFS, EMOJI }
+private enum class FeedTab { NEWS, PACKS, THEMES, GIFS, EMOJI }
 
 /** The brand's wordmark gradient (as on the chat list header). */
 private val AlphaBrand = Brush.linearGradient(listOf(Color(0xFF8B5CF6), Color(0xFFC026D3), Color(0xFFEC4899)))
@@ -133,6 +133,8 @@ fun FeedScreen(colors: AlphaColorScheme, repo: AlphaCoreRepository, onDismiss: (
     val scope = rememberCoroutineScope()
     FeedStore.load(ctx)
     StickerCatalog.load(ctx)
+    ThemeCatalog.load(ctx)
+    var removingTheme by remember { mutableStateOf<CatalogTheme?>(null) }
     var packQuery by rememberSaveable { mutableStateOf("") }
     var tab by rememberSaveable { mutableStateOf(FeedTab.NEWS) }
     var loading by remember { mutableStateOf(false) }
@@ -147,7 +149,8 @@ fun FeedScreen(colors: AlphaColorScheme, repo: AlphaCoreRepository, onDismiss: (
         // Nothing on the phone yet: say it is loading, not that the feed is empty.
         loading = FeedStore.posts.isEmpty()
         FeedStore.refreshIfStale(ctx, repo, maxAgeMs = 60_000L)
-        if (FeedStore.isOwner) scope.launch { ArchiveKeeper.sync(ctx.applicationContext, repo) }
+        // The archive list waits until the channel is open and settled: it can be thousands of files.
+        if (FeedStore.isOwner) scope.launch { kotlinx.coroutines.delay(30_000); ArchiveKeeper.sync(ctx.applicationContext, repo) }
         loading = false
         FeedStore.markSeen(ctx)
     }
@@ -172,7 +175,7 @@ fun FeedScreen(colors: AlphaColorScheme, repo: AlphaCoreRepository, onDismiss: (
                 Text(stringResource(R.string.feed_header_note), color = colors.textSecondary, fontSize = 12.5.sp,
                     modifier = Modifier.padding(horizontal = 16.dp))
                 Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()).padding(horizontal = 12.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(FeedTab.NEWS to R.string.feed_tab_news, FeedTab.PACKS to R.string.feed_tab_stickers, FeedTab.GIFS to R.string.feed_tab_gif, FeedTab.EMOJI to R.string.feed_tab_emoji).forEach { (t, label) ->
+                    listOf(FeedTab.NEWS to R.string.feed_tab_news, FeedTab.PACKS to R.string.feed_tab_stickers, FeedTab.THEMES to R.string.feed_tab_themes, FeedTab.EMOJI to R.string.feed_tab_emoji, FeedTab.GIFS to R.string.feed_tab_gif).forEach { (t, label) ->
                         val on = t == tab
                         Box(
                             Modifier.height(34.dp).clip(RoundedCornerShape(17.dp)).background(if (on) colors.accent else colors.bgTertiary)
@@ -233,6 +236,22 @@ fun FeedScreen(colors: AlphaColorScheme, repo: AlphaCoreRepository, onDismiss: (
                             }
                         }
                     }
+                    FeedTab.THEMES -> {
+                        val list = ThemeCatalog.themes
+                        if (list.isEmpty()) Box(Modifier.weight(1f)) { Empty(colors, loading) }
+                        else LazyVerticalGrid(
+                            columns = GridCells.Fixed(2), modifier = Modifier.fillMaxWidth().weight(1f),
+                            contentPadding = PaddingValues(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            items(list, key = { it.link }) { t ->
+                                CatalogThemeCard(t, colors, Modifier.combinedClickable(
+                                    onClick = { com.alphamessenger.ui.theme.ThemeUi.open(t.link) },
+                                    onLongClick = { if (FeedStore.isOwner) removingTheme = t },
+                                ))
+                            }
+                        }
+                    }
                     FeedTab.EMOJI -> {
                         val sets = posts.filter { it.kind == FeedKind.EMOJI && it.set != null }.sortedByDescending { it.at }
                         if (sets.isEmpty()) Box(Modifier.weight(1f)) { Empty(colors, loading) }
@@ -270,10 +289,24 @@ fun FeedScreen(colors: AlphaColorScheme, repo: AlphaCoreRepository, onDismiss: (
             ) { Icon(AlphaIcons.Outlined.Add, stringResource(R.string.feed_new_post), tint = Color.White) }
             if (composing) FeedComposer(colors, repo, onClose = { composing = false })
             if (openSet) com.alphamessenger.ui.emoji.EmojiSetScreen(colors, repo, onDismiss = { openSet = false })
+            // The channel is a window over the app: a theme opened here is previewed here, not in the next chat.
+            com.alphamessenger.ui.theme.ThemeLinkHost()
         }
     }
 
     if (keyDialog) OwnerKeyDialog(colors, repo, onDismiss = { keyDialog = false })
+    removingTheme?.let { t ->
+        AlertDialog(
+            onDismissRequest = { removingTheme = null },
+            containerColor = colors.bgSecondary,
+            title = { Text(stringResource(R.string.feed_theme_remove, t.name), color = colors.textPrimary) },
+            confirmButton = { TextButton(onClick = {
+                removingTheme = null
+                scope.launch { FeedStore.ownerKey(ctx)?.let { k -> ThemeCatalog.remove(ctx, repo, k, t.link) } }
+            }) { Text(stringResource(R.string.common_delete), color = colors.danger) } },
+            dismissButton = { TextButton(onClick = { removingTheme = null }) { Text(stringResource(R.string.common_cancel), color = colors.textMuted) } },
+        )
+    }
     removing?.let { p ->
         AlertDialog(
             onDismissRequest = { removing = null },
@@ -283,6 +316,28 @@ fun FeedScreen(colors: AlphaColorScheme, repo: AlphaCoreRepository, onDismiss: (
                 Text(stringResource(R.string.common_delete), color = colors.danger) } },
             dismissButton = { TextButton(onClick = { removing = null }) { Text(stringResource(R.string.common_cancel), color = colors.textMuted) } },
         )
+    }
+}
+
+/** A theme of the channel, two to a row: its look on a small chat, its name, light or dark. */
+@Composable
+private fun CatalogThemeCard(t: CatalogTheme, colors: AlphaColorScheme, modifier: Modifier) {
+    val theme = remember(t.link) { com.alphamessenger.ui.theme.CustomTheme.fromLink(t.link) }
+    val scheme = remember(theme) { theme?.scheme() }
+    Column(modifier.clip(RoundedCornerShape(16.dp)).background(colors.bgSecondary).padding(8.dp)) {
+        Box(Modifier.fillMaxWidth().height(118.dp).clip(RoundedCornerShape(12.dp)).background(scheme?.bgChat ?: colors.bgTertiary)) {
+            theme?.background?.let { b -> Box(Modifier.matchParentSize().background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(b, theme.background2 ?: b)))) }
+            theme?.pattern?.let { com.alphamessenger.ui.theme.PatternWallpaper(it.copy(scale = it.scale * 0.6f), Modifier.matchParentSize(), dark = !theme.isLight) }
+            if (scheme != null) Column(Modifier.fillMaxSize().padding(8.dp), verticalArrangement = Arrangement.spacedBy(5.dp, Alignment.Bottom)) {
+                Box(Modifier.fillMaxWidth(0.62f).height(16.dp).clip(RoundedCornerShape(8.dp)).background(scheme.msgIn))
+                Box(Modifier.align(Alignment.End).fillMaxWidth(0.7f).height(16.dp).clip(RoundedCornerShape(8.dp))
+                    .background(androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(scheme.msgOutStart, scheme.msgOutEnd))))
+            }
+        }
+        Text(t.name.ifBlank { theme?.name.orEmpty() }, color = colors.textPrimary, fontSize = 13.5.sp, fontWeight = FontWeight.Bold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 7.dp, start = 2.dp))
+        if (theme != null) Text(stringResource(if (theme.isLight) R.string.theme_card_light else R.string.theme_card_dark),
+            color = colors.textSecondary, fontSize = 11.5.sp, modifier = Modifier.padding(start = 2.dp))
     }
 }
 

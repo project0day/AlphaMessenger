@@ -16,6 +16,7 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asAndroidPath
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.addOutline
 import androidx.compose.ui.graphics.drawscope.clipPath
@@ -163,7 +164,10 @@ fun Modifier.glassPanel(
                         node.endRecording()
                     }
                     out.save()
-                    out.scale(1f / DOWNSCALE, 1f / DOWNSCALE)
+                    // The small copy is whole pixels (rounded up): stretched back exactly to the panel
+                    // and cut to its shape, or its last row shows as a thin line under the panel.
+                    out.clipPath(path.asAndroidPath())
+                    out.scale(full.width / node.width.coerceAtLeast(1), full.height / node.height.coerceAtLeast(1))
                     out.drawRenderNode(node)
                     out.restore()
                     drawRect(tint, size = full)

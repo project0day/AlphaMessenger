@@ -105,6 +105,10 @@ object AssistantClient {
         key: String,
         turns: List<ChatTurn>,
         tools: JSONArray? = null,
+        /** A tool the model must call in this reply (when the request leaves no doubt). */
+        force: String? = null,
+        /** The model began writing a call to this tool (its arguments are still coming). */
+        onToolStart: (String) -> Unit = {},
         onDelta: (thinking: String, answer: String) -> Unit,
     ): List<ToolCall> = withContext(Dispatchers.IO) {
         checkAddress(p.endpoint)
@@ -128,7 +132,10 @@ object AssistantClient {
             messages.put(o)
         }
         val payload = JSONObject().put("model", p.model).put("messages", messages).put("stream", true)
-        if (tools != null && tools.length() > 0) payload.put("tools", tools)
+        if (tools != null && tools.length() > 0) {
+            payload.put("tools", tools)
+            if (force != null) payload.put("tool_choice", JSONObject().put("type", "function").put("function", JSONObject().put("name", force)))
+        }
         val calls = java.util.TreeMap<Int, Array<String>>() // index → id, name, arguments, extra_content
         val call = client(p, 120).newCall(
             request(p, key, "/chat/completions").header("Accept", "text/event-stream")
@@ -151,7 +158,7 @@ object AssistantClient {
                         ?: throw AssistantFailure(AssistantError(AssistantError.Kind.EMPTY))
                     val m = o.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")
                     split.feed(m?.optString("reasoning_content").orEmpty() + m?.optString("reasoning").orEmpty(), m?.optString("content")?.takeIf { it != "null" }.orEmpty())
-                    m?.optJSONArray("tool_calls")?.let { addCalls(calls, it) }
+                    m?.optJSONArray("tool_calls")?.let { addCalls(calls, it, onToolStart) }
                     finishOf(o.optJSONArray("choices")?.optJSONObject(0)?.optString("finish_reason"))
                     return@use
                 }
@@ -173,7 +180,7 @@ object AssistantClient {
                                 d.optString("reasoning").takeIf { it != "null" }.orEmpty()
                             val text = d.optString("content").takeIf { it != "null" }.orEmpty()
                             if (think.isNotEmpty() || text.isNotEmpty()) split.feed(think, text)
-                            d.optJSONArray("tool_calls")?.let { addCalls(calls, it) }
+                            d.optJSONArray("tool_calls")?.let { addCalls(calls, it, onToolStart) }
                         }
                         val fin = choice.optString("finish_reason").takeIf { it.isNotBlank() && it != "null" }
                         if (fin != null) { finishOf(fin); done = true }
@@ -190,14 +197,14 @@ object AssistantClient {
     }
 
     /** Tool calls arrive in pieces: an index, then the name, then the arguments bit by bit. */
-    private fun addCalls(acc: java.util.TreeMap<Int, Array<String>>, a: JSONArray) {
+    private fun addCalls(acc: java.util.TreeMap<Int, Array<String>>, a: JSONArray, onStart: (String) -> Unit) {
         for (i in 0 until a.length()) {
             val c = a.optJSONObject(i) ?: continue
             val slot = acc.getOrPut(c.optInt("index", i)) { arrayOf("", "", "", "") }
             c.optString("id").takeIf { it.isNotBlank() && it != "null" }?.let { slot[0] = it }
             c.optJSONObject("extra_content")?.let { slot[3] = it.toString() }
             val f = c.optJSONObject("function") ?: continue
-            f.optString("name").takeIf { it.isNotBlank() && it != "null" }?.let { slot[1] = it }
+            f.optString("name").takeIf { it.isNotBlank() && it != "null" }?.let { if (slot[1].isEmpty()) onStart(it); slot[1] = it }
             f.optString("arguments").takeIf { it != "null" }?.let { slot[2] += it }
         }
     }
