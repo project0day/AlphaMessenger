@@ -155,11 +155,11 @@ fun AlphaTheme(
         val navRequest = SystemBars.navColor
         val statusRequest = SystemBars.statusColor
         val iconsRequest = SystemBars.lightIcons
-        DisposableEffect(overlay, navRequest, statusRequest, iconsRequest, alphaColors.bgSecondary) {
-            SystemBars.apply(view, alphaColors.bgSecondary, Color.Transparent, variant.isLight)
+        DisposableEffect(overlay, navRequest, statusRequest, iconsRequest, alphaColors.bgBottom) {
+            SystemBars.apply(view, alphaColors.bgBottom, Color.Transparent, variant.isLight)
             onDispose { }
         }
-        val latestNav = androidx.compose.runtime.rememberUpdatedState(alphaColors.bgSecondary)
+        val latestNav = androidx.compose.runtime.rememberUpdatedState(alphaColors.bgBottom)
         val latestLight = androidx.compose.runtime.rememberUpdatedState(variant.isLight)
         val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
         DisposableEffect(lifecycleOwner, view) {

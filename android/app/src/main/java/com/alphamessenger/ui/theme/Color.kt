@@ -102,6 +102,10 @@ val AlphaColorScheme.bgBrush: androidx.compose.ui.graphics.Brush?
     get() = if (bgEnd.isSpecified && bgEnd != bgPrimary)
         androidx.compose.ui.graphics.Brush.verticalGradient(listOf(bgPrimary, bgEnd)) else null
 
+/** The screen background's colour at the bottom edge: what the navigation bar continues. */
+val AlphaColorScheme.bgBottom: Color
+    get() = if (bgEnd.isSpecified) bgEnd else bgPrimary
+
 /** Paint the theme's screen background: its gradient, else its colour. */
 fun androidx.compose.ui.Modifier.themeBackground(cs: AlphaColorScheme): androidx.compose.ui.Modifier =
     cs.bgBrush?.let { this.then(androidx.compose.ui.Modifier.background(it)) }

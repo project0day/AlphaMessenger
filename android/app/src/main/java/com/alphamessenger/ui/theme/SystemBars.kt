@@ -87,6 +87,15 @@ object SystemBars {
         if (nav == lastNav && status == lastStatus && light == lastLight) return
         lastNav = nav; lastStatus = status; lastLight = light
         writes++
+        // The bars change in the system's own window right away, while our content
+        // repaints on the frame being built now: written on the NEXT frame, the bar
+        // takes the new theme together with the screen instead of ahead of it.
+        android.view.Choreographer.getInstance().postFrameCallback {
+            if (nav == lastNav && status == lastStatus && light == lastLight) write(view, nav, status, light)
+        }
+    }
+
+    private fun write(view: android.view.View, nav: Int, status: Int, light: Boolean) {
         windows.forEach { w ->
             w.statusBarColor = status
             w.navigationBarColor = nav

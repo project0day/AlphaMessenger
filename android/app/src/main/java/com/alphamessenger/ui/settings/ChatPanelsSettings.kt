@@ -114,9 +114,9 @@ private fun PanelsPreview(colors: AlphaColorScheme) {
             }
         }
         Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().hazeBottom(com.alphamessenger.ui.chat.wallpaperEdge(com.alphamessenger.ui.theme.LocalChatWallpaper.current, colors, top = false), ChatPanels.haze, 0.dp)
-            .padding(start = 8.dp, end = 8.dp, bottom = 8.dp)
-            .glassPanel(glass, RoundedCornerShape(22.dp), tint = com.alphamessenger.ui.chat.tintOf(colors.bgSecondary, ChatPanels.opacity), backdrop = colors.bgChat, blur = ChatPanels.blur.dp)) {
-            Row(Modifier.fillMaxWidth().height(44.dp).padding(start = 14.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            .padding(start = 8.dp, end = 8.dp, bottom = 6.dp)
+            .glassPanel(glass, RoundedCornerShape(29.dp), tint = com.alphamessenger.ui.chat.tintOf(colors.bgSecondary, ChatPanels.opacity), backdrop = colors.bgChat, blur = ChatPanels.blur.dp)) {
+            Row(Modifier.fillMaxWidth().height(52.dp).padding(start = 14.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(stringResource(R.string.chat_message_hint_short), color = colors.textMuted, fontSize = 13.sp, modifier = Modifier.weight(1f))
                 Box(Modifier.height(32.dp).fillMaxWidth(0.12f).clip(RoundedCornerShape(16.dp))
                     .background(Brush.linearGradient(listOf(colors.accent, colors.msgOutEnd))))

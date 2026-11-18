@@ -372,16 +372,8 @@ fun ChatListScreen(
 
     val dockCtx = androidx.compose.ui.platform.LocalContext.current
     TabDockPrefs.load(dockCtx)
-    // The system navigation bar is see-through here too: the list runs under it.
-    val navTint = colors.bgPrimary.copy(alpha = 0.5f)
-    androidx.compose.runtime.DisposableEffect(navTint) {
-        val owner = Any()
-        com.alphamessenger.ui.theme.SystemBars.requestNav(owner, navTint)
-        // Only undo our own tint: the next screen may already have set its own.
-        onDispose {
-            com.alphamessenger.ui.theme.SystemBars.releaseNav(owner)
-        }
-    }
+    // The navigation bar keeps the theme's own colour (the background's bottom edge) the dock haze
+    // runs into; a see-through bar let the next screen show through it while it slid in.
     val dockShown = !TabDockPrefs.autoHide || fabVisible
     // Missed calls not looked at yet; opening the Calls tab marks them seen.
     val callHistory = remember(dockCtx) {

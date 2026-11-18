@@ -422,8 +422,10 @@ fun InputBarV2(
         // the button stays visible (red, blinking) under the user's finger.
         // Covered area = everything left of the button (edge padding 6dp +
         // 48dp button = 54dp kept clear on the right).
+        // Only while the finger holds the mic: a locked recording (tap, or slid up) has its own bar,
+        // and on its cancel this strip must not flash up for the moment the recording still runs.
         AnimatedVisibility(
-            visible = isRecording,
+            visible = isRecording && micPressed,
             modifier = Modifier.matchParentSize(),
             enter = fadeIn(tween(120)),
             exit = fadeOut(tween(120)),

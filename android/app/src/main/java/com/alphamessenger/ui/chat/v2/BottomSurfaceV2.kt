@@ -55,6 +55,10 @@ fun BottomSurfaceV2(
     lockedRecordingBar: @Composable () -> Unit = {},
     /** Sits on the chat's frosted glass: no divider, no fills of its own. */
     onGlass: Boolean = false,
+    /** Drawn under the panel slot (emoji, attach) alone, not under the input bar. */
+    panelModifier: Modifier = Modifier,
+    /** Around the input bar and the locked-recording bar together: one width for both. */
+    barModifier: Modifier = Modifier,
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
@@ -84,7 +88,7 @@ fun BottomSurfaceV2(
 
         // InputBar — ALWAYS composed, and it stays in place while the attach sheet
         // lies over the chat; the locked-recording bar overlays it when locked.
-        Box(modifier = Modifier.fillMaxWidth()) {
+        Box(modifier = Modifier.fillMaxWidth().then(barModifier)) {
             Box(
                 modifier = Modifier.fillMaxWidth()
                     // Locked recording: the bar sits UNDER the recording strip — the
@@ -107,6 +111,6 @@ fun BottomSurfaceV2(
         }
 
         // BottomPanel — ONE slot, height = bottomPanelHeight, content = mode.
-        bottomPanel()
+        Box(panelModifier) { bottomPanel() }
     }
 }

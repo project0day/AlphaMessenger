@@ -2842,7 +2842,7 @@ fun ChatScreen(
             // bar, the recording bar — and on down under the navigation bar: no seams.
             // Opaque underneath, so nothing dark flashes through while screens change.
             Column(
-                Modifier.fillMaxWidth().chatBottomGlass(chatHaze, colors, navBarDp, v2State),
+                Modifier.fillMaxWidth().chatBottomGlass(chatHaze, colors, navBarDp),
             ) {
             Column(Modifier.fillMaxWidth().onSizeChanged { aboveBarHpx = it.height }) {
             BottomArea(
@@ -2872,6 +2872,9 @@ fun ChatScreen(
                     state = v2State,
                     colors = colors,
                     onGlass = true,
+                    panelModifier = Modifier.chatPanelGlass(chatHaze, colors, navBarDp, v2State),
+                    // Measured with the pill's margins: the list and the wallpaper run on under all of it.
+                    barModifier = Modifier.onSizeChanged { inputBarHpx = it.height }.chatInputPill(chatHaze, colors),
                     lockedRecording = state.isRecordingLocked,
                     lockedRecordingBar = {
                         com.alphamessenger.ui.chat.v2.RecordingPanelV2(
@@ -2888,7 +2891,7 @@ fun ChatScreen(
                         )
                     },
                     inputBar = {
-                        Box(Modifier.onSizeChanged { inputBarHpx = it.height }.chatInputPill(chatHaze, colors, v2State)) {
+                        Box {
                         InputBarV2(
                             onGlass = true,
                             onStop = if (isAssistant && assistantLive != null) ({ viewModel.assistant.stop(chatId) }) else null,

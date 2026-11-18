@@ -80,7 +80,7 @@ val LocalFloatingTop = compositionLocalOf { false }
 fun chatStatusPad(): Dp = if (LocalFloatingTop.current) 0.dp else WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
 
 private val TOP_PILL = RoundedCornerShape(29.dp)
-private val INPUT_PILL = RoundedCornerShape(26.dp)
+private val INPUT_PILL = RoundedCornerShape(29.dp)
 
 /** The chat's top: a floating glass pill over the haze, or the full-width glass. */
 @Composable
@@ -100,10 +100,10 @@ fun ChatTopGlass(haze: GlassState, colors: AlphaColorScheme, content: @Composabl
     }
 }
 
-/** The bottom block: the haze only while the input floats; the full-width glass when a panel (emoji, attach) is open. */
-fun Modifier.chatBottomGlass(haze: GlassState, colors: AlphaColorScheme, navBar: Dp, surface: BottomSurfaceState): Modifier = composed {
+/** The bottom block: only the haze while the bars float (the input pill and the panel have their own glass); else the full-width glass. */
+fun Modifier.chatBottomGlass(haze: GlassState, colors: AlphaColorScheme, navBar: Dp): Modifier = composed {
     ChatPanels.load(LocalContext.current)
-    if (ChatPanels.floating && floats(surface)) {
+    if (ChatPanels.floating) {
         hazeBottom(wallpaperEdge(com.alphamessenger.ui.theme.LocalChatWallpaper.current, colors, top = false), ChatPanels.haze, navBar)
     } else {
         glassPanel(haze, RectangleShape, tint = colors.bgSecondary.copy(alpha = if (colors.bgSecondary.luminance() > 0.5f) 0.74f else 0.6f),
@@ -111,11 +111,23 @@ fun Modifier.chatBottomGlass(haze: GlassState, colors: AlphaColorScheme, navBar:
     }
 }
 
-/** The input field as a floating glass pill (while nothing is open under it). */
-fun Modifier.chatInputPill(haze: GlassState, colors: AlphaColorScheme, surface: BottomSurfaceState): Modifier = composed {
-    if (ChatPanels.floating && floats(surface)) {
-        padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = 8.dp)
+/**
+ * The floating glass pill around the input bar and the recording bar together, so both
+ * keep one width. Corners follow the field inside it (22dp + the bar's own 6–8dp inset).
+ */
+fun Modifier.chatInputPill(haze: GlassState, colors: AlphaColorScheme): Modifier = composed {
+    if (ChatPanels.floating) {
+        padding(start = 8.dp, end = 8.dp, top = 2.dp, bottom = 6.dp)
             .glassPanel(haze, INPUT_PILL, tint = tintOf(colors.bgSecondary, ChatPanels.opacity), backdrop = colors.bgChat, blur = ChatPanels.blur.dp)
+    } else this
+}
+
+/** The emoji / attach panel under the floating pill: its own glass, rounded on top, down under the navigation bar. */
+fun Modifier.chatPanelGlass(haze: GlassState, colors: AlphaColorScheme, navBar: Dp, surface: BottomSurfaceState): Modifier = composed {
+    if (ChatPanels.floating && (surface.panelMode == PanelMode.EMOJI || surface.panelMode == PanelMode.ATTACH)) {
+        glassPanel(haze, RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
+            tint = tintOf(colors.bgSecondary, ChatPanels.opacity.coerceAtLeast(0.6f)), backdrop = colors.bgChat,
+            blur = ChatPanels.blur.dp, extendBottom = navBar)
     } else this
 }
 
@@ -141,8 +153,6 @@ fun wallpaperEdge(w: com.alphamessenger.ui.theme.ChatWallpaper, colors: AlphaCol
 fun tintOf(c: Color, opacity: Float): Color =
     c.copy(alpha = (opacity + if (c.luminance() > 0.5f) 0.12f else 0f).coerceIn(0.15f, 0.95f))
 
-private fun floats(surface: BottomSurfaceState): Boolean =
-    surface.panelMode == PanelMode.NONE || surface.panelMode == PanelMode.KEYBOARD || surface.panelMode == PanelMode.RECORDING
 
 /** A haze from the top edge down past the bar, where the messages fade out. */
 internal fun Modifier.hazeTop(c: Color, strength: Float): Modifier = if (strength <= 0f) this else drawBehind {

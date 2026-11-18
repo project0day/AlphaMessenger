@@ -45,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import com.alphamessenger.ui.theme.bgBottom
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -244,7 +245,7 @@ fun BottomTabDock(
                 // A haze under the dock and the navigation buttons: the list fades out, no band.
                 .drawBehind {
                     drawRect(androidx.compose.ui.graphics.Brush.verticalGradient(
-                        0f to colors.bgPrimary.copy(alpha = 0f), 0.55f to colors.bgPrimary.copy(alpha = 0.6f), 1f to colors.bgPrimary.copy(alpha = 0.9f)))
+                        0f to colors.bgBottom.copy(alpha = 0f), 0.55f to colors.bgBottom.copy(alpha = 0.6f), 1f to colors.bgBottom.copy(alpha = 0.9f)))
                 }
                 .navigationBarsPadding().padding(start = 12.dp, end = 12.dp, bottom = 14.dp, top = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
