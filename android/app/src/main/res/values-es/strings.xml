@@ -279,7 +279,7 @@ cuando quieras en los ajustes del dispositivo.</string>
     <string name="theme_gradients">Degradados</string>
     <string name="theme_solid">Lisos</string>
     <string name="theme_sample_avatar">A</string>
-    <string name="theme_sample_name">Ana</string>
+    <string name="theme_sample_name">Michael</string>
     <string name="common_online">en línea</string>
     <string name="common_today">Hoy</string>
     <string name="theme_msg_1">¡Hola! ¿Qué tal? 👋</string>
@@ -2888,7 +2888,19 @@ Nostr se usa como transporte.</string>
     <string name="chat_panels_haze">Bruma</string>
     <string name="chat_panels_opacity">Opacidad del cristal</string>
     <string name="chat_panels_preview_msg">Mira, se funde en la bruma</string>
-    <string name="chat_panels_preview_name">Masha</string>
+    <string name="chat_panels_preview_name">Daniel</string>
     <string name="chat_panels_preview_online">en línea</string>
     <string name="chat_message_hint_short">Mensaje</string>
+    <string name="device_replaced_title">Tu cuenta está activa en otro dispositivo</string>
+    <string name="device_replaced_body">Es probable que tu cuenta se haya restaurado en otro dispositivo el %1$s. Este dispositivo ya no puede enviar ni recibir mensajes. Tu historial de mensajes sigue disponible.</string>
+    <string name="device_replaced_action">Restaurar la cuenta en este dispositivo</string>
+    <string name="device_replaced_confirm">Se borrarán todos los datos de este dispositivo y la app se reiniciará. Después podrás restaurar tu cuenta con tu frase de recuperación y tu contraseña de recuperación. Se cerrará la sesión en tu otro dispositivo.</string>
+    <string name="device_replaced_wipe">Borrar y reiniciar</string>
+    <string name="onb_restore_old_phone">Si tu cuenta sigue activa en otro dispositivo, se cerrará la sesión en ese dispositivo al finalizar la restauración.</string>
+    <string name="backup_restore_other_account">Esta copia de seguridad pertenece a otra cuenta. Para transferir esa cuenta a este dispositivo, cierra sesión y elige Restaurar en la pantalla de bienvenida.</string>
+    <string name="bk_restore_how">Para restaurar tu cuenta en un dispositivo nuevo, elige Restaurar en la pantalla de bienvenida e introduce tu frase de recuperación (o nsec) y tu contraseña de recuperación. Se restaurarán tus chats, el historial de mensajes, los relays, los ajustes y los asistentes. Si la copia no se encuentra automáticamente, selecciona el archivo .enc. Guarda la frase de recuperación y la contraseña por separado de tu dispositivo.</string>
+    <string name="restore_own_relay_label">Relay donde se guarda la copia (opcional)</string>
+    <string name="restore_own_relay_search">Buscar en este relay</string>
+    <string name="restore_own_relay_bad">Introduce una dirección de relay válida (wss://…)</string>
+    <string name="restore_restarting">Restauración completada. La app se reiniciará.</string>
 </resources>

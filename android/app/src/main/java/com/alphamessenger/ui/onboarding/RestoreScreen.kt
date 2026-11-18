@@ -286,7 +286,20 @@ private fun NotFoundStep(state: RestoreViewModel.UiState, vm: RestoreViewModel, 
             OnbPrimaryButton(stringResource(R.string.restore_import_file), pickFile)
             OnbTextButton(stringResource(R.string.restore_retry_search), vm::retryLookup, Modifier.align(Alignment.CenterHorizontally))
         },
-    ) {}
+    ) {
+        var relay by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableStateOf("") }
+        OnbField(
+            value = relay,
+            onValueChange = { relay = it },
+            label = stringResource(R.string.restore_own_relay_label),
+            placeholder = "wss://",
+            error = state.error,
+            keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri,
+        )
+        if (relay.isNotBlank()) {
+            OnbTextButton(stringResource(R.string.restore_own_relay_search), { vm.searchOnRelay(relay) }, Modifier.align(Alignment.CenterHorizontally))
+        }
+    }
 }
 
 private enum class StageState { Done, Active, Waiting }
@@ -352,5 +365,6 @@ private fun ProgressStep(state: RestoreViewModel.UiState, onRetry: (() -> Unit)?
         }
         state.error?.let { OnbCallout(it, CalloutKind.Error) }
         OnbCallout(stringResource(R.string.onb_restore_keep_open))
+        OnbCallout(stringResource(R.string.onb_restore_old_phone))
     }
 }

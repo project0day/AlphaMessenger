@@ -279,7 +279,7 @@ Pas de serveur — le transport passe par des relais Nostr.</string>
     <string name="theme_gradients">Dégradés</string>
     <string name="theme_solid">Unies</string>
     <string name="theme_sample_avatar">A</string>
-    <string name="theme_sample_name">Anne</string>
+    <string name="theme_sample_name">Michael</string>
     <string name="common_online">en ligne</string>
     <string name="common_today">Aujourd\'hui</string>
     <string name="theme_msg_1">Salut ! Ça va ? 👋</string>
@@ -2900,7 +2900,19 @@ Nostr sert de transport.</string>
     <string name="chat_panels_haze">Brume</string>
     <string name="chat_panels_opacity">Opacité du verre</string>
     <string name="chat_panels_preview_msg">Regarde, ça fond dans la brume</string>
-    <string name="chat_panels_preview_name">Masha</string>
+    <string name="chat_panels_preview_name">Daniel</string>
     <string name="chat_panels_preview_online">en ligne</string>
     <string name="chat_message_hint_short">Message</string>
+    <string name="device_replaced_title">Votre compte est actif sur un autre appareil</string>
+    <string name="device_replaced_body">Votre compte a probablement été restauré sur un autre appareil le %1$s. Cet appareil ne peut plus envoyer ni recevoir de messages. Votre historique reste disponible.</string>
+    <string name="device_replaced_action">Restaurer le compte sur cet appareil</string>
+    <string name="device_replaced_confirm">Toutes les données de cet appareil seront effacées et l\'application redémarrera. Vous pourrez ensuite restaurer votre compte avec votre phrase de récupération et votre mot de passe de récupération. Votre autre appareil sera déconnecté.</string>
+    <string name="device_replaced_wipe">Effacer et redémarrer</string>
+    <string name="onb_restore_old_phone">Si votre compte est encore actif sur un autre appareil, celui-ci sera déconnecté une fois la restauration terminée.</string>
+    <string name="backup_restore_other_account">Cette sauvegarde appartient à un autre compte. Pour transférer ce compte sur cet appareil, déconnectez-vous et choisissez Restaurer sur l\'écran d\'accueil.</string>
+    <string name="bk_restore_how">Pour restaurer votre compte sur un nouvel appareil, choisissez Restaurer sur l\'écran d\'accueil et saisissez votre phrase de récupération (ou nsec) et votre mot de passe de récupération. Vos discussions, l\'historique, les relais, les réglages et les assistants seront restaurés. Si la sauvegarde n\'est pas trouvée automatiquement, sélectionnez le fichier .enc. Conservez la phrase de récupération et le mot de passe séparément de votre appareil.</string>
+    <string name="restore_own_relay_label">Relais où la sauvegarde est stockée (facultatif)</string>
+    <string name="restore_own_relay_search">Chercher sur ce relais</string>
+    <string name="restore_own_relay_bad">Saisissez une adresse de relais valide (wss://…)</string>
+    <string name="restore_restarting">Restauration terminée. L\'application va redémarrer.</string>
 </resources>

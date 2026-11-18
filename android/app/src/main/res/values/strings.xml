@@ -279,7 +279,7 @@ in the device settings at any time.</string>
     <string name="theme_gradients">Gradients</string>
     <string name="theme_solid">Solid</string>
     <string name="theme_sample_avatar">A</string>
-    <string name="theme_sample_name">Anna</string>
+    <string name="theme_sample_name">Michael</string>
     <string name="common_online">online</string>
     <string name="common_today">Today</string>
     <string name="theme_msg_1">Hi! How are you? 👋</string>
@@ -2878,7 +2878,19 @@ Nostr is used as transport.</string>
     <string name="chat_panels_haze">Haze</string>
     <string name="chat_panels_opacity">Glass opacity</string>
     <string name="chat_panels_preview_msg">Look, it melts into the haze</string>
-    <string name="chat_panels_preview_name">Masha</string>
+    <string name="chat_panels_preview_name">Daniel</string>
     <string name="chat_panels_preview_online">online</string>
     <string name="chat_message_hint_short">Message</string>
+    <string name="device_replaced_title">Your account is active on another device</string>
+    <string name="device_replaced_body">Your account was likely restored on a different device on %1$s. This device can no longer send or receive messages. Your message history remains available.</string>
+    <string name="device_replaced_action">Restore account on this device</string>
+    <string name="device_replaced_confirm">All data on this device will be erased and the app will restart. You can then restore your account with your recovery phrase and recovery password. Your other device will be signed out.</string>
+    <string name="device_replaced_wipe">Erase and restart</string>
+    <string name="onb_restore_old_phone">If your account is still active on another device, that device will be signed out once the restore is complete.</string>
+    <string name="backup_restore_other_account">This backup belongs to a different account. To transfer that account to this device, sign out and choose Restore on the welcome screen.</string>
+    <string name="bk_restore_how">To restore your account on a new device, choose Restore on the welcome screen and enter your recovery phrase (or nsec) and recovery password. Your chats, message history, relays, settings and assistants will be restored. If the backup is not found automatically, select the .enc file. Keep your recovery phrase and password separate from your device.</string>
+    <string name="restore_own_relay_label">Relay where the backup is stored (optional)</string>
+    <string name="restore_own_relay_search">Search this relay</string>
+    <string name="restore_own_relay_bad">Enter a valid relay address (wss://…)</string>
+    <string name="restore_restarting">Restore complete. The app will now restart.</string>
 </resources>

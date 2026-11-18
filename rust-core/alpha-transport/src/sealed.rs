@@ -79,6 +79,11 @@ pub fn backup_locator(identity_secret: &[u8]) -> (Key32, Key32) {
     (hkdf_expand::<32>(identity_secret, b"backup-locator-sign"), hkdf_expand::<32>(identity_secret, b"backup-locator-key"))
 }
 
+/// Keys of the "which phone holds this leaf" claim: (signing key, sealing key).
+pub fn device_claim(identity_secret: &[u8]) -> (Key32, Key32) {
+    (hkdf_expand::<32>(identity_secret, b"device-claim-sign"), hkdf_expand::<32>(identity_secret, b"device-claim-key"))
+}
+
 pub fn random_secret() -> Key32 {
     let mut s = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut s);

@@ -531,6 +531,7 @@ fun ChatListScreen(
             if (TabDockPrefs.top) {
                 TopTabDock(dockShown, dockTabs, uiState.selectedTab, viewModel::selectTab, colors)
             }
+            DeviceReplacedBanner(viewModel.repository, colors)
             RelayLinkBanner(viewModel, colors, onOpenRelays)
             // Active-call banner — shows when a call is minimized.
             com.alphamessenger.calls.ui.CallBanner()

@@ -1437,6 +1437,14 @@ internal open class UniffiVTableCallbackInterfaceAlphaMessengerCallback(
 
 
 
+
+
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1488,6 +1496,8 @@ internal interface UniffiLib : Library {
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_alpha_feed_remove(`ptr`: Pointer,`key`: RustBuffer.ByValue,`d`: RustBuffer.ByValue,`at`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_alpha_health_fetch(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_app_settings(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_apply_relay_changes(`ptr`: Pointer,`add`: RustBuffer.ByValue,`enable`: RustBuffer.ByValue,`disable`: RustBuffer.ByValue,`remove`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
@@ -1547,6 +1557,8 @@ internal interface UniffiLib : Library {
     ): Byte
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_chat_requests_json(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_claim_this_device(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_clear_draft(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_confirm_db_migration(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -1589,6 +1601,8 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_derive_master_key(`ptr`: Pointer,`password`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_device_replaced_at(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_devices_json(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_direct_chat_exists(`ptr`: Pointer,`npubOrHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1913,6 +1927,8 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_send_text(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`thread`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_set_app_settings(`ptr`: Pointer,`json`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_set_callback(`ptr`: Pointer,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_set_channel_settings(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,`cfgJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2199,6 +2215,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_alpha_health_fetch(
     ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_app_settings(
+    ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_apply_relay_changes(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_approve_join_request(
@@ -2257,6 +2275,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_chat_requests_json(
     ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_claim_this_device(
+    ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_clear_draft(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_confirm_db_migration(
@@ -2298,6 +2318,8 @@ internal interface UniffiLib : Library {
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_delete_pending_media(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_derive_master_key(
+    ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_device_replaced_at(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_devices_json(
     ): Short
@@ -2623,6 +2645,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_send_text(
     ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_set_app_settings(
+    ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_set_callback(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_set_channel_settings(
@@ -2857,6 +2881,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_alpha_health_fetch() != 28058.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_app_settings() != 17472.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_apply_relay_changes() != 8765.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2944,6 +2971,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_chat_requests_json() != 34309.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_claim_this_device() != 43757.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_clear_draft() != 5317.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3005,6 +3035,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_derive_master_key() != 3091.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_device_replaced_at() != 63003.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_devices_json() != 11619.toShort()) {
@@ -3491,6 +3524,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_send_text() != 7102.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_set_app_settings() != 56717.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_set_callback() != 15374.toShort()) {
@@ -4191,6 +4227,8 @@ public interface AlphaMessengerCoreInterface {
     
     fun `alphaHealthFetch`(): kotlin.String
     
+    fun `appSettings`(): kotlin.String
+    
     fun `applyRelayChanges`(`add`: List<kotlin.String>, `enable`: List<kotlin.String>, `disable`: List<kotlin.String>, `remove`: List<kotlin.String>): kotlin.UInt
     
     fun `approveJoinRequest`(`chatId`: kotlin.String, `requesterNpub`: kotlin.String, `token`: kotlin.String)
@@ -4249,6 +4287,8 @@ public interface AlphaMessengerCoreInterface {
     
     fun `chatRequestsJson`(): kotlin.String
     
+    fun `claimThisDevice`()
+    
     fun `clearDraft`(`chatId`: kotlin.String)
     
     fun `confirmDbMigration`()
@@ -4296,6 +4336,8 @@ public interface AlphaMessengerCoreInterface {
     fun `deletePendingMedia`(`msgId`: kotlin.String)
     
     fun `deriveMasterKey`(`password`: kotlin.String): List<kotlin.UByte>
+    
+    fun `deviceReplacedAt`(): kotlin.Long
     
     fun `devicesJson`(): kotlin.String
     
@@ -4623,6 +4665,8 @@ public interface AlphaMessengerCoreInterface {
     fun `sendReply`(`chatId`: kotlin.String, `body`: kotlin.String, `replyTo`: kotlin.String, `quotedText`: kotlin.String, `thread`: kotlin.String?): kotlin.String
     
     fun `sendText`(`chatId`: kotlin.String, `body`: kotlin.String, `thread`: kotlin.String?): kotlin.String
+    
+    fun `setAppSettings`(`json`: kotlin.String)
     
     fun `setCallback`(`callback`: AlphaMessengerCallback)
     
@@ -4994,6 +5038,18 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     }
     
 
+    override fun `appSettings`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_app_settings(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
     
     @Throws(MessengerException::class)override fun `applyRelayChanges`(`add`: List<kotlin.String>, `enable`: List<kotlin.String>, `disable`: List<kotlin.String>, `remove`: List<kotlin.String>): kotlin.UInt {
             return FfiConverterUInt.lift(
@@ -5346,6 +5402,18 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     
 
     
+    @Throws(MessengerException::class)override fun `claimThisDevice`()
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(MessengerException) { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_claim_this_device(
+        it, _status)
+}
+    }
+    
+    
+
+    
     @Throws(MessengerException::class)override fun `clearDraft`(`chatId`: kotlin.String)
         = 
     callWithPointer {
@@ -5601,6 +5669,18 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     uniffiRustCallWithError(MessengerException) { _status ->
     UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_derive_master_key(
         it, FfiConverterString.lower(`password`),_status)
+}
+    }
+    )
+    }
+    
+
+    override fun `deviceReplacedAt`(): kotlin.Long {
+            return FfiConverterLong.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_device_replaced_at(
+        it, _status)
 }
     }
     )
@@ -7619,6 +7699,18 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     }
     )
     }
+    
+
+    
+    @Throws(MessengerException::class)override fun `setAppSettings`(`json`: kotlin.String)
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(MessengerException) { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_set_app_settings(
+        it, FfiConverterString.lower(`json`),_status)
+}
+    }
+    
     
 
     override fun `setCallback`(`callback`: AlphaMessengerCallback)

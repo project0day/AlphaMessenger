@@ -50,9 +50,9 @@ data class JournalEntry(val at: Long, val profile: String, val kind: Kind, val t
 }
 
 /**
- * Profiles, keys and the journal, in encrypted preferences (the app is never
- * backed up, so the keys never leave the phone). Keys live apart from profiles
- * and are read only to make a request.
+ * Profiles, keys and the journal, in encrypted preferences. They leave the phone
+ * only inside our own encrypted backup (the system backup is off). Keys live
+ * apart from profiles and are read only to make a request.
  */
 object AssistantStore {
     private const val FILE = "alpha_assistant"
@@ -138,6 +138,14 @@ object AssistantStore {
                 (0 until a.length()).map { a.optString(it) }.toSet()
             }.getOrDefault(emptySet())
         }
+    }
+
+    /** Everything stored here (profiles, keys, memory) for the encrypted backup. */
+    fun allPrefs(): Map<String, *>? = prefs?.all
+
+    /** Restore: replaces everything stored here; read again on the next start. */
+    fun replacePrefs(fill: (SharedPreferences.Editor) -> Unit) {
+        prefs?.edit()?.clear()?.also(fill)?.commit()
     }
 
     fun profile(id: String): AssistantProfile? = _profiles.value.firstOrNull { it.id == id }

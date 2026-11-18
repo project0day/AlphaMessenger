@@ -720,8 +720,21 @@ class AlphaCoreRepository @Inject constructor(
         withContext(Dispatchers.IO) {
             // ByteArray across the FFI (UDL `bytes`): a List<UByte> boxed every
             // byte and a multi-MB backup ran the app out of memory.
+            snapshotAppSettings()
             core.`exportBackup`(password)
         }
+
+    /** The app's settings go into the database first, so the backup carries them. */
+    private suspend fun snapshotAppSettings() {
+        runCatching { core.`setAppSettings`(AppSettingsBackup.collect(context)) }
+            .onFailure { android.util.Log.w("AlphaBackup", "app settings not saved: ${it.message}") }
+    }
+
+    /** After a restore: the settings the backup carried, back where the app reads them. */
+    suspend fun restoreAppSettings() = withContext(Dispatchers.IO) {
+        runCatching { AppSettingsBackup.apply(context, core.`appSettings`()) }
+            .onFailure { android.util.Log.w("AlphaBackup", "app settings not restored: ${it.message}") }
+    }
 
     /**
      * Decrypt + summarize a backup WITHOUT touching the live database. The UI
@@ -743,6 +756,12 @@ class AlphaCoreRepository @Inject constructor(
      * runs, and a mid-restore failure rolls the transaction back, so the live
      * DB is never left half-overwritten. Intended for an empty DB.
      */
+    /** After a restore: this phone now holds the account's place in the groups; the old one stops. */
+    suspend fun claimThisDevice() = withContext(Dispatchers.IO) { core.`claimThisDevice`() }
+
+    /** Since when another phone holds this account (unix seconds), 0 = still this one. */
+    suspend fun deviceReplacedAt(): Long = withContext(Dispatchers.IO) { core.`deviceReplacedAt`() }
+
     suspend fun importBackup(container: ByteArray, password: String) =
         withContext(Dispatchers.IO) {
             core.`importBackup`(container, password)
@@ -760,10 +779,14 @@ class AlphaCoreRepository @Inject constructor(
      */
     fun autoBackupReady(): Boolean = runCatching { core.`autoBackupReady`() }.getOrDefault(false)
 
-    suspend fun uploadBackupAuto(): String = withContext(Dispatchers.IO) { core.`uploadBackupAuto`() }
+    suspend fun uploadBackupAuto(): String = withContext(Dispatchers.IO) {
+        snapshotAppSettings()
+        core.`uploadBackupAuto`()
+    }
 
     suspend fun uploadBackup(password: String, publishNostrLink: Boolean): String =
         withContext(Dispatchers.IO) {
+            snapshotAppSettings()
             core.`uploadBackup`(password, publishNostrLink)
         }
 

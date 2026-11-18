@@ -235,6 +235,19 @@ class RestoreViewModel @Inject constructor(
     /** Retry the cloud lookup (e.g. after the user fixed their network). */
     fun retryLookup() = lookupBackup()
 
+    /** The backup was kept on a relay a clean install does not know: add it, then look again. */
+    fun searchOnRelay(input: String) {
+        val url = input.trim().let { if (it.contains("://")) it else "wss://$it" }
+        if (!url.startsWith("wss://") || url.length < 10) {
+            _uiState.value = _uiState.value.copy(error = strings.get(R.string.restore_own_relay_bad))
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.addRelay(url) }
+            lookupBackup()
+        }
+    }
+
     /**
      * Step 3: download the AEAD container from Blossom. On success → ask for
      * the Recovery Password.
@@ -276,6 +289,8 @@ class RestoreViewModel @Inject constructor(
             _uiState.value = state.copy(isLoading = true, step = Step.RESTORE, error = null)
             try {
                 repository.importBackup(bytes, state.passwordInput)
+                repository.restoreAppSettings()
+                runCatching { repository.claimThisDevice() }
                 // Pull fresh group state (roles + metadata/avatars + member
                 // profiles) — an old backup may be stale; owners/members reply
                 // over MLS so the restored device catches up.

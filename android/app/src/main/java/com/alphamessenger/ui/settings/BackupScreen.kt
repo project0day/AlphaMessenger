@@ -111,7 +111,7 @@ fun BackupScreen(
                     val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
                     createDoc.launch("alpha-backup-$stamp.enc")
                 }
-                is BackupViewModel.Event.Imported -> snackbar.showSnackbar(context.getString(R.string.backup_restored))
+                is BackupViewModel.Event.Imported -> com.alphamessenger.data.AppRestart.afterRestore(context)
                 is BackupViewModel.Event.Inspected -> snackbar.showSnackbar(event.summary)
                 is BackupViewModel.Event.CloudUploaded -> {
                     pwAction = null
@@ -190,6 +190,11 @@ fun BackupScreen(
                     }
                 }
 
+                Text(
+                    stringResource(R.string.bk_restore_how),
+                    color = cs.textSecondary, fontSize = 13.sp, lineHeight = 19.sp,
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                )
                 Text(
                     stringResource(R.string.bk_footer),
                     color = cs.textMuted, fontSize = 13.sp, lineHeight = 19.sp,

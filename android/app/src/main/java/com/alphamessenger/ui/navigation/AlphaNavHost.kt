@@ -359,14 +359,14 @@ fun AlphaNavHost(
             // wizard owns transient nsec/password state that must NOT outlive the
             // screen, and its multi-step flow is self-contained.
             val viewModel: RestoreViewModel = hiltViewModel()
+            val restoreCtx = androidx.compose.ui.platform.LocalContext.current
             RestoreScreen(
                 viewModel = viewModel,
                 onBack = { navController.popBackStack() },
                 onRestoreComplete = {
                     onOnboarded()
-                    navController.navigate(AlphaRoute.ChatList.route) {
-                        popUpTo(AlphaRoute.Onboarding.route) { inclusive = true }
-                    }
+                    // Relays, settings and the core start again from what was restored.
+                    com.alphamessenger.data.AppRestart.afterRestore(restoreCtx)
                 }
             )
         }

@@ -143,13 +143,16 @@ class BackupViewModel @Inject constructor(
             _uiState.value = _uiState.value.copy(isImporting = true, error = null)
             try {
                 repository.importBackup(container, password)
+                repository.restoreAppSettings()
+                runCatching { repository.claimThisDevice() }
                 runCatching { repository.pullFreshGroupState() }
                 _uiState.value = _uiState.value.copy(isImporting = false)
                 _events.tryEmit(Event.Imported)
             } catch (e: MessengerException) {
                 _uiState.value = _uiState.value.copy(
                     isImporting = false,
-                    error = strings.get(R.string.backup_restore_error, e.shortReason()),
+                    error = if (e.toString().contains("another account")) strings.get(R.string.backup_restore_other_account)
+                        else strings.get(R.string.backup_restore_error, e.shortReason()),
                 )
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(

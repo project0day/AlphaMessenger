@@ -89,6 +89,7 @@ const MAX_BACKUP_BYTES: usize = 512 * 1024 * 1024;
 /// People in one group or channel (MLS): see `ensure_room_for_member`.
 pub(crate) const MAX_GROUP_MEMBERS: usize = 1000;
 const KV_RELAYS: &str = "relays_v1";
+const KV_APP_SETTINGS: &str = "app_settings_v1";
 
 /// H3 (RoadmapSecurityAudit): true if the URL's authority (host[:port]) is a
 /// Tor `.onion` address. Cleartext `ws://`/`http://` is only tolerated for
@@ -996,6 +997,7 @@ use crate::callbacks::CallbackDispatcher;
 
 mod secret_chat;
 mod devices;
+mod device_claim;
 mod relay_routes;
 mod assistant;
 pub use assistant::{is_local_chat, is_assistant_chat, is_assistant_conversation, AssistantConversation};
@@ -3183,6 +3185,22 @@ impl AlphaMessengerCore {
     ///
     /// Requires that a Recovery Password has been set (otherwise there's no
     /// key to encrypt with). CPU-heavy (Argon2id + DB dump) — call off-UI.
+    /// The app's own settings (assistants and their keys, themes, folders…) as the app
+    /// hands them over before a backup; they travel inside it and come back on restore.
+    pub fn set_app_settings(&self, json: String) -> Result<(), MessengerError> {
+        if json.len() > 8 * 1024 * 1024 {
+            return Err(MessengerError::InvalidArgument { description: "app settings too large".to_string() });
+        }
+        let conn = self.db.connection();
+        KeyValueRepo::set(&conn, KV_APP_SETTINGS, &json)
+            .map_err(|e| MessengerError::DatabaseError { description: e.to_string() })
+    }
+
+    pub fn app_settings(&self) -> String {
+        let conn = self.db.connection();
+        KeyValueRepo::get(&conn, KV_APP_SETTINGS).ok().flatten().unwrap_or_default()
+    }
+
     pub fn export_backup(&self, password: String) -> Result<Vec<u8>, MessengerError> {
         // Wiped from memory when this call ends.
         let password = zeroize::Zeroizing::new(password);
@@ -3281,8 +3299,14 @@ impl AlphaMessengerCore {
         // 2. Replay the dump inside a single transaction. If anything fails we
         //    roll back so the DB isn't left in a half-restored state.
         let conn = self.db.connection();
-        conn.execute_batch("BEGIN;")
-            .map_err(|e| MessengerError::DatabaseError { description: format!("begin: {}", e) })?;
+        // Off OUTSIDE the transaction: inside one SQLite ignores the pragma, and the
+        // dump's own "foreign_keys=OFF" came too late — one orphan row (a sender no
+        // longer in contacts) rolled the whole restore back.
+        let _ = conn.execute_batch("PRAGMA foreign_keys=OFF;");
+        if let Err(e) = conn.execute_batch("BEGIN;") {
+            let _ = conn.execute_batch("PRAGMA foreign_keys=ON;");
+            return Err(MessengerError::DatabaseError { description: format!("begin: {}", e) });
+        }
 
         // Clear MLS state tables FIRST so the backup's snapshot rows
         // fully REPLACE any lazily-created rows on this device (the dump uses
@@ -3300,14 +3324,18 @@ impl AlphaMessengerCore {
                         .map(|id| id.nostr().public_key_hex());
                     if after.as_deref().is_some_and(|a| a != before) {
                         let _ = conn.execute_batch("ROLLBACK;");
+                        let _ = conn.execute_batch("PRAGMA foreign_keys=ON;");
                         tracing::warn!(target: "ACCOUNT", "import_backup: refused, the backup belongs to another account");
                         return Err(MessengerError::InvalidArgument {
                             description: "backup of another account".to_string(),
                         });
                     }
                 }
-                conn.execute_batch("COMMIT;")
-                    .map_err(|e| MessengerError::DatabaseError { description: format!("commit: {}", e) })?;
+                Self::log_orphans(&conn);
+                let committed = conn.execute_batch("COMMIT;");
+                if committed.is_err() { let _ = conn.execute_batch("ROLLBACK;"); }
+                let _ = conn.execute_batch("PRAGMA foreign_keys=ON;");
+                committed.map_err(|e| MessengerError::DatabaseError { description: format!("commit: {}", e) })?;
                 // Release the single-connection MutexGuard BEFORE reloading MLS —
                 // `reload_mls_from_storage` re-acquires `self.db.connection()`, and
                 // holding this guard would deadlock the same-thread re-lock.
@@ -3329,12 +3357,26 @@ impl AlphaMessengerCore {
             }
             Err(e) => {
                 let _ = conn.execute_batch("ROLLBACK;");
+                let _ = conn.execute_batch("PRAGMA foreign_keys=ON;");
                 let why = Self::short_sql_error(&e);
                 tracing::warn!(target: "ACCOUNT", "import_backup: restore failed: {why}");
                 Err(MessengerError::DatabaseError {
                     description: format!("restore failed (rolled back): {why}"),
                 })
             }
+        }
+    }
+
+    /// Rows the restore brought whose parent is missing (kept, as the source had them): counted per table for the log.
+    fn log_orphans(conn: &rusqlite::Connection) {
+        let mut per: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        if let Ok(mut st) = conn.prepare("PRAGMA foreign_key_check") {
+            if let Ok(rows) = st.query_map([], |r| Ok(format!("{}->{}", r.get::<_, String>(0)?, r.get::<_, String>(2)?))) {
+                for k in rows.flatten() { *per.entry(k).or_default() += 1; }
+            }
+        }
+        if !per.is_empty() {
+            tracing::warn!(target: "ACCOUNT", "import_backup: rows without a parent kept: {:?}", per);
         }
     }
 
@@ -3380,6 +3422,14 @@ impl AlphaMessengerCore {
                 "DELETE FROM key_value_store WHERE key=?1",
                 rusqlite::params![KV_IDENTITY],
             )?;
+        }
+        // The backup's settings replace what this install wrote before the restore (its
+        // default relays above all), but not what belongs to this phone alone.
+        if sql.contains("INTO \"key_value_store\"") {
+            let mut keep: Vec<String> = Self::RESTORE_KEEP_LOCAL_KV.iter().map(|p| format!("key NOT LIKE '{p}'")).collect();
+            keep.extend(device_claim::DEVICE_ONLY_KV.iter().map(|k| format!("key <> '{k}'")));
+            keep.push(format!("key <> '{}'", KV_BACKUP_AUTO_KEY));
+            conn.execute_batch(&format!("DELETE FROM key_value_store WHERE {};", keep.join(" AND ")))?;
         }
         // The file may come from anyone: only what our exporter writes runs.
         alpha_database::backup_sql::apply(conn, sql)?;
@@ -3572,6 +3622,13 @@ impl AlphaMessengerCore {
         "delivery_pending_seqs", "delivery_seq_counters", "delivery_watermarks",
     ];
 
+    /// What a restore leaves as this phone has it: its own ids, keys of its local
+    /// storage, its unsent drafts and held media.
+    const RESTORE_KEEP_LOCAL_KV: &[&str] = &[
+        "device_id_%", "presence_device_id", "tor_proxy_%", "media_vault_key", "media_key_root_%",
+        "db_rekey_%", "migration_%", "held:%", "draft:%",
+    ];
+
     /// Settings of one phone (or its secrets) that another must not take over.
     const LINK_EXCLUDED_KV: &[&str] = &[
         "identity_%", "recovery_%", "cloud_backup_%", "backup_%", "db_rekey_%", "migration_%",
@@ -3614,12 +3671,17 @@ impl AlphaMessengerCore {
 
         // The search index is rebuilt from the messages on restore.
         let derived = alpha_database::backup_sql::derived_tables(conn)?;
+        // What each table weighs in the dump, for the log: a backup's size has to be explainable.
+        let mut sizes: Vec<(String, usize)> = Vec::new();
+        let mut open: Option<(String, usize)> = None;
         for (name, create_sql) in &tables {
             if Self::BACKUP_EXCLUDED_TABLES.contains(&name.as_str())
                 || derived.contains(&name.to_ascii_lowercase())
                 || (link && Self::LINK_EXCLUDED_TABLES.contains(&name.as_str())) {
                 continue;
             }
+            if let Some((n, at)) = open.take() { sizes.push((n, out.len() - at)); }
+            open = Some((name.clone(), out.len()));
             // Schema (CREATE TABLE). Force "IF NOT EXISTS": on a restored device
             // the schema is ALREADY created by migrations at startup, so a raw
             // `CREATE TABLE x` collides ("table x already exists") and rolls the
@@ -3651,6 +3713,7 @@ impl AlphaMessengerCore {
             let mut conds: Vec<String> = Vec::new();
             if name == "key_value_store" {
                 conds.push(format!("key <> '{}'", KV_BACKUP_AUTO_KEY));
+                for k in device_claim::DEVICE_ONLY_KV { conds.push(format!("key <> '{k}'")); }
                 if link {
                     for p in Self::LINK_EXCLUDED_KV { conds.push(format!("key NOT LIKE '{p}'")); }
                 }
@@ -3710,6 +3773,10 @@ impl AlphaMessengerCore {
                 out.push('\n');
             }
         }
+        if let Some((n, at)) = open.take() { sizes.push((n, out.len() - at)); }
+        sizes.sort_by(|a, b| b.1.cmp(&a.1));
+        let top: Vec<String> = sizes.iter().take(10).map(|(n, b)| format!("{n}={}KB", b / 1024)).collect();
+        tracing::info!(target: "ACCOUNT", "backup dump: {}KB total, biggest: {}", out.len() / 1024, top.join(" "));
         Ok(())
     }
 
@@ -3966,9 +4033,19 @@ impl AlphaMessengerCore {
             .map_err(|e| MessengerError::CryptoError { description: format!("backup link sign: {}", e) })?;
 
         let rt = runtime();
-        rt.block_on(self.transport.publish(event))
-            .map_err(|e| MessengerError::NetworkError { description: format!("backup link publish: {}", e) })?;
-        tracing::info!("publish_backup_link: published kind 30078 → {}", blob_url);
+        let ours = rt.block_on(self.transport.publish(event.clone()));
+        // Also where a clean install looks (the built-in relays and ours): a backup
+        // kept only on a relay of our own choosing would be lost with the phone.
+        // Sealed and signed by the locator key, it says nothing about who we are.
+        let extra = Self::backup_lookup_relays(Vec::new());
+        let copies = rt.block_on(alpha_transport::NostrRelayClient::publish_detached(
+            extra, vec![event], std::time::Duration::from_secs(10)));
+        if let Err(e) = ours {
+            if copies == 0 {
+                return Err(MessengerError::NetworkError { description: format!("backup link publish: {}", e) });
+            }
+        }
+        tracing::info!("publish_backup_link: published kind 30078 (copies on well-known relays: {copies}) → {}", blob_url);
         Ok(())
     }
 
@@ -4250,6 +4327,25 @@ impl AlphaMessengerCore {
     /// A query on a separate short-lived connection with a random key, to our
     /// relays. Lookups that name someone (a contact, our backup locator) never
     /// ride the connection whose subscription carries our npub.
+    /// Where a backup's locator lives besides our own relays: the built-in ones and
+    /// the project's relay, the places a clean install can always reach.
+    fn backup_lookup_relays(mut urls: Vec<String>) -> Vec<String> {
+        let known = alpha_transport::DEFAULT_RELAYS.iter().map(|u| u.to_string())
+            .chain(std::iter::once(alpha_transport::nostr_relay_client::RESERVE_RELAY.to_string()));
+        for u in known {
+            let k = u.trim_end_matches('/').to_ascii_lowercase();
+            if !urls.iter().any(|x| x.trim_end_matches('/').to_ascii_lowercase() == k) { urls.push(u); }
+        }
+        urls
+    }
+
+    fn fetch_backup_locator(&self, filter: nostr::Filter) -> Result<Vec<nostr::Event>, String> {
+        let rt = runtime();
+        let urls = Self::backup_lookup_relays(rt.block_on(self.transport.enabled_relay_urls()));
+        rt.block_on(alpha_transport::NostrRelayClient::fetch_anonymous(urls, filter, std::time::Duration::from_secs(15)))
+            .map_err(|e| e.to_string())
+    }
+
     fn fetch_detached(&self, filter: nostr::Filter, timeout: std::time::Duration) -> Result<Vec<nostr::Event>, String> {
         let rt = runtime();
         let urls = rt.block_on(self.transport.enabled_relay_urls());
@@ -4272,8 +4368,8 @@ impl AlphaMessengerCore {
                 .kind(nostr::Kind::Custom(30078))
                 .identifier("alpha-backup")
                 .limit(1);
-            if let Ok(events) = self.fetch_detached(filter, std::time::Duration::from_secs(15)) {
-                if let Some(url) = events.into_iter().next()
+            if let Ok(events) = self.fetch_backup_locator(filter) {
+                if let Some(url) = events.into_iter().max_by_key(|e| e.created_at)
                     .and_then(|e| alpha_transport::sealed::unseal(&key, &BACKUP_LOCATOR_AAD, &e.content))
                     .and_then(|b| String::from_utf8(b).ok())
                 {
@@ -4298,10 +4394,10 @@ impl AlphaMessengerCore {
             .identifier("alpha-backup")
             .limit(1);
 
-        let events = self.fetch_detached(filter, std::time::Duration::from_secs(15))
+        let events = self.fetch_backup_locator(filter)
             .map_err(|e| MessengerError::NetworkError { description: format!("backup lookup fetch: {}", e) })?;
 
-        let event = events.into_iter().next().ok_or_else(|| MessengerError::NetworkError {
+        let event = events.into_iter().max_by_key(|e| e.created_at).ok_or_else(|| MessengerError::NetworkError {
             description: "no backup link event found for this npub".to_string(),
         })?;
 
@@ -9896,6 +9992,11 @@ impl AlphaMessengerCore {
     }
 
     pub fn start_sync(&self) -> Result<(), MessengerError> {
+        // Another phone holds our leaf now: this one stays off the network (it would fork it).
+        if let Some(at) = self.replaced_at_kv() {
+            tracing::warn!(target: "ACCOUNT", "start_sync skipped: this phone was replaced at {at}");
+            return Ok(());
+        }
         let rt = runtime();
 
         // 1. Connect to all enabled relays.

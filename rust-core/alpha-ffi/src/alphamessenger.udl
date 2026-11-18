@@ -840,6 +840,14 @@ interface AlphaMessengerCore {
     // Scheduled messages: created and encrypted now, published at their time.
     void arm_scheduled_send(string chat_id, i64 not_before);
     void arm_silent_send(string chat_id);
+    // The app's settings, carried inside a backup.
+    [Throws=MessengerError]
+    void set_app_settings(string json);
+    string app_settings();
+    // One phone per leaf after a restore (core/device_claim.rs).
+    [Throws=MessengerError]
+    void claim_this_device();
+    i64 device_replaced_at();
     // Linked devices (core/devices.rs).
     string devices_json();
     string link_begin();

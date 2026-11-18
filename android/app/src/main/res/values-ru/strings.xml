@@ -279,7 +279,7 @@
     <string name="theme_gradients">Градиенты</string>
     <string name="theme_solid">Сплошные</string>
     <string name="theme_sample_avatar">А</string>
-    <string name="theme_sample_name">Анна</string>
+    <string name="theme_sample_name">Michael</string>
     <string name="common_online">в сети</string>
     <string name="common_today">Сегодня</string>
     <string name="theme_msg_1">Привет! Как дела? 👋</string>
@@ -2932,7 +2932,19 @@ Nostr используется как транспорт.</string>
     <string name="chat_panels_haze">Дымка</string>
     <string name="chat_panels_opacity">Прозрачность стекла</string>
     <string name="chat_panels_preview_msg">Смотри, тает в дымке</string>
-    <string name="chat_panels_preview_name">Маша</string>
+    <string name="chat_panels_preview_name">Daniel</string>
     <string name="chat_panels_preview_online">в сети</string>
     <string name="chat_message_hint_short">Сообщение</string>
+    <string name="device_replaced_title">Ваш аккаунт активен на другом устройстве</string>
+    <string name="device_replaced_body">Вероятно, аккаунт был восстановлен на другом устройстве %1$s. Это устройство больше не может отправлять и получать сообщения. История сообщений остаётся доступной.</string>
+    <string name="device_replaced_action">Восстановить аккаунт на этом устройстве</string>
+    <string name="device_replaced_confirm">Все данные на этом устройстве будут удалены, а приложение перезапустится. После этого вы сможете восстановить аккаунт с помощью фразы восстановления и пароля. Другое устройство будет отключено.</string>
+    <string name="device_replaced_wipe">Удалить и перезапустить</string>
+    <string name="onb_restore_old_phone">Если аккаунт ещё активен на другом устройстве, после восстановления оно будет отключено.</string>
+    <string name="backup_restore_other_account">Эта резервная копия принадлежит другому аккаунту. Чтобы перенести этот аккаунт на данное устройство, выйдите из текущего аккаунта и выберите «Восстановить» на экране приветствия.</string>
+    <string name="bk_restore_how">Чтобы восстановить аккаунт на новом устройстве, выберите «Восстановить» на экране приветствия и введите фразу восстановления (или nsec) и пароль восстановления. Будут восстановлены чаты, история сообщений, relay, настройки и ассистенты. Если резервная копия не найдена автоматически, выберите файл .enc. Храните фразу восстановления и пароль отдельно от устройства.</string>
+    <string name="restore_own_relay_label">Relay, на котором хранится копия (необязательно)</string>
+    <string name="restore_own_relay_search">Искать на этом relay</string>
+    <string name="restore_own_relay_bad">Введите корректный адрес relay (wss://…)</string>
+    <string name="restore_restarting">Восстановление завершено. Приложение будет перезапущено.</string>
 </resources>

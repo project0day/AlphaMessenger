@@ -309,7 +309,7 @@ private fun ModRow(icon: androidx.compose.ui.graphics.vector.ImageVector, label:
     }
 }
 
-/** "Иван Петров" → "ИП", "Иван" → "И": the first letters of the first two words. */
+/** "John Smith" → "JS", "John" → "J": the first letters of the first two words. */
 fun initialsOf(name: String): String =
     name.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }.take(2)
         .mapNotNull { w -> w.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar() }
