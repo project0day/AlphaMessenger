@@ -437,7 +437,7 @@ private val IMAGE_FILE_EXTS = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp", 
 private val VIDEO_FILE_EXTS = setOf("mp4", "mkv", "avi", "mov", "webm", "3gp", "m4v", "ts")
 
 /** Small file-type glyph for the document bubble's bottom line. */
-private fun fileTypeIcon(ext: String?): androidx.compose.ui.graphics.vector.ImageVector = when (ext?.lowercase()) {
+internal fun fileTypeIcon(ext: String?): androidx.compose.ui.graphics.vector.ImageVector = when (ext?.lowercase()) {
     "pdf" -> AlphaIcons.Outlined.PictureAsPdf
     "zip", "rar", "7z", "tar", "gz" -> AlphaIcons.Outlined.FolderZip
     "apk" -> AlphaIcons.Outlined.Android

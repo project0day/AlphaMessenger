@@ -56,9 +56,28 @@ object AssistantTools {
                 props("fact" to str("Words of the fact to drop.")), "fact",
             ))
         }
+        // A chat partner's gestures: answering one message among many, and reactions.
+        put(fn(
+            "react",
+            "Put an emoji reaction on a message of the user, as people do in a chat: to agree, thank, laugh, or say you saw it. " +
+                "Use it now and then, when it fits; it never replaces an answer the user waits for. One emoji.",
+            props("emoji" to str("One emoji, e.g. 👍 ❤️ 😂 🔥 🙏."), "message" to str("A few words of the message; empty for the user's latest.")),
+            "emoji",
+        ))
+        put(fn(
+            "quote",
+            "Make your answer a reply that quotes one earlier message, as people do in a chat: when you answer something " +
+                "other than the latest message, or one of several questions. Not for the latest message alone.",
+            props("message" to str("A few words of the message to quote, exactly as written there.")),
+            "message",
+        ))
         if (p.imageModel.isNotBlank()) put(fn(
             "generate_image", "Draw a picture and show it to the user in the chat.",
-            props("prompt" to str("What to draw, in detail, in English."), "size" to enumOf("1024x1024", "1024x1792", "1792x1024")),
+            props(
+                "prompt" to str("What to draw, in detail, in English."),
+                "size" to str("Width x height in pixels, the shape the user asks for: 1024x1024 square, 1080x1920 phone screen, " +
+                    "1920x1080 wide, 1536x1024 photo, 1024x1536 portrait, 2048x858 banner. Sides 256-2048."),
+            ),
             "prompt",
         ))
         if (p.ttsModel.isNotBlank()) put(fn(
@@ -157,7 +176,20 @@ object AssistantTools {
         val post: (suspend () -> Unit) -> Unit = {},
         /** Whose memory "remember"/"forget" write to (the chat's assistant), null when it is off. */
         val memoryOwner: String? = null,
+        /** The chat as the model saw it, oldest first: what "react" and "quote" point at. */
+        val history: List<uniffi.alphamessenger.MessageInfo> = emptyList(),
+        /** The answer will quote this message. */
+        val quote: (String) -> Unit = {},
     )
+
+    /** The message [words] point at, newest first; blank: the user's latest. The user's own only when [usersOnly]. */
+    private fun pick(run: Run, words: String, usersOnly: Boolean): uniffi.alphamessenger.MessageInfo? {
+        val pool = run.history.asReversed().filter { !usersOnly || it.senderId != ASSISTANT_SENDER }
+        val w = words.trim().lowercase()
+        if (w.isEmpty()) return pool.firstOrNull { it.senderId != ASSISTANT_SENDER }
+        return pool.firstOrNull { it.content.orEmpty().lowercase().contains(w) }
+    }
+    private const val ASSISTANT_SENDER = "assistant"
 
     /** Runs [call]; returns what the model is told about it. Never throws. */
     suspend fun execute(run: Run, call: ToolCall): String {
@@ -180,8 +212,15 @@ object AssistantTools {
                     if (prompt.isBlank()) return "error: empty prompt"
                     run.step((if (wallpaper) "🖼 " else "🎨 ") + prompt.take(160))
                     run.generating(GenKind.IMAGE)
-                    val size = if (wallpaper) "1024x1792" else a.optString("size").takeIf { it in SIZES } ?: "1024x1024"
-                    val bytes = AssistantClient.image(p, run.key, prompt, size)
+                    val size = if (wallpaper) "1024x1792" else sizeOf(a.optString("size"))
+                    // A service that draws only its own sizes refuses others: then the nearest of those.
+                    val bytes = try {
+                        AssistantClient.image(p, run.key, prompt, size)
+                    } catch (e: AssistantFailure) {
+                        val near = nearestStandard(size)
+                        if (e.error.kind != AssistantError.Kind.BAD_REQUEST || near == size) throw e
+                        AssistantClient.image(p, run.key, prompt, near)
+                    }
                     val file = mediaFile(run.ctx, "img", "png")
                     MediaVault.writeSealed(file, bytes)
                     val meta = com.alphamessenger.ui.chat.AlbumItemMetadata.extractImage(file.path)?.toJson()?.toString()
@@ -254,6 +293,19 @@ object AssistantTools {
                     run.step("🧠 " + fact)
                     AssistantStore.log(p.name, JournalEntry.Kind.ACT, "remember", fact.take(80))
                     "Remembered."
+                }
+                "react" -> {
+                    val emoji = a.optString("emoji").trim().take(16)
+                    if (emoji.isEmpty() || emoji.any { it.isLetterOrDigit() }) return "error: one emoji, no words"
+                    val target = pick(run, a.optString("message"), usersOnly = true) ?: return "error: no such message of the user"
+                    run.post { run.repository.insertAssistantReaction(run.chatId, target.id, emoji) }
+                    run.stored()
+                    "Reacted $emoji."
+                }
+                "quote" -> {
+                    val target = pick(run, a.optString("message"), usersOnly = false) ?: return "error: no message has these words"
+                    run.quote(target.id)
+                    "Your answer will quote that message."
                 }
                 "forget" -> {
                     val owner = run.memoryOwner ?: return "error: memory is off"
@@ -365,7 +417,19 @@ object AssistantTools {
     /** The caption that marks a generated picture as a wallpaper offer. */
     const val WALLPAPER_CAPTION = "🖼"
 
-    private val SIZES = setOf("1024x1024", "1024x1792", "1792x1024")
+    /** "WxH" within what services draw, sides rounded to 16; a square when unreadable. */
+    private fun sizeOf(raw: String): String {
+        val m = Regex("""(\d{3,4})\s*[xX×*]\s*(\d{3,4})""").find(raw) ?: return "1024x1024"
+        fun side(v: String) = (v.toInt().coerceIn(256, 2048) + 8) / 16 * 16
+        return side(m.groupValues[1]).toString() + "x" + side(m.groupValues[2])
+    }
+
+    /** The standard size of the same shape: square, tall or wide. */
+    private fun nearestStandard(size: String): String {
+        val (w, h) = size.split('x').map { it.toInt() }
+        val r = w.toFloat() / h
+        return when { r > 1.2f -> "1792x1024"; r < 0.83f -> "1024x1792"; else -> "1024x1024" }
+    }
 
     private fun mediaFile(ctx: Context, prefix: String, ext: String): File =
         File(ctx.filesDir, "assistant_media").apply { mkdirs() }.let { File(it, "${prefix}_${System.currentTimeMillis()}.$ext") }

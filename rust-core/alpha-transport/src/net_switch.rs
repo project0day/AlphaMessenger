@@ -72,11 +72,13 @@ struct Scope {
     per_host: bool,
     /// Through Tor whatever the route; no Tor, no connection.
     tor_only: bool,
+    /// Bulk transfers: a direct tunnel is held to [`hold_to_liveness`].
+    transfers: bool,
 }
 
 impl Scope {
     fn new(per_host: bool) -> Self {
-        Self { secret: rand::random(), renewals: Default::default(), per_host, tor_only: false }
+        Self { secret: rand::random(), renewals: Default::default(), per_host, tor_only: false, transfers: false }
     }
 
     /// Fresh after every route change, so a new route never reuses old circuits.
@@ -99,6 +101,12 @@ impl Scope {
 /// destination host gets a circuit of its own.
 pub async fn start(allow: fn(&IpAddr) -> bool) -> std::io::Result<SocketAddr> {
     spawn_listener(allow, Scope::new(true)).await.map(|(addr, _)| addr)
+}
+
+/// Like [`start`], for file transfers: a direct tunnel whose path went silent is
+/// cut by the kernel in seconds instead of minutes of retransmission.
+pub async fn start_transfers(allow: fn(&IpAddr) -> bool) -> std::io::Result<SocketAddr> {
+    spawn_listener(allow, Scope { transfers: true, ..Scope::new(true) }).await.map(|(addr, _)| addr)
 }
 
 /// Like [`start`], but closed when the guard drops: for a connection that
@@ -235,7 +243,11 @@ async fn serve(mut client: TcpStream, allow: fn(&IpAddr) -> bool, scope: Scope) 
     };
     // A dial over a network that just went away can hang for minutes: bound
     // it, and drop it the moment the network or the route changes.
-    let timeout = if route.is_some() { TOR_DIAL_TIMEOUT } else { DIRECT_DIAL_TIMEOUT };
+    let timeout = match route {
+        Some(_) => TOR_DIAL_TIMEOUT,
+        None if scope.transfers => TRANSFER_DIAL_TIMEOUT,
+        None => DIRECT_DIAL_TIMEOUT,
+    };
     let upstream = tokio::select! {
         r = tokio::time::timeout(timeout, dial) => r.unwrap_or_else(|_| {
             Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "dial timed out"))
@@ -249,6 +261,11 @@ async fn serve(mut client: TcpStream, allow: fn(&IpAddr) -> bool, scope: Scope) 
             return Err(e);
         }
     };
+    if scope.transfers && route.is_none() {
+        if let Err(e) = hold_to_liveness(&upstream) {
+            tracing::warn!("NET_SWITCH liveness options: {e}");
+        }
+    }
     client.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
 
     tokio::select! {
@@ -259,8 +276,37 @@ async fn serve(mut client: TcpStream, allow: fn(&IpAddr) -> bool, scope: Scope) 
 
 const DIRECT_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const TOR_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// A file has other servers: one whose route does not connect in this long is skipped,
+/// not waited for. A live server connects in well under a second, on mobile too.
+const TRANSFER_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Head start of each address over the next (RFC 8305).
 const ATTEMPT_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Sent bytes unacknowledged this long mean the path is gone: a weak link still
+/// acknowledges, only slowly.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+const TRANSFER_LIVENESS: std::time::Duration = std::time::Duration::from_secs(30);
+/// A tunnel idle while the server prepares its answer is probed, so a vanished path shows there too.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+const KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(any(target_os = "android", target_os = "linux"))]
+const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The app sees only its loopback leg, which the kernel acknowledges at once; the
+/// upstream socket is the one place where a dead path can be told from a slow one.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn hold_to_liveness(stream: &TcpStream) -> std::io::Result<()> {
+    let sock = socket2::SockRef::from(stream);
+    sock.set_tcp_user_timeout(Some(TRANSFER_LIVENESS))?;
+    sock.set_tcp_keepalive(
+        &socket2::TcpKeepalive::new().with_time(KEEPALIVE_IDLE).with_interval(KEEPALIVE_INTERVAL).with_retries(3),
+    )
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+fn hold_to_liveness(_stream: &TcpStream) -> std::io::Result<()> {
+    Ok(())
+}
 
 async fn connect_direct(host: &str, port: u16, allow: fn(&IpAddr) -> bool) -> std::io::Result<TcpStream> {
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
@@ -517,6 +563,38 @@ mod tests {
         });
         set_tor(None);
         let sw = start(|_| true).await.unwrap();
+        let mut s = tokio_socks::tcp::Socks5Stream::connect(sw, echo_addr).await.unwrap();
+        s.write_all(b"ping").await.unwrap();
+        let mut b = [0u8; 4];
+        s.read_exact(&mut b).await.unwrap();
+        assert_eq!(&b, b"ping");
+    }
+
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[tokio::test]
+    async fn a_transfer_socket_gives_up_on_a_silent_path() {
+        let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let s = TcpStream::connect(peer.local_addr().unwrap()).await.unwrap();
+        hold_to_liveness(&s).unwrap();
+        let sock = socket2::SockRef::from(&s);
+        assert_eq!(sock.tcp_user_timeout().unwrap(), Some(TRANSFER_LIVENESS));
+        assert!(sock.keepalive().unwrap());
+        assert_eq!(sock.tcp_keepalive_time().unwrap(), KEEPALIVE_IDLE);
+    }
+
+    #[tokio::test]
+    async fn a_transfer_listener_relays_bytes() {
+        let _g = ROUTE.lock().await;
+        let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = echo.accept().await.unwrap();
+            let mut b = [0u8; 4];
+            s.read_exact(&mut b).await.unwrap();
+            s.write_all(&b).await.unwrap();
+        });
+        set_tor(None);
+        let sw = start_transfers(|_| true).await.unwrap();
         let mut s = tokio_socks::tcp::Socks5Stream::connect(sw, echo_addr).await.unwrap();
         s.write_all(b"ping").await.unwrap();
         let mut b = [0u8; 4];

@@ -44,13 +44,18 @@ pub mod error;
 pub mod faststart;
 pub mod growing;
 pub mod limits;
+pub mod manifest_blob;
+mod link;
 pub mod media_ref;
 pub mod pipeline;
 pub mod resume;
 #[cfg(test)]
 mod resume_e2e;
+#[cfg(test)]
+mod slow_link_e2e;
 pub mod thumbnail;
 pub mod vault;
+pub mod wire_budget;
 
 // Re-export primary types for convenience
 
@@ -100,6 +105,7 @@ pub use chunker::{Chunk, EncryptedChunker, CHUNK_SIZE};
 pub use crypto::{blake3_hash, generate_key, EncryptedMedia, EncryptedStreamChunk, MediaCrypto, StreamCrypto, STREAM_CHUNK_SIZE};
 pub use error::{MediaError, MediaResult};
 pub use media_ref::{MediaRef, StreamChunkInfo, StreamChunkUploadInfo, UploadResult};
+pub use link::network_changed;
 pub use pipeline::MediaPipeline;
 pub use resume::{ChunkCheckpoint, ConfirmedChunk};
 pub use thumbnail::{MediaType, Thumbnail, ThumbnailGenerator};

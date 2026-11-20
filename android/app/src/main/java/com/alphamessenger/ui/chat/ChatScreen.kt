@@ -13,6 +13,9 @@ import com.alphamessenger.ui.theme.outBubbleBrush
 import com.alphamessenger.ui.chat.bubbles.BubbleTokens
 import com.alphamessenger.ui.components.avatarBackdrop
 import com.alphamessenger.ui.chat.bubbles.bubbleShell
+import com.alphamessenger.ui.chat.bubbles.bubbleFill
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import com.alphamessenger.ui.chat.text.MessageText
 import com.alphamessenger.ui.chat.text.LinkAction
 import com.alphamessenger.ui.chat.text.LinkActionSheet
@@ -2890,13 +2893,8 @@ fun ChatScreen(
                             onSend = { schedulable { viewModel.stopRecording() } },
                         )
                     },
-                    inputBar = {
-                        Box {
-                        InputBarV2(
-                            onGlass = true,
-                            onStop = if (isAssistant && assistantLive != null) ({ viewModel.assistant.stop(chatId) }) else null,
-                            mentionCandidates = mentionCandidates,
-                            header = {
+                    // Above the input row: the recording bars cover the row, never this.
+                    header = {
                     // Edit banner (if editing) — prefill input, override send.
                     editingMsg?.let { em ->
                         ReplyPreview(
@@ -2942,7 +2940,13 @@ fun ChatScreen(
                             message = reply,
                         )
                     }
-                            },
+                    },
+                    inputBar = {
+                        Box {
+                        InputBarV2(
+                            onGlass = true,
+                            onStop = if (isAssistant && assistantLive != null) ({ viewModel.assistant.stop(chatId) }) else null,
+                            mentionCandidates = mentionCandidates,
                             // Messages waiting for their time: calendar in the field.
                             onOpenScheduled = if (!scheduledMode && heldHere.isNotEmpty()) ({ onOpenScheduled(chatId) }) else null,
                             state = v2State,
@@ -3718,8 +3722,9 @@ fun ChatScreen(
         // oldest→newest — the swipe order matches the message feed.
         // A whisper or a view-once is opened only from its own row, under its own rules:
         // paging through the chat's media must never reach it.
+        // A photo folded into an album already comes with the album: listing its own row too repeats it.
         val galleryMsgs = remember(state.messages, state.whispers) {
-            state.messages.filterNot { it.isDeleted || it.isOneTime || it.id in state.whispers }.flatMap { m ->
+            state.messages.filterNot { it.hiddenInAlbum || it.isDeleted || it.isOneTime || it.id in state.whispers }.flatMap { m ->
                 // The album caption belongs to the album: every item shows it.
                 m.albumItems?.map { it.copy(mediaCaption = it.mediaCaption ?: m.mediaCaption) } ?: listOf(m)
             }
@@ -6043,7 +6048,7 @@ private fun MessageBubble(
                     }
                 }
             } else if (message.isMedia) {
-                MediaReplyFrame(message, bubbleColor, colors, onQuoteTap) {
+                MediaReplyFrame(message, bubbleColor, bubbleShape, showTail, colors, onQuoteTap, onLongPress) {
                 // One dispatch on the immutable kind (fixed at creation). The bubble
                 // type is stable for the message's life — no mediaType re-derivation.
                 when (mediaKind) {
@@ -6310,6 +6315,7 @@ private fun MessageBubble(
                             thumbPath = reply.thumbPath,
                             isVideoQuote = reply.isVideoQuote,
                             kind = reply.kind,
+                            fileName = reply.fileName,
                             isOutgoing = message.isOutgoing, colors = colors,
                             onClick = message.quotedMessageId?.let { qid -> { onQuoteTap(qid) } },
                         )
@@ -6402,19 +6408,60 @@ private fun PlainAnswer(
     }
 }
 
-/** A media reply: its quote rides above the media as a small card in the bubble's colour. */
+/**
+ * A media reply. Media in a bubble (voice, music, file, photo, video, album) takes the
+ * quote at the top of that same bubble, as a text reply does. A sticker, a GIF or a
+ * circle has no bubble: its quote rides above it as a small card in the bubble's colour.
+ */
 @Composable
 private fun MediaReplyFrame(
     message: MessageUi,
     bubbleColor: Color,
+    bubbleShape: androidx.compose.ui.graphics.Shape,
+    showTail: Boolean,
     colors: AlphaColorScheme,
     onQuoteTap: (String) -> Unit,
+    onLongPress: () -> Unit,
     media: @Composable () -> Unit,
 ) {
     val reply = message.replyTo
+    val free = message.isStickerLike || message.isGif || message.isRoundVideo
+    if (reply != null && !message.isDeleted && !free) {
+        val pad = com.alphamessenger.ui.chat.bubbles.BubbleTokens.contentPadding(message.isOutgoing, showTail)
+        val ld = androidx.compose.ui.platform.LocalLayoutDirection.current
+        androidx.compose.ui.layout.Layout(
+            content = {
+                Box(Modifier.padding(start = pad.calculateStartPadding(ld), end = pad.calculateEndPadding(ld), top = pad.calculateTopPadding())) {
+                    QuotedReply(
+                        reply.senderName, reply.text,
+                        posterB64 = reply.posterB64,
+                        thumbPath = reply.thumbPath,
+                        isVideoQuote = reply.isVideoQuote,
+                        kind = reply.kind,
+                        fileName = reply.fileName,
+                        isOutgoing = message.isOutgoing, colors = colors,
+                        onClick = message.quotedMessageId?.let { qid -> { onQuoteTap(qid) } },
+                    )
+                }
+                // One fill and one tail for the whole message: the media's own shell paints none.
+                androidx.compose.runtime.CompositionLocalProvider(com.alphamessenger.ui.chat.bubbles.LocalBubbleFilled provides true) { media() }
+            },
+            modifier = Modifier.bubbleFill(message.isOutgoing, bubbleShape, bubbleColor)
+                .pointerInput(onLongPress) { detectTapGestures(onLongPress = { onLongPress() }) },
+        ) { parts, constraints ->
+            // The media sets the width (as in any media bubble); the quote fits it.
+            val body = parts[1].measure(constraints)
+            val quote = parts[0].measure(androidx.compose.ui.unit.Constraints.fixedWidth(body.width))
+            layout(body.width, quote.height + body.height) {
+                quote.place(0, 0)
+                body.place(0, quote.height)
+            }
+        }
+        return
+    }
     // A sticker, a GIF or a circle stands free with its own side inset: the card lines
     // up with that edge, so the row (and its highlight) hold both as one.
-    val freeInset = if (message.isSticker || message.isGif || message.isRoundVideo) 8.dp else 0.dp
+    val freeInset = if (free) 8.dp else 0.dp
     if (reply == null || message.isDeleted) media() else Column(
         horizontalAlignment = if (message.isOutgoing) Alignment.End else Alignment.Start,
         verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -6429,6 +6476,7 @@ private fun MediaReplyFrame(
                 thumbPath = reply.thumbPath,
                 isVideoQuote = reply.isVideoQuote,
                 kind = reply.kind,
+                fileName = reply.fileName,
                 isOutgoing = message.isOutgoing, colors = colors,
                 onClick = message.quotedMessageId?.let { qid -> { onQuoteTap(qid) } },
             )
@@ -6447,6 +6495,7 @@ private fun QuotedReply(
     thumbPath: String? = null,
     isVideoQuote: Boolean = false,
     kind: String? = null,
+    fileName: String? = null,
     onClick: (() -> Unit)? = null,
 ) {
     // Incoming: a tint of the accent, never a surface colour of the theme — in
@@ -6490,7 +6539,7 @@ private fun QuotedReply(
         thumb != null -> null
         kind == "voice" -> AlphaIcons.Outlined.Mic
         kind == "audio" -> AlphaIcons.Outlined.MusicNote
-        kind == "file" -> AlphaIcons.Outlined.InsertDriveFile
+        kind == "file" -> com.alphamessenger.ui.chat.bubbles.fileTypeIcon(fileName?.substringAfterLast('.', ""))
         else -> null
     }
     Row(

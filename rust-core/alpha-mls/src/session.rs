@@ -499,6 +499,15 @@ impl<P: OpenMlsProvider> MlsSessionManager<P> {
         &mut self.epoch_tracker
     }
 
+    /// Whether this phone can still open a Welcome made with this KeyPackage (its private
+    /// part is in our storage). `None`: not a KeyPackage at all.
+    pub fn holds_key_package(&self, kp_bytes: &[u8]) -> Option<bool> {
+        let kp = AlphaKeyPackage::key_package_from_bytes_with_provider(kp_bytes, self.provider.crypto()).ok()?;
+        let hash_ref = kp.hash_ref(self.provider.crypto()).ok()?;
+        let stored: Result<Option<KeyPackageBundle>, _> = openmls_traits::storage::StorageProvider::key_package(self.provider.storage(), &hash_ref);
+        Some(matches!(stored, Ok(Some(_))))
+    }
+
     /// Generate a new key package for this identity.
     ///
     /// The key package can be published to the delivery service

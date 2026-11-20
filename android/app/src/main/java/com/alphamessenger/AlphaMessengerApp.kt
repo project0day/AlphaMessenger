@@ -47,6 +47,9 @@ class AlphaMessengerApp : Application(), Configuration.Provider, coil3.Singleton
     @Inject
     lateinit var workerFactory: HiltWorkerFactory
 
+    @Inject
+    lateinit var mediaPrefetch: com.alphamessenger.transfer.IncomingMediaPrefetch
+
     // WorkManager picks this up automatically (the default initialiser is
     // disabled in the manifest). Without it `@HiltWorker` workers cannot
     // be instantiated.
@@ -121,6 +124,7 @@ class AlphaMessengerApp : Application(), Configuration.Provider, coil3.Singleton
         //    started from Application.onCreate on Android 12+; doing so
         //    crashes the process with ForegroundServiceStartNotAllowedException
         //    whenever WorkManager / a BroadcastReceiver wakes us up).
+        mediaPrefetch.start()
         MessageSyncService.enqueuePeriodicSync(this)
         com.alphamessenger.service.AutoBackupWorker.schedule(this)
 

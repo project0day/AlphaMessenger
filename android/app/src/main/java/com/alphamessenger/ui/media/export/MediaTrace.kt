@@ -40,6 +40,7 @@ object MediaTrace {
 
     /** Reference points: durations between stages are computed from them. */
     private val marks = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val starts = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     private fun key(sendId: String, item: Int?) = if (item == null) sendId else "$sendId#$item"
 
@@ -59,10 +60,12 @@ object MediaTrace {
         val k = key(sendId, itemIndex)
         val now = SystemClock.elapsedRealtime()
         val previous = marks.put(k, now)
+        starts.putIfAbsent(k, now)
         val sinceMs = previous?.let { now - it }
         val body = fields.filter { it.second != null }
             .joinToString(" ") { "${it.first}=${it.second}" }
-        android.util.Log.i(
+        // Warn level: release builds strip info and below, and this trace is meant for them.
+        android.util.Log.w(
             TAG,
             buildString {
                 append(k).append(' ').append(stage)
@@ -72,8 +75,10 @@ object MediaTrace {
         )
     }
 
-    /** Chain finished — no reason to keep the reference point. */
+    /** Chain finished: its total time is logged and the reference points dropped. */
     fun finish(sendId: String, itemIndex: Int? = null) {
-        marks.remove(key(sendId, itemIndex))
+        val k = key(sendId, itemIndex)
+        marks.remove(k)
+        starts.remove(k)?.let { android.util.Log.w(TAG, "$k SEND_SUMMARY total=${SystemClock.elapsedRealtime() - it}ms") }
     }
 }

@@ -1189,8 +1189,11 @@ impl CatchUpManager {
                         // event_id), so marking is safe.
                         let conn2 = self.db.connection();
                         alpha_database::ProcessedEventsRepo::mark(&conn2, &raw_event.event_id);
+                        // In the release log: an invitation made for a KeyPackage this phone
+                        // never held (one left by an erased install) is otherwise invisible.
                         tracing::warn!(
-                            "MLS join_chat failed for a Welcome — marked processed: {}",
+                            target: "ACCOUNT",
+                            "welcome could not be opened (no matching KeyPackage on this phone?) — marked processed: {}",
                             e,
                         );
                         return;

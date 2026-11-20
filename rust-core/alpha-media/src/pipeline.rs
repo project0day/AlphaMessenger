@@ -31,7 +31,7 @@ const DOWNLOAD_WINDOW: usize = 96;
 /// file starts immediately (no file-level queue → nothing sits at 0%), and their
 /// chunks compete fairly for these slots, so aggregate CDN load stays bounded no
 /// matter how many files download. A freed slot goes to whatever chunk waits next.
-const GLOBAL_CHUNK_SLOTS: usize = 32;
+pub(crate) const GLOBAL_CHUNK_SLOTS: usize = 32;
 
 fn chunk_slots() -> &'static tokio::sync::Semaphore {
     static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
@@ -70,9 +70,9 @@ const MAX_CHUNK_ATTEMPTS: usize = 4;
 /// cannot finish while a single request hangs, so the send neither completed
 /// nor failed — it froze forever, and the whole retry machinery never ran.
 ///
-/// Two minutes is a margin over any honest 256 KiB chunk even on a bad
-/// network (observed worst case: seconds).
-const CHUNK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+/// Each request is already cut when it stops moving; this is only the last-resort
+/// bound, wide enough for a chunk crawling over a very weak link.
+const CHUNK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// Sleep between chunk retry attempts: exponential backoff (200ms·2^n, capped
 /// at 3s) with up to 50% random jitter to avoid thundering-herd on the relay.
@@ -155,6 +155,7 @@ async fn upload_blob_mirrored(
         }
         match result {
             Ok(locs) => return Ok(locs),
+            Err(e @ MediaError::Refused(_)) => return Err(e),
             Err(e) => {
                 attempt += 1;
                 if attempt >= MAX_CHUNK_ATTEMPTS {
@@ -263,14 +264,14 @@ async fn download_blob_locations(
     }
     let discovered = sources.len() - n;
     sources.sort_by_key(|s| expected_answer_ms(&s.url, s.discovered.is_some()));
-    let hints: Vec<usize> = (0..sources.len()).filter(|&k| sources[k].discovered.is_none()).collect();
-    // Launch plan: every source once, then the hints again (each repeat is a
-    // FRESH connection) up to the retry budget.
-    let budget = if hints.is_empty() { sources.len() } else { MAX_CHUNK_ATTEMPTS.max(n) + discovered };
-    let plan: Vec<usize> = (0..budget)
-        .map(|k| if k < sources.len() { k } else { hints[(k - sources.len()) % hints.len()] })
-        .collect();
+    // Launch plan: every source once, then every source again (each repeat is a
+    // FRESH connection after a pause): a copy of a just-published file may land on
+    // a server that said "not here" a moment ago.
+    let budget = sources.len() + MAX_CHUNK_ATTEMPTS.max(n) + discovered;
+    let plan: Vec<usize> = (0..budget).map(|k| k % sources.len()).collect();
 
+    // Byte movement of every attempt: a duplicate is raced only against a stalled request.
+    let watches: std::sync::Mutex<Vec<std::sync::Arc<crate::blossom::Moved>>> = Default::default();
     let launch = |k: usize| {
         let idx = plan[k];
         let src = sources[idx].clone();
@@ -278,6 +279,8 @@ async fn download_blob_locations(
         let repeat = k >= sources.len();
         let attempt = k + 1;
         let repeat_no = k.saturating_sub(sources.len()) + 1;
+        let moved = std::sync::Arc::new(crate::blossom::Moved::new());
+        watches.lock().unwrap_or_else(|p| p.into_inner()).push(moved.clone());
         async move {
             if repeat {
                 chunk_backoff(repeat_no).await;
@@ -286,13 +289,16 @@ async fn download_blob_locations(
             let q0 = std::time::Instant::now();
             let _host = host_slots(&src.url).acquire_owned().await;
             let host_wait = q0.elapsed();
+            let turn = crate::link::download_window().enter().await;
             let t0 = std::time::Instant::now();
-            let r = match tokio::time::timeout(CHUNK_ATTEMPT_TIMEOUT, blossom.download(&src.url)).await {
-                Ok(r) => r,
-                Err(_) => Err(MediaError::DownloadFailed(format!(
-                    "no answer in {}s", CHUNK_ATTEMPT_TIMEOUT.as_secs()
-                ))),
-            };
+            // Bounded by the stall watch inside: a slow chunk is let finish, a dead one is cut.
+            let r = blossom.download_watched(&src.url, &moved).await;
+            turn.finish(match &r {
+                Ok(_) => crate::link::Outcome::Delivered,
+                Err(_) if moved.answered() => crate::link::Outcome::Answered,
+                Err(_) if !moved.reached() => crate::link::Outcome::Unreached,
+                Err(_) => crate::link::Outcome::Broken,
+            });
             (idx, src, attempt, t0.elapsed(), host_wait, r)
         }
     };
@@ -359,6 +365,10 @@ async fn download_blob_locations(
                 }
             }
             _ = hedge, if next < plan.len() => {
+                // Bytes still arriving: the link is slow, and a duplicate would halve it.
+                if watches.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|w| w.idle() < hedge_delay()) {
+                    continue;
+                }
                 tracing::warn!(target: "alpha_ffi", "CHUNK_HEDGE chunk={} after_ms={}", start_at, t_chunk.elapsed().as_millis());
                 inflight.push(launch(next));
                 next += 1;
@@ -370,9 +380,9 @@ async fn download_blob_locations(
 
 /// A chunk slower than this is logged: it is what a pause in the progress is made of.
 const DL_SLOW: std::time::Duration = std::time::Duration::from_millis(1500);
+/// How a host that just failed a chunk is ranked: as if it answered this slowly.
+const FAILED_HOST_MS: u64 = 20_000;
 
-/// One HTTP attempt for one chunk may not take longer than this.
-const CHUNK_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 /// Hedge bounds: a healthy 256 KiB chunk lands far below the minimum.
 const HEDGE_MIN_MS: u64 = 1_000;
 const HEDGE_MAX_MS: u64 = 8_000;
@@ -399,7 +409,7 @@ fn host_slots(url: &str) -> std::sync::Arc<tokio::sync::Semaphore> {
 enum HostOutcome { Served(std::time::Duration), Missing, Failed }
 
 #[derive(Default, Clone, Copy)]
-struct HostStat { ewma_ms: u64, served: u32, missing: u32 }
+struct HostStat { ewma_ms: u64 }
 
 fn host_key(url: &str) -> String {
     url.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or(url).to_ascii_lowercase()
@@ -415,15 +425,13 @@ fn note_host(url: &str, outcome: HostOutcome) {
     let mut map = host_stats().lock().unwrap_or_else(|p| p.into_inner());
     let st = map.entry(host_key(url)).or_default();
     let sample = match outcome {
-        HostOutcome::Served(t) => { st.served += 1; Some(t.as_millis().min(60_000) as u64) }
-        HostOutcome::Missing => { st.missing += 1; None }
-        HostOutcome::Failed => Some(CHUNK_ATTEMPT_TIMEOUT.as_millis() as u64),
+        HostOutcome::Served(t) => Some(t.as_millis().min(60_000) as u64),
+        HostOutcome::Missing => None,
+        HostOutcome::Failed => Some(FAILED_HOST_MS),
     };
     if let Some(ms) = sample {
         st.ewma_ms = if st.ewma_ms == 0 { ms } else { (st.ewma_ms * 3 + ms) / 4 };
     }
-    // Old history fades: a server that had no copies yesterday may have them now.
-    if st.served + st.missing > 64 { st.served /= 2; st.missing /= 2; }
 }
 
 /// How long a chunk request to this server is expected to take, queue included.
@@ -432,14 +440,15 @@ fn expected_answer_ms(url: &str, discovered: bool) -> u64 {
     let answer = if st.ewma_ms == 0 { UNKNOWN_HOST_MS } else { st.ewma_ms };
     let busy = (PER_HOST_SLOTS - host_slots(url).available_permits().min(PER_HOST_SLOTS)) as u64;
     let mut ms = answer + answer * busy / PER_HOST_SLOTS as u64;
-    // A replica guessed by content id is often not there: try it first only once it has proved itself.
-    if discovered && st.missing >= 3 && st.missing > st.served { ms += MISSING_PENALTY_MS; }
+    // Where the sender put it comes first; a copy guessed by content id is the fallback,
+    // raced only when the listed server is failing or slow to move.
+    if discovered { ms += GUESSED_COPY_PENALTY_MS; }
     ms
 }
 
 /// A server never asked yet: neither preferred nor avoided.
 const UNKNOWN_HOST_MS: u64 = 800;
-const MISSING_PENALTY_MS: u64 = 10_000;
+const GUESSED_COPY_PENALTY_MS: u64 = 10_000;
 
 fn hedge_delay() -> std::time::Duration {
     let ewma = CHUNK_EWMA_MS.load(std::sync::atomic::Ordering::Relaxed);
@@ -864,7 +873,6 @@ impl MediaPipeline {
         // branches on photo/video/document; the ciphertext rides verbatim.
         let chunk_total = encrypted_chunks.len() as u32;
         let media_key_ref: &[u8; 32] = &media_key;
-        let codec = crate::blob_transport::active_codec();
 
         let mut indexed_infos: Vec<(usize, StreamChunkUploadInfo)> =
             futures::stream::iter(encrypted_chunks.iter().enumerate())
@@ -877,10 +885,10 @@ impl MediaPipeline {
                         let blob = crate::blob_transport::wrap_chunk(media_key_ref, i as u32, &chunk.ciphertext)?;
                         debug!(
                             chunk_index = i, ciphertext_size = chunk.ciphertext.len(),
-                            blob_size = blob.len(), codec = codec.name(),
+                            blob_size = blob.len(),
                             "Uploading stream chunk (BlobEnvelope)",
                         );
-                        let locations = upload_blob_mirrored(blossom, &blob, signer, codec.content_type()).await?;
+                        let locations = upload_blob_mirrored(blossom, &blob, signer, crate::blob_transport::CHUNK_CONTENT_TYPE).await?;
                         tracing::info!(target: "alpha_ffi", "CHUNK_UP idx={i} mirrors={}", locations.len());
                         // Progress + manifest stay denominated in CIPHERTEXT bytes:
                         // the MediaRef format is deliberately unchanged.
@@ -1038,6 +1046,7 @@ impl MediaPipeline {
 
         // 0. MP4 faststart (video only) — streamed to a temp file, O(moov) memory.
         //    A no-op when the file is already faststart or isn't a parseable MP4.
+        let t_prep = std::time::Instant::now();
         let tmp_faststart = if faststart && media_type == MediaType::Video {
             let tmp = std::env::temp_dir()
                 .join(format!("am_faststart_{}.mp4", uuid::Uuid::new_v4()));
@@ -1054,6 +1063,9 @@ impl MediaPipeline {
         } else {
             None
         };
+        if t_prep.elapsed() >= std::time::Duration::from_millis(500) {
+            tracing::warn!(target: "alpha_ffi", "UPLOAD_PREP faststart={} ms={}", tmp_faststart.is_some(), t_prep.elapsed().as_millis());
+        }
         let src: &std::path::Path = tmp_faststart.as_deref().unwrap_or(file_path);
         // Drops the temp file whatever happens below.
         struct TempGuard(Option<std::path::PathBuf>);
@@ -1075,8 +1087,6 @@ impl MediaPipeline {
             filename, media_type = %media_type, size = plaintext_len, chunks = chunk_total,
             "Starting TRUE streaming media upload (O(chunk) memory)",
         );
-
-        let codec = crate::blob_transport::active_codec();
 
         // What past attempts got accepted. Read once: from then on it is only
         // a "need not send" directory — each chunk's decision is made by
@@ -1211,7 +1221,7 @@ impl MediaPipeline {
                     // never failing — and a send that never fails never reaches the retry queue.
                     let locations = match tokio::time::timeout(
                         CHUNK_DEADLINE,
-                        upload_blob_mirrored(blossom, &blob, signer, codec.content_type()),
+                        upload_blob_mirrored(blossom, &blob, signer, crate::blob_transport::CHUNK_CONTENT_TYPE),
                     ).await {
                         Ok(Ok(l)) => l,
                         Ok(Err(e)) => {
@@ -1222,18 +1232,18 @@ impl MediaPipeline {
                             // it carries no secrets.
                             tracing::warn!(
                                 target: "alpha_ffi",
-                                "CHUNK_FAIL idx={idx} out={filename} причина={e}",
+                                "CHUNK_FAIL idx={idx} out={filename} cause={e}",
                             );
                             return Err(e);
                         }
                         Err(_) => {
                             tracing::warn!(
                                 target: "alpha_ffi",
-                                "CHUNK_FAIL idx={idx} out={filename} причина=истёк срок {}с",
+                                "CHUNK_FAIL idx={idx} out={filename} cause=deadline {}s",
                                 CHUNK_DEADLINE.as_secs(),
                             );
                             return Err(MediaError::UploadFailed(format!(
-                                "кусок {idx}: истёк срок {}с", CHUNK_DEADLINE.as_secs(),
+                                "chunk {idx}: no copy within {}s", CHUNK_DEADLINE.as_secs(),
                             )));
                         }
                     };
@@ -1376,7 +1386,6 @@ impl MediaPipeline {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         const C: u64 = crate::crypto::STREAM_CHUNK_SIZE as u64;
-        let codec = crate::blob_transport::active_codec();
         let batcher = crate::resume::ConfirmationBatcher::new(Some(checkpoint));
         let sent = AtomicU64::new(0);
         // Never "done" from the receiver's side: the header and the tail are still to come.
@@ -1414,10 +1423,10 @@ impl MediaPipeline {
                     let oid = crate::media_ref::TransportObjectId::of_bytes(&blob);
                     let locations = tokio::time::timeout(
                         CHUNK_DEADLINE,
-                        upload_blob_mirrored(&self.blossom, &blob, signer, codec.content_type()),
+                        upload_blob_mirrored(&self.blossom, &blob, signer, crate::blob_transport::CHUNK_CONTENT_TYPE),
                     )
                     .await
-                    .map_err(|_| MediaError::UploadFailed(format!("кусок {idx}: истёк срок")))??;
+                    .map_err(|_| MediaError::UploadFailed(format!("chunk {idx}: no copy within {}s", CHUNK_DEADLINE.as_secs())))??;
                     tracing::info!(target: "alpha_ffi", "CHUNK_EARLY idx={idx} out={filename}");
                     batcher.add(crate::resume::ConfirmedChunk {
                         index: idx,
@@ -1648,6 +1657,7 @@ impl MediaPipeline {
                     let net_us = &net_us;
                     let dec_us = &dec_us;
                     let file_slots = &file_slots;
+                    let downloaded = &downloaded;
                     async move {
                         // GLOBAL chunk-slot pool: hold a slot ONLY for the network
                         // fetch (the scarce resource). Every file runs at once but the
@@ -1684,6 +1694,10 @@ impl MediaPipeline {
                         let t_dec = std::time::Instant::now();
                         let plaintext = StreamCrypto::decrypt_chunk(&chunk, media_key)?;
                         dec_us.fetch_add(t_dec.elapsed().as_micros() as u64, Ordering::Relaxed);
+                        // Progress counts verified bytes as they arrive, not only the
+                        // in-order prefix: one late chunk must not freeze the bar.
+                        let len = plaintext.len() as u64;
+                        on_progress((downloaded.fetch_add(len, Ordering::Relaxed) + len).min(total), total);
                         Ok::<Vec<u8>, MediaError>(plaintext)
                     }
                 })
@@ -1708,9 +1722,6 @@ impl MediaPipeline {
                 file.write_at(written, &plaintext).map_err(io_err)?;
                 written += plaintext.len() as u64;
                 write_us += t_w.elapsed().as_micros() as u64;
-                let done = downloaded.fetch_add(plaintext.len() as u64, Ordering::Relaxed)
-                    + plaintext.len() as u64;
-                on_progress(done.min(total), total);
                 drop(plaintext); // release the chunk buffer immediately
             }
             file.sync().map_err(io_err)?;
@@ -1921,6 +1932,58 @@ mod t2_acceptance {
         ChunkLocation { relay: base.to_string(), url: format!("{base}/{id}") }
     }
 
+    /// A store whose objects can arrive after it started answering.
+    async fn spawn_late_store(objects: Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let objects = objects.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 2048];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = req.split_whitespace().nth(1).unwrap_or("/").trim_start_matches('/').to_string();
+                    let found = objects.lock().unwrap().get(&path).cloned();
+                    let resp = match found {
+                        Some(body) => {
+                            let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+                            r.extend_from_slice(&body);
+                            r
+                        }
+                        None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+                    };
+                    let _ = sock.write_all(&resp).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        addr
+    }
+
+    /// A just-published file: its listed server is out of reach from this network, and
+    /// its copy lands on B a moment after B said "not here". A repeat must find it.
+    #[tokio::test]
+    async fn a_copy_that_lands_after_not_here_is_found() {
+        let obj = body(9);
+        let id = TransportObjectId::of_bytes(&obj);
+        let late: Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>> = Default::default();
+        let b = spawn_late_store(late.clone()).await;
+        let dead = "http://127.0.0.1:9".to_string();
+        let client = crate::blossom::BlossomClient::with_servers(&[dead.clone(), b]);
+        let (key, value) = (id.as_hex().to_string(), obj.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            late.lock().unwrap().insert(key, value);
+        });
+        let got = download_blob_locations(&client, Some(&id), &[loc(&dead, id.as_hex())], 0, DownloadPolicy::RoundRobin)
+            .await
+            .expect("the late copy must be found");
+        assert_eq!(got, obj);
+    }
+
     /// A→B: the ref knows only A, A lacks the object, the object is on B.
     #[tokio::test]
     async fn t2_chunk_discovered_on_second_server() {
@@ -2112,10 +2175,13 @@ mod upload_budget {
         let held = { let _p = upload_slots().acquire().await.unwrap(); };
         let _ = held;
         chunk_backoff(1).await;
-        assert_eq!(
-            upload_slots().available_permits(),
-            GLOBAL_UPLOAD_SLOTS,
-            "во время паузы перед повтором слот остался занят",
-        );
+        // Taking every slot, not counting free ones: neighbouring tests share the pool.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            upload_slots().acquire_many(GLOBAL_UPLOAD_SLOTS as u32),
+        )
+        .await
+        .expect("a slot stayed held during the retry pause")
+        .expect("upload semaphore closed");
     }
 }

@@ -215,13 +215,6 @@ internal fun MediaBubble(
                     )
                 }
             }
- // Reactions over the media bottom-start, clear of the time pill.
-            BubbleReactionsRow(
-                isOutgoing = message.isOutgoing,
-                colors = colors,
-                modifier = Modifier.align(Alignment.BottomStart).padding(start = 6.dp, bottom = 6.dp, end = 76.dp),
-                surface = ReactionSurface.Media,
-            )
  // Footer pill: edited · time · ✓ over the media bottom-end.
             Row(
                 modifier = Modifier
@@ -263,5 +256,10 @@ internal fun MediaBubble(
                 ),
             )
         }
+        // Under the photo, as under a video or an album: over it they hid the picture and widened the bubble.
+        BubbleReactionsRow(
+            message.isOutgoing, colors,
+            Modifier.width(photoW).padding(top = 4.dp, start = if (channelW != null) 10.dp else 2.dp),
+        )
     }
 }

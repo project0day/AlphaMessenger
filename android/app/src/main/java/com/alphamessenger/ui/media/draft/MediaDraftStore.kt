@@ -10,6 +10,7 @@ import androidx.compose.runtime.toMutableStateList
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
 import java.io.File
@@ -197,6 +198,7 @@ class MediaDraftStore {
 class MediaDraftViewModel @javax.inject.Inject constructor(
     private val savedState: androidx.lifecycle.SavedStateHandle,
     @dagger.hilt.android.qualifiers.ApplicationContext private val appContext: Context,
+    private val preUploads: com.alphamessenger.ui.media.send.MediaPreUpload,
 ) : ViewModel() {
 
     val store = MediaDraftStore().also { it.restoreFrom(savedState) }
@@ -205,6 +207,23 @@ class MediaDraftViewModel @javax.inject.Inject constructor(
         // Sweep past temp copies — once per screen, off the main thread.
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             runCatching { MediaDraftStore.sweepStale(appContext) }
+        }
+        savedState.get<String>("chatId")?.takeIf { it.isNotBlank() }?.let(::preUploadWhileComposing)
+    }
+
+    /** The set goes up as it settles: picks, edits and quality changes, a moment after the last one. */
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
+    private fun preUploadWhileComposing(chatId: String) {
+        viewModelScope.launch {
+            androidx.compose.runtime.snapshotFlow {
+                Triple(
+                    store.items.toList(),
+                    com.alphamessenger.ui.media.export.MediaQuality.hd,
+                    com.alphamessenger.ui.media.export.MediaQuality.videoEdge,
+                )
+            }
+                .debounce(PRE_UPLOAD_SETTLE_MS)
+                .collect { (items, _, _) -> preUploads.offer(chatId, items) }
         }
     }
 
@@ -263,10 +282,14 @@ class MediaDraftViewModel @javax.inject.Inject constructor(
      * send queue applies them after the message has appeared in the chat, so the
      * bubble shows instantly instead of waiting for re-encoding.
      */
-    fun consume(): List<MediaDraftItem> = store.consume().also { persist() }
+    fun consume(): List<MediaDraftItem> = store.consume().also {
+        preUploads.reserve(it)
+        persist()
+    }
 
-    /** Cancel: the set is dropped, our temp copies are deleted. */
+    /** Cancel: the set is dropped, our temp copies are deleted, its uploads leave the servers. */
     fun discard() {
+        preUploads.discard(store.items.toList())
         store.discard(appContext)
         persist()
     }
@@ -276,6 +299,11 @@ class MediaDraftViewModel @javax.inject.Inject constructor(
 
     override fun onCleared() {
         persist()
+        preUploads.discard(store.items.toList())
         super.onCleared()
+    }
+
+    private companion object {
+        const val PRE_UPLOAD_SETTLE_MS = 700L
     }
 }

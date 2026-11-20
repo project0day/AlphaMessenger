@@ -2183,8 +2183,9 @@ class ChatViewModel @Inject constructor(
         // A fragment chosen in "Select text" is what the reply answers.
         _uiState.value.replyQuote?.takeIf { _uiState.value.replyTo?.id == m.id }?.let { return it }
         if (m.isSticker) return listOfNotNull(m.stickerEmoji, strings.get(R.string.sticker_label)).joinToString(" ")
-        val t = m.text.trim()
+        val t = m.text.removePrefix(FWD_MARK).trim()
         if (t.isNotEmpty()) return t.take(120)
+        if (m.mediaType == "file") m.mediaFilename?.takeIf { it.isNotBlank() }?.let { return it }
         return mediaLabel(m)
     }
 
@@ -4206,7 +4207,9 @@ class ChatViewModel @Inject constructor(
             assistant.stopAndSettle(id)
             val moved = runCatching { repository.assistantNewConversation(profile.id) }.getOrDefault(false)
             ConversationSnapshotCache.clear(id)
-            if (moved) _uiState.value = _uiState.value.copy(messages = emptyList())
+            // From the database, after any reload already under way: one begun before the
+            // move would otherwise put the old conversation back on screen.
+            if (moved) reloadNow()
             kotlinx.coroutines.withContext(Dispatchers.Main) { onDone(moved) }
         }
     }

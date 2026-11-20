@@ -28,6 +28,11 @@ pub enum MediaError {
     #[error("Upload failed: {0}")]
     UploadFailed(String),
 
+    /// Every server turned the blob down for good (rights, policy, format): a retry
+    /// changes nothing until the user acts.
+    #[error("Refused: {0}")]
+    Refused(String),
+
     /// Download from Blossom relay failed.
     #[error("Download failed: {0}")]
     DownloadFailed(String),

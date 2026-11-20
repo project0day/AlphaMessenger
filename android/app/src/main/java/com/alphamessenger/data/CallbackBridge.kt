@@ -39,6 +39,10 @@ class CallbackBridge @Inject constructor() : AlphaMessengerCallback {
     private val _messageReceived = MutableSharedFlow<MessageInfo>(extraBufferCapacity = 64)
     val messageReceived: SharedFlow<MessageInfo> = _messageReceived.asSharedFlow()
 
+    private val _incomingMedia = MutableSharedFlow<Pair<String, String>>(extraBufferCapacity = 64)
+    /** (chat id, message JSON) of every media message as it arrives. */
+    val incomingMedia: SharedFlow<Pair<String, String>> = _incomingMedia.asSharedFlow()
+
     // TEMP (BLOCK K verify) — batch counters for the EVENTS_BATCH log.
     private val _kBatches = java.util.concurrent.atomic.AtomicInteger(0)
     private val _kEvents = java.util.concurrent.atomic.AtomicLong(0)
@@ -167,6 +171,7 @@ class CallbackBridge @Inject constructor() : AlphaMessengerCallback {
         }
         android.util.Log.d("CallbackBridge", "onMessageReceived: chatId=$chatId json.len=${messageJson.length}")
         _messageReceived.tryEmit(placeholder)
+        if (parsedType == MessageType.MEDIA) _incomingMedia.tryEmit(chatId to messageJson)
     }
 
     /**

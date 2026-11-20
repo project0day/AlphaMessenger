@@ -158,10 +158,17 @@ object LastSeenReciprocity {
 /** "Last seen" text from the presence engine's unix seconds. "" = unknown (or hidden, see [LastSeenReciprocity]). */
 @Composable
 fun lastSeenLabel(epochSeconds: Long): String {
+    // "Minutes ago" moves on by itself, not only when a presence signal arrives.
+    val clock by androidx.compose.runtime.produceState(System.currentTimeMillis()) {
+        while (true) {
+            kotlinx.coroutines.delay(30_000)
+            value = System.currentTimeMillis()
+        }
+    }
     if (epochSeconds <= 0L || LastSeenReciprocity.hideOthers) return ""
     val zone = java.time.ZoneId.systemDefault()
     val seen = java.time.Instant.ofEpochSecond(epochSeconds).atZone(zone)
-    val now = java.time.ZonedDateTime.now(zone)
+    val now = java.time.Instant.ofEpochMilli(clock).atZone(zone)
     val minutes = java.time.Duration.between(seen, now).toMinutes()
     val time = seen.format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
     return when {

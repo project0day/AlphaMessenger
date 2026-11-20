@@ -190,7 +190,7 @@ class AssistantEngine @Inject constructor(
     }
 
     /** What the chat shows of an answer on its way; written by the parts, read by the screen. */
-    private inner class Board(val chatId: String) {
+    private inner class Board(val chatId: String, val history: List<MessageInfo> = emptyList()) {
         private val started = System.currentTimeMillis()
         /** The run this board belongs to; once Stop moves the chat on, nothing of it reaches the chat or the screen. */
         val gen: Long = genOf(chatId)
@@ -198,6 +198,8 @@ class AssistantEngine @Inject constructor(
         private val parts = ArrayList<Part>()
         /** Rows the tools made, written after the answer (see [AssistantTools.Run.post]). */
         private val later = ArrayList<suspend () -> Unit>()
+        /** The message the answer quotes ("quote" tool), if any. */
+        @Volatile var quote: String? = null
 
         fun post(row: suspend () -> Unit) = synchronized(this) { later += row }
 
@@ -207,7 +209,8 @@ class AssistantEngine @Inject constructor(
             block()
         }
 
-        suspend fun insert(body: String, id: String? = null): String = write { repository.insertAssistantMessage(chatId, body, id) }
+        suspend fun insert(body: String, id: String? = null, replyTo: String? = null): String =
+            write { repository.insertAssistantMessage(chatId, body, id, replyTo) }
 
         /** Writes what the tools made, in the order made; true when anything was written. [stopped]: Stop keeps them, written now. */
         suspend fun flushLater(stopped: Boolean = false): Boolean {
@@ -277,7 +280,7 @@ class AssistantEngine @Inject constructor(
     private suspend fun run(chatId: String, msgs: List<MessageInfo>) {
         val profile = AssistantStore.profileOfChat(chatId)
         val me = kotlinx.coroutines.currentCoroutineContext()[Job]
-        val board = Board(chatId)
+        val board = Board(chatId, msgs)
         boards[chatId] = board
         val started = System.currentTimeMillis()
         // What a cancel or an error must still keep: the voices that already spoke.
@@ -413,7 +416,7 @@ class AssistantEngine @Inject constructor(
         // A theme the model typed out itself: working links become cards, broken ones a note.
         val (text, themes) = AssistantTools.liftThemeLinks(said.answer.trim())
         val answer = AssistantTools.checkThemeLinks(ctx, text).ifBlank { "🎨" }
-        val id = board.insert(AssistantMarks.reply(answer, said.thinking.trim(), said.seconds, agent), board.rowId(slot))
+        val id = board.insert(AssistantMarks.reply(answer, said.thinking.trim(), said.seconds, agent), board.rowId(slot), board.quote)
         // Before the chat reloads: the cards come in with the answer, not as a later message.
         for (link in themes) runCatching { board.insert(link) }
         board.flushLater()
@@ -467,6 +470,8 @@ class AssistantEngine @Inject constructor(
             stored = { made = true },
             post = { board.post(it) },
             memoryOwner = memoryOwner,
+            history = board.history,
+            quote = { board.quote = it },
         )
         var round = 0
         var nudged = false
@@ -573,6 +578,7 @@ class AssistantEngine @Inject constructor(
         val lastUser = msgs.lastOrNull { it.senderId != ASSISTANT }?.id
         // Pictures cost a lot: only the newest few messages send theirs.
         val recent = msgs.takeLast(RECENT_WITH_MEDIA).map { it.id }.toSet()
+        val byId = msgs.associateBy { it.id }
         for (m in msgs) {
             if (m.senderId == ASSISTANT) {
                 val body = m.content.orEmpty()
@@ -583,10 +589,14 @@ class AssistantEngine @Inject constructor(
                     turns += ChatTurn("assistant", "[relay plan offered: ${plan.summary()} — ${state}]")
                     continue
                 }
-                AssistantMarks.answerOf(body).takeIf { it.isNotBlank() }?.let { turns += ChatTurn("assistant", forModel(it)) }
+                val said = AssistantMarks.answerOf(body).takeIf { it.isNotBlank() }?.let(::forModel)
+                // What it drew or said aloud has no text: without this it forgets it sent anything.
+                val sent = mediaOf(m)?.let { "[" + mediaWord(it) + " sent to the user]" }
+                listOfNotNull(said, sent).joinToString("\n").takeIf { it.isNotBlank() }?.let { turns += ChatTurn("assistant", it) }
                 continue
             }
-            turns += userTurn(p, key, m, withMedia = m.id in recent, isLast = m.id == lastUser)
+            val quoted = m.replyTo?.takeIf { it.isNotBlank() }?.let { id -> byId[id] ?: "" }
+            turns += userTurn(p, key, m, withMedia = m.id in recent, isLast = m.id == lastUser, quoted = quoted)
         }
         return turns
     }
@@ -643,13 +653,20 @@ class AssistantEngine @Inject constructor(
         }
     }
 
-    private suspend fun userTurn(p: AssistantProfile, key: String, m: MessageInfo, withMedia: Boolean, isLast: Boolean): ChatTurn {
+    /** [quoted]: the message this one answers; "" when it is older than the history sent. */
+    private suspend fun userTurn(p: AssistantProfile, key: String, m: MessageInfo, withMedia: Boolean, isLast: Boolean, quoted: Any? = null): ChatTurn {
         val raw = m.content.orEmpty()
         val forwarded = raw.startsWith(com.alphamessenger.ui.chat.FWD_MARK)
         val text = raw.removePrefix(com.alphamessenger.ui.chat.FWD_MARK)
-        val ref = m.mediaRef?.let { runCatching { JSONObject(it) }.getOrNull() }
-        val head = if (forwarded) "[forwarded] " else ""
-        if (ref == null) return ChatTurn("user", head + text)
+        val ref = mediaOf(m)
+        val quoteImages = ArrayList<String>()
+        val note = when (quoted) {
+            is MessageInfo -> quoteNote(quoted, withMedia, quoteImages) + "\n"
+            "" -> "[in reply to an earlier message]\n"
+            else -> ""
+        }
+        val head = (if (forwarded) "[forwarded] " else "") + note
+        if (ref == null) return ChatTurn("user", head + text, quoteImages)
         val caption = text.ifBlank { ref.optString("caption") }
         val type = ref.optString("media_type")
         val name = ref.optString("filename")
@@ -682,7 +699,40 @@ class AssistantEngine @Inject constructor(
             else -> parts += fileText(m.id, ref, name, withMedia, images)
         }
         if (caption.isNotBlank()) parts += caption
-        return ChatTurn("user", head + parts.joinToString("\n"), images)
+        return ChatTurn("user", head + parts.joinToString("\n"), quoteImages + images)
+    }
+
+    /** A message's attachment; a text reply's mediaRef is its quote snippet, not a file. */
+    private fun mediaOf(m: MessageInfo): JSONObject? =
+        m.mediaRef?.takeIf { m.msgType != uniffi.alphamessenger.MessageType.REPLY }
+            ?.let { runCatching { JSONObject(it) }.getOrNull() }
+
+    /** The message being answered, as the model needs it: whose, what it says, its picture when there is one. */
+    private suspend fun quoteNote(q: MessageInfo, withMedia: Boolean, images: MutableList<String>): String {
+        val whose = if (q.senderId == ASSISTANT) "your" else "my own"
+        val ref = mediaOf(q)
+        if (ref != null) {
+            val pics = if (!withMedia) emptyList() else when (ref.optString("media_type")) {
+                "image" -> listOfNotNull(localFile(ref)?.let { image(it) })
+                "video" -> localFile(ref)?.let { frames(it) }.orEmpty()
+                else -> emptyList()
+            }
+            images += pics
+            val cap = q.content.orEmpty().removePrefix(com.alphamessenger.ui.chat.FWD_MARK).trim()
+            return "[in reply to $whose " + mediaWord(ref) + (if (pics.isNotEmpty()) ", attached below" else "") +
+                (if (cap.isNotEmpty()) ": \"" + cap.take(300) + "\"" else "") + "]"
+        }
+        val said = (if (q.senderId == ASSISTANT) AssistantMarks.answerOf(q.content.orEmpty()) else q.content.orEmpty())
+            .removePrefix(com.alphamessenger.ui.chat.FWD_MARK).trim()
+        return "[in reply to $whose message: \"" + said.take(300) + "\"]"
+    }
+
+    private fun mediaWord(ref: JSONObject): String = when (ref.optString("media_type")) {
+        "image" -> "picture"
+        "video" -> "video"
+        "album" -> "album"
+        "audio" -> if (ref.optString("filename").startsWith("voice")) "voice message" else "audio file"
+        else -> "file " + ref.optString("filename")
     }
 
     /** A voice note as text. Without a speech model, the newest one is an error the user can fix. */

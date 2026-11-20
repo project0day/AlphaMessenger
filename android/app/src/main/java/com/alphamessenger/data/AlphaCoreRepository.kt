@@ -91,6 +91,9 @@ class AlphaCoreRepository @Inject constructor(
     /** The receiving side's progress (see [CallbackBridge.syncState]). */
     val syncState: StateFlow<SyncState?> get() = callbackBridge.syncState
 
+    /** (chat id, message JSON) of every media message as it arrives. */
+    val incomingMedia: SharedFlow<Pair<String, String>> get() = callbackBridge.incomingMedia
+
     // The core joined or left the reserve relay: our KeyPackage goes there and
     // contacts learn where we listen now.
     init {
@@ -1467,8 +1470,13 @@ class AlphaCoreRepository @Inject constructor(
     }
 
     /** A reply of the assistant, stored in its chat; returns the message id. */
-    suspend fun insertAssistantMessage(chatId: String, body: String, id: String? = null): String = withContext(Dispatchers.IO) {
-        core.`insertAssistantMessage`(chatId, body, id)
+    suspend fun insertAssistantMessage(chatId: String, body: String, id: String? = null, replyTo: String? = null): String = withContext(Dispatchers.IO) {
+        core.`insertAssistantMessage`(chatId, body, id, replyTo)
+    }
+
+    /** The bot's reaction to a message of its chat (its one there, replaced by a new one). */
+    suspend fun insertAssistantReaction(chatId: String, targetId: String, emoji: String) = withContext(Dispatchers.IO) {
+        core.`insertAssistantReaction`(chatId, targetId, emoji)
     }
 
     /** Puts the bot's current conversation aside; false when it was empty. */
@@ -2533,9 +2541,12 @@ class AlphaCoreRepository @Inject constructor(
         if (!MediaVault.isSealed(src)) return path
         val out = java.io.File(context.cacheDir, "send_plain_" + Integer.toHexString(path.hashCode()) + "_" + src.length())
         if (!(out.exists() && out.length() == MediaVault.length(src))) {
+            val started = android.os.SystemClock.elapsedRealtime()
             val tmp = java.io.File(out.path + ".tmp")
             MediaVault.copyPlain(src, tmp)
             tmp.renameTo(out)
+            val ms = android.os.SystemClock.elapsedRealtime() - started
+            if (ms >= 500) android.util.Log.w("AlphaMediaTrace", "UPLOAD_PREP unseal ms=$ms bytes=${out.length()}")
         }
         return out.absolutePath
     }
@@ -2589,8 +2600,26 @@ class AlphaCoreRepository @Inject constructor(
     suspend fun uploadBlobRefOnly(
         filePath: String, mediaType: String, posterB64: String?, opId: String,
         metaJson: String? = null,
-    ): String? = withContext(Dispatchers.IO) {
-        keepAwake.during { runCatching { core.`uploadBlobRefOnly`(plainForSend(filePath), mediaType, posterB64, opId, metaJson) }.getOrNull() }
+    ): String? = uploadBlobRef(filePath, mediaType, posterB64, opId, metaJson).getOrNull()
+
+    /** As [uploadBlobRefOnly], keeping the core's reason: a weak link is retried, a refusal is not. */
+    suspend fun uploadBlobRef(
+        filePath: String, mediaType: String, posterB64: String?, opId: String,
+        metaJson: String? = null,
+    ): Result<String> = withContext(Dispatchers.IO) {
+        keepAwake.during { runCatching { core.`uploadBlobRefOnly`(plainForSend(filePath), mediaType, posterB64, opId, metaJson) } }
+    }
+
+    /** Upload a file of a set still being composed, over the chat's route; null if it failed. */
+    suspend fun preUploadMedia(chatId: String, opId: String, filePath: String, mediaType: String): String? =
+        withContext(Dispatchers.IO) {
+            keepAwake.during { runCatching { core.`preUploadMedia`(chatId, opId, filePath, mediaType) }.getOrNull() }
+        }
+
+    /** Stop a pre-upload no message used and delete what of it reached the servers. */
+    suspend fun discardPreUpload(chatId: String, opId: String, filePath: String, refJson: String) = withContext(Dispatchers.IO) {
+        runCatching { core.`discardPreUpload`(chatId, opId, filePath, refJson) }
+        Unit
     }
 
     /** Broadcast the finished album as ONE confirmed MLS message. itemRefs =

@@ -17,27 +17,23 @@ use crate::error::{MediaError, MediaResult};
 // State lives in process memory, and correctness does NOT depend on it:
 // losing the knowledge just means the first attempt goes blind again.
 
-/// What exactly an endpoint must support for a specific operation.
-///
-/// Deliberately split. A measurement on real servers showed suitability
-/// depends on the REPRESENTATION: chunks travel as a text envelope, the
-/// external manifest as a raw stream. A server accepting the first is not
-/// obliged to accept the second — a large file can be less available than a small one.
+/// Which representation a server must take for an upload. Servers judge the
+/// declared type: some take only JSON, others raw bytes too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StorageCapability {
-    /// Stream chunk: `application/json` envelope.
-    StreamChunkJson,
-    /// External manifest: raw `application/octet-stream`.
-    ExternalManifestOctet,
+    /// `application/json` (chunks stored before 2026-11-20).
+    Json,
+    /// Raw `application/octet-stream`: chunks and manifests.
+    Octet,
 }
 
 impl StorageCapability {
     /// Which capability this content type requires.
     pub fn of_content_type(content_type: &str) -> Self {
         if content_type.starts_with("application/json") {
-            Self::StreamChunkJson
+            Self::Json
         } else {
-            Self::ExternalManifestOctet
+            Self::Octet
         }
     }
 }
@@ -84,9 +80,31 @@ pub struct StorageFailure {
     pub class: FailureClass,
     pub retry_after: Option<std::time::Duration>,
     pub detail: String,
+    /// The connection never opened: the server or its route failed, not the link.
+    pub unreached: bool,
 }
 
 impl StorageFailure {
+    fn at(endpoint: &str, status: Option<u16>, retry_after: Option<std::time::Duration>, detail: String) -> Self {
+        Self {
+            endpoint: endpoint.to_string(),
+            status,
+            class: status.map(FailureClass::of_status).unwrap_or(FailureClass::Transient),
+            retry_after,
+            detail,
+            unreached: false,
+        }
+    }
+
+    fn unreached(endpoint: &str, e: &reqwest::Error) -> Self {
+        Self { unreached: e.is_connect(), ..Self::at(endpoint, None, None, error_chain(e)) }
+    }
+
+    /// The server turned this blob down for good: asking it again changes nothing.
+    fn is_refusal(&self) -> bool {
+        self.status.is_some_and(|s| (400..500).contains(&s) && s != 408 && s != 429)
+    }
+
     /// Message WITHOUT the full address and without the object id: only the
     /// host name and class reach the log.
     fn short(&self) -> String {
@@ -124,32 +142,41 @@ fn error_chain(e: &reqwest::Error) -> String {
 struct EndpointState {
     /// `None` — not yet established; it must not be probed by banning, or
     /// the first network failure would forever declare the endpoint unsuitable.
-    chunk_json: Option<bool>,
-    manifest_octet: Option<bool>,
+    json: Option<bool>,
+    octet: Option<bool>,
+    /// Serves BUD-04 `/mirror`: copies a blob from another server itself.
+    mirror: Option<bool>,
     /// Smoothed latency of a successful request, microseconds. 0 — no data.
     ewma_micros: f64,
     consecutive_failures: u32,
     cooldown_until: Option<std::time::Instant>,
     last_class: Option<FailureClass>,
+    /// The network on which the server could not be reached: it waits for another one.
+    unreached_on: Option<u64>,
+    /// The network on which the server last took a blob.
+    ok_on: Option<u64>,
+    /// Uploads to it in flight now.
+    in_flight: u32,
 }
 
 impl EndpointState {
     fn capability(&self, cap: StorageCapability) -> Option<bool> {
         match cap {
-            StorageCapability::StreamChunkJson => self.chunk_json,
-            StorageCapability::ExternalManifestOctet => self.manifest_octet,
+            StorageCapability::Json => self.json,
+            StorageCapability::Octet => self.octet,
         }
     }
 
     fn set_capability(&mut self, cap: StorageCapability, ok: bool) {
         match cap {
-            StorageCapability::StreamChunkJson => self.chunk_json = Some(ok),
-            StorageCapability::ExternalManifestOctet => self.manifest_octet = Some(ok),
+            StorageCapability::Json => self.json = Some(ok),
+            StorageCapability::Octet => self.octet = Some(ok),
         }
     }
 
     fn cooling(&self, now: std::time::Instant) -> bool {
-        self.cooldown_until.map(|t| t > now).unwrap_or(false)
+        let waiting = self.cooldown_until.is_some_and(|t| t > now);
+        waiting && self.unreached_on.map_or(true, |net| net == crate::link::network_epoch())
     }
 
     /// Success: smooth the latency and lift penalties.
@@ -163,6 +190,8 @@ impl EndpointState {
         self.consecutive_failures = 0;
         self.cooldown_until = None;
         self.last_class = None;
+        self.unreached_on = None;
+        self.ok_on = Some(crate::link::network_epoch());
     }
 
     /// Failure: the action depends on the class.
@@ -181,6 +210,11 @@ impl EndpointState {
                 let wait = f.retry_after.unwrap_or(RATE_COOLDOWN).min(MAX_COOLDOWN);
                 self.cooldown_until = Some(now + wait);
             }
+            FailureClass::Transient if f.unreached => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                self.cooldown_until = Some(now + UNREACHED_COOLDOWN);
+                self.unreached_on = Some(crate::link::network_epoch());
+            }
             FailureClass::Transient => {
                 self.consecutive_failures = self.consecutive_failures.saturating_add(1);
                 // Growth with a ceiling: a burst of breaks must not disable
@@ -196,6 +230,9 @@ const EWMA_DECAY: f64 = 0.7;
 const AUTH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
 const RATE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(120);
+/// A server this network cannot reach goes last until the network changes (some mobile
+/// networks let the connection open and then stall it), and at most this long.
+const UNREACHED_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Descriptor for a blob stored on a Blossom relay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,8 +302,12 @@ impl MediaSigner {
     /// - `x` tag: SHA-256 hash of the blob
     /// - `expiration` tag: 5 minutes from now
     fn sign_auth_event(&self, action: &str, sha256_hex: &str) -> MediaResult<String> {
+        self.sign_auth_event_for(action, sha256_hex, std::time::Duration::from_secs(300))
+    }
+
+    fn sign_auth_event_for(&self, action: &str, sha256_hex: &str, lifetime: std::time::Duration) -> MediaResult<String> {
         let now = chrono::Utc::now();
-        let expiration = now + chrono::Duration::minutes(5);
+        let expiration = now + chrono::Duration::seconds(lifetime.as_secs() as i64);
         let expiration_ts = nostr::Timestamp::from(expiration.timestamp() as u64);
 
         let tags = vec![
@@ -405,24 +446,29 @@ fn map_down(server: &str) -> bool {
 }
 
 /// Servers once in [DEFAULT_BLOSSOM_SERVERS]: older messages still point there.
-const RETIRED_BLOSSOM_SERVERS: &[&str] = &["https://blossom.band", "https://cdn.hzrd149.com"];
+const RETIRED_BLOSSOM_SERVERS: &[&str] = &[
+    "https://blossom.band",
+    "https://cdn.hzrd149.com",
+    "https://blossom.jumble.social",
+    "https://blossom.yakihonne.com",
+    "https://blossom.primal.net",
+    "https://nostr.media",
+];
 
 /// Public Blossom servers that accept anonymous Nostr-signed uploads.
 /// Used as a fallback when the caller doesn't supply its own list.
 ///
-/// Measured 2026-11-10 with `examples/blossom_servers_probe.rs` (anonymous
-/// one-time-key uploads of our chunks, read back and byte-compared): these
-/// store and serve them. Picked for how long they have run and how many use
-/// them, each by another operator; the fastest first. cdn.hzrd149.com now
-/// wants an account (401) and left the list; primal takes our JSON chunks only.
+/// Measured 2026-11-20 with `examples/blossom_servers_probe.rs` (anonymous
+/// one-time-key uploads of our chunks as raw bytes, read back and byte-compared):
+/// these store and serve them in under ~1.5 s. Picked for how long they have run
+/// and how many use them, each by another operator. primal and nostr.media take
+/// JSON only, jumble.social allows 30 writes an hour and yakihonne takes 4–6 s a
+/// chunk: retired, their old copies still read.
 pub const DEFAULT_BLOSSOM_SERVERS: &[&str] = &[
-    "https://blossom.primal.net",
     "https://nostr.download",
     "https://blossom.data.haus",
-    "https://blossom.ditto.pub",
     "https://blossom.nmail.li",
-    "https://blossom.jumble.social",
-    "https://blossom.yakihonne.com",
+    "https://blossom.ditto.pub",
 ];
 
 /// The project's long-term store for the official channel: read-only for
@@ -435,13 +481,194 @@ pub const ARCHIVE_BLOSSOM_SERVERS: &[&str] = &["https://rs-blossom-b2.rs-nostr-r
 /// Downloads find them by content hash on every configured server.
 const BACKGROUND_REPLICAS: usize = 2;
 
-/// One chunk upload attempt on the critical path; see [`BlossomClient::upload_mirrored`].
-const CHUNK_PUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// The answer once the whole body is in the socket; this also covers its trip over the
+/// link, which the link window keeps short. Never a total on the upload itself: a weak
+/// link is slow, not dead. A dead path is cut by socket liveness (no acknowledgement in
+/// 30 s); how fast the socket takes the body is no signal, since the kernel takes it in bursts.
+const PUT_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+/// The body goes out in slices, so the last one tells when all of it is in the socket.
+const PUT_SLICE: usize = 16 * 1024;
 
-/// Bounds background replication so it never competes with the user's sends.
-fn replica_slots() -> &'static tokio::sync::Semaphore {
-    static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    SLOTS.get_or_init(|| tokio::sync::Semaphore::new(2))
+/// A download is cut when no byte arrived for this long — never by its total time.
+const GET_STALL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// When a request's bytes last moved. Slow and stalled are different: only a stall is cut.
+pub(crate) struct Moved {
+    origin: std::time::Instant,
+    last_ms: std::sync::atomic::AtomicU64,
+    begun: std::sync::atomic::AtomicBool,
+    /// The whole body is out (upload) — what remains is the answer.
+    sent: std::sync::atomic::AtomicBool,
+    /// The server answered with an error status: the link itself worked.
+    refused: std::sync::atomic::AtomicBool,
+    /// The response began: a failure after it is the link's, before it the server's.
+    reached: std::sync::atomic::AtomicBool,
+}
+
+impl Moved {
+    pub(crate) fn new() -> Self {
+        Self {
+            origin: std::time::Instant::now(),
+            last_ms: Default::default(),
+            begun: Default::default(),
+            sent: Default::default(),
+            refused: Default::default(),
+            reached: Default::default(),
+        }
+    }
+
+    pub(crate) fn reached(&self) -> bool {
+        self.reached.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn answered(&self) -> bool {
+        self.refused.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn tick(&self) {
+        use std::sync::atomic::Ordering;
+        self.last_ms.store(self.origin.elapsed().as_millis() as u64, Ordering::Relaxed);
+        self.begun.store(true, Ordering::Relaxed);
+    }
+
+    /// Since bytes last moved; zero while the request waits for its turn.
+    pub(crate) fn idle(&self) -> std::time::Duration {
+        use std::sync::atomic::Ordering;
+        if !self.begun.load(Ordering::Relaxed) {
+            return std::time::Duration::ZERO;
+        }
+        self.origin.elapsed().saturating_sub(std::time::Duration::from_millis(self.last_ms.load(Ordering::Relaxed)))
+    }
+}
+
+/// Counts an upload to a server as in flight for as long as it lives.
+struct InFlight<'a> {
+    health: &'a std::sync::Mutex<std::collections::HashMap<String, EndpointState>>,
+    server: &'a str,
+}
+
+impl<'a> InFlight<'a> {
+    fn begin(health: &'a std::sync::Mutex<std::collections::HashMap<String, EndpointState>>, server: &'a str) -> Self {
+        if let Ok(mut h) = health.lock() {
+            h.entry(server.to_string()).or_default().in_flight += 1;
+        }
+        Self { health, server }
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut h) = self.health.lock() {
+            if let Some(e) = h.get_mut(self.server) {
+                e.in_flight = e.in_flight.saturating_sub(1);
+            }
+        }
+    }
+}
+
+/// A copy that needs the phone's own bytes waits until the user's uploads left the link alone this long.
+const REPLICA_QUIET: std::time::Duration = std::time::Duration::from_secs(3);
+/// Server-side copies in flight at once. They cost the phone a request, not the bytes, so they
+/// start as soon as a blob lands: a receiver on another network may reach only the copy.
+const MIRROR_SLOTS: usize = 4;
+/// A copy's authorization lasts this long; a copy still queued near its end is dropped.
+const REPLICA_AUTH_LIFETIME: std::time::Duration = std::time::Duration::from_secs(3600);
+/// Copies waiting at most: they are redundancy, never worth unbounded memory.
+const REPLICA_BACKLOG: usize = 4096;
+
+static REPLICAS_WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A copy still to be made. It holds the address of the landed copy, not the bytes.
+#[derive(Clone)]
+struct Replica {
+    client: BlossomClient,
+    source: String,
+    sha256: String,
+    content_type: String,
+    auth: String,
+    targets: Vec<String>,
+    queued: std::time::Instant,
+}
+
+fn replica_queue() -> &'static std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Replica>>> {
+    static Q: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Replica>>> = std::sync::Mutex::new(None);
+    &Q
+}
+
+fn enqueue_replica(job: Replica) {
+    use std::sync::atomic::Ordering;
+    if REPLICAS_WAITING.load(Ordering::Relaxed) >= REPLICA_BACKLOG {
+        debug!("replica backlog full, copy dropped");
+        return;
+    }
+    let mut queue = replica_queue().lock().unwrap_or_else(|p| p.into_inner());
+    let job = match queue.as_ref() {
+        Some(tx) => match tx.send(job) {
+            Ok(()) => {
+                REPLICAS_WAITING.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            Err(back) => back.0,
+        },
+        None => job,
+    };
+    // The worker is gone with the runtime that ran it (or never started).
+    let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    rt.spawn(replicate(rx));
+    REPLICAS_WAITING.store(0, Ordering::Relaxed);
+    if tx.send(job).is_ok() {
+        REPLICAS_WAITING.fetch_add(1, Ordering::Relaxed);
+    }
+    *queue = Some(tx);
+}
+
+/// Server-side copies go at once, a few at a time; the ones a server cannot make itself
+/// queue for the phone's bytes, which go one at a time and only while the user sends nothing.
+async fn replicate(mut jobs: tokio::sync::mpsc::UnboundedReceiver<Replica>) {
+    use std::sync::atomic::Ordering;
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MIRROR_SLOTS));
+    let (bytes_tx, bytes_rx) = tokio::sync::mpsc::unbounded_channel::<(Replica, String)>();
+    tokio::spawn(copy_bytes(bytes_rx));
+    while let Some(job) = jobs.recv().await {
+        let _ = REPLICAS_WAITING.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| Some(n.saturating_sub(1)));
+        for target in job.targets.clone() {
+            let Ok(slot) = slots.clone().acquire_owned().await else { return };
+            let (job, bytes_tx) = (job.clone(), bytes_tx.clone());
+            tokio::spawn(async move {
+                let _slot = slot;
+                if !job.client.mirror_to(&job, &target).await {
+                    let _ = bytes_tx.send((job, target));
+                }
+            });
+        }
+    }
+}
+
+async fn copy_bytes(mut copies: tokio::sync::mpsc::UnboundedReceiver<(Replica, String)>) {
+    while let Some((job, target)) = copies.recv().await {
+        wait_for_quiet_link().await;
+        if job.queued.elapsed() + std::time::Duration::from_secs(300) >= REPLICA_AUTH_LIFETIME {
+            continue;
+        }
+        job.client.upload_copy(&job, &target).await;
+    }
+}
+
+async fn wait_for_quiet_link() {
+    loop {
+        let quiet = crate::link::upload_window().quiet_for();
+        if quiet >= REPLICA_QUIET {
+            return;
+        }
+        tokio::time::sleep(REPLICA_QUIET - quiet).await;
+    }
+}
+
+/// `/mirror` answers that mean the server has no such endpoint (or will not fetch this
+/// blob itself) rather than refusing the blob: the bytes can still be uploaded.
+fn mirror_unsupported(status: u16) -> bool {
+    matches!(status, 400 | 404 | 405 | 415 | 501)
 }
 
 /// Redirects are followed only when they cannot be abused for SSRF: at most 3
@@ -481,6 +708,9 @@ impl BlossomClient {
             Route::AppWide => crate::with_http_proxy(builder),
             Route::Via(addr) => crate::with_socks_proxy(builder, Some(addr)),
         };
+        // Without the switch in between, the client's own socket is the one that can tell a dead path.
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        let builder = builder.tcp_user_timeout(std::time::Duration::from_secs(30));
         Arc::new(
             builder
                 // A single request here is ONE ~512 KB chunk (streaming up/down) or a
@@ -501,6 +731,9 @@ impl BlossomClient {
                 .redirect(safe_redirect_policy())
                 .connect_timeout(std::time::Duration::from_secs(12))
                 .timeout(std::time::Duration::from_secs(40))
+                .tcp_keepalive(std::time::Duration::from_secs(10))
+                .tcp_keepalive_interval(std::time::Duration::from_secs(5))
+                .tcp_keepalive_retries(3)
                 // Recycle idle sockets fast so a half-dead keep-alive connection is
                 // not reused for the next chunk.
                 .pool_idle_timeout(std::time::Duration::from_secs(15))
@@ -696,24 +929,46 @@ impl BlossomClient {
         auth_token: &str,
     ) -> Result<BlobDescriptor, StorageFailure> {
         let url = format!("{server}/upload");
-        let fail = |status: Option<u16>, retry_after: Option<std::time::Duration>, detail: String| {
-            StorageFailure {
-                endpoint: server.to_string(),
-                status,
-                class: status.map(FailureClass::of_status).unwrap_or(FailureClass::Transient),
-                retry_after,
-                detail,
+        let fail = |status, retry_after, detail| StorageFailure::at(server, status, retry_after, detail);
+        let progress = Arc::new(Moved::new());
+        progress.tick();
+        let body = bytes::Bytes::copy_from_slice(data);
+        let len = body.len();
+        let watch = progress.clone();
+        // Pulled by the connection only when the socket took the previous slice.
+        let slices = futures::stream::unfold(0usize, move |at| {
+            let (body, watch) = (body.clone(), watch.clone());
+            async move {
+                watch.tick();
+                if at >= len {
+                    watch.sent.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return None;
+                }
+                let end = (at + PUT_SLICE).min(len);
+                Some((Ok::<_, std::io::Error>(body.slice(at..end)), end))
             }
-        };
-        let response = self
+        });
+        let send = self
             .http
             .put(&url)
+            // The client-wide total would cut a slow chunk; the answer wait below bounds this one.
+            .timeout(std::time::Duration::from_secs(3600))
             .header("Authorization", format!("Nostr {auth_token}"))
             .header("Content-Type", content_type)
-            .body(data.to_vec())
-            .send()
-            .await
-            .map_err(|e| fail(None, None, error_chain(&e)))?;
+            .header(reqwest::header::CONTENT_LENGTH, len)
+            .body(reqwest::Body::wrap_stream(slices))
+            .send();
+        futures::pin_mut!(send);
+        let response = loop {
+            tokio::select! {
+                r = &mut send => break r.map_err(|e| StorageFailure::unreached(server, &e))?,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                    if progress.sent.load(std::sync::atomic::Ordering::Relaxed) && progress.idle() > PUT_ANSWER_WAIT {
+                        return Err(fail(None, None, format!("no answer in {}s", PUT_ANSWER_WAIT.as_secs())));
+                    }
+                }
+            }
+        };
         if !response.status().is_success() {
             let status = response.status().as_u16();
             // `Retry-After` is sometimes seconds; we do not parse dates — a
@@ -727,12 +982,71 @@ impl BlossomClient {
             let body = response.text().await.unwrap_or_default();
             return Err(fail(Some(status), retry_after, body));
         }
-        response
-            .json::<BlobDescriptor>()
+        tokio::time::timeout(PUT_ANSWER_WAIT, response.json::<BlobDescriptor>())
             .await
+            .map_err(|_| fail(None, None, "answer body stalled".into()))?
             // The response could not be parsed — the endpoint answers, but
             // not with this; that is transient on its side, not a missing capability.
             .map_err(|e| fail(None, None, format!("bad response: {e}")))
+    }
+
+    /// BUD-04: the server fetches the blob from `source` itself, so a copy costs the
+    /// phone no upload.
+    async fn mirror_once(&self, server: &str, source: &str, auth_token: &str) -> Result<BlobDescriptor, StorageFailure> {
+        let fail = |status, detail| StorageFailure::at(server, status, None, detail);
+        let response = self
+            .http
+            .put(format!("{server}/mirror"))
+            .header("Authorization", format!("Nostr {auth_token}"))
+            .json(&serde_json::json!({ "url": source }))
+            .send()
+            .await
+            .map_err(|e| fail(None, error_chain(&e)))?;
+        if !response.status().is_success() {
+            return Err(fail(Some(response.status().as_u16()), String::new()));
+        }
+        response.json::<BlobDescriptor>().await.map_err(|e| fail(None, format!("bad response: {e}")))
+    }
+
+    /// A server-side copy of `job` onto `server`. `false`: the server has no `/mirror`
+    /// for it, and the copy needs the phone's bytes ([`Self::upload_copy`]).
+    async fn mirror_to(&self, job: &Replica, server: &str) -> bool {
+        if self.mirror_known(server) == Some(false) {
+            return false;
+        }
+        let cap = StorageCapability::of_content_type(&job.content_type);
+        match self.mirror_once(server, &job.source, &job.auth).await {
+            Ok(_) => {
+                self.note_mirror(server, cap, true);
+                true
+            }
+            Err(f) if f.status.is_some_and(mirror_unsupported) => {
+                self.note_mirror(server, cap, false);
+                false
+            }
+            Err(f) => {
+                self.note_failure(server, cap, &f);
+                debug!("replica refused: {}", f.short());
+                true
+            }
+        }
+    }
+
+    /// A copy of `job` onto `server` from the phone: the landed copy is fetched and uploaded.
+    async fn upload_copy(&self, job: &Replica, server: &str) {
+        let cap = StorageCapability::of_content_type(&job.content_type);
+        let data = match self.download(&job.source).await {
+            Ok(d) if compute_sha256_hex(&d) == job.sha256 => d,
+            _ => return,
+        };
+        let started = std::time::Instant::now();
+        match self.put_once(server, &data, &job.content_type, &job.auth).await {
+            Ok(_) => self.note_success(server, cap, started.elapsed().as_micros() as f64),
+            Err(f) => {
+                self.note_failure(server, cap, &f);
+                debug!("replica refused: {}", f.short());
+            }
+        }
     }
 
     // --- Endpoint choice ---
@@ -770,7 +1084,10 @@ impl BlossomClient {
                 if st.and_then(|x| x.capability(cap)) == Some(false) {
                     return None; // unsuitable for THIS capability
                 }
-                let cooling = st.map(|x| x.cooling(now)).unwrap_or(false);
+                // On a new network one request finds out whether a server is reachable;
+                // the rest go to servers it has already taken a blob from.
+                let probing = st.is_some_and(|x| x.in_flight > 0 && x.ok_on != Some(crate::link::network_epoch()));
+                let cooling = probing || st.map(|x| x.cooling(now)).unwrap_or(false);
                 let known = st.and_then(|x| x.capability(cap)) == Some(true);
                 let latency = st.map(|x| x.ewma_micros as u64).unwrap_or(u64::MAX / 2);
                 // Sort key: non-cooling and confirmed first; the user's own server leads while it works.
@@ -806,6 +1123,23 @@ impl BlossomClient {
 
     /// Diagnostics for tests and reports: (address, capability, latency µs,
     /// consecutive failures, cooling down). Contains no secrets.
+    fn mirror_known(&self, server: &str) -> Option<bool> {
+        self.health.lock().ok().and_then(|h| h.get(server).and_then(|e| e.mirror))
+    }
+
+    fn note_mirror(&self, server: &str, cap: StorageCapability, served: bool) {
+        if let Ok(mut h) = self.health.lock() {
+            let e = h.entry(server.to_string()).or_default();
+            if e.mirror != Some(served) {
+                tracing::warn!(target: "alpha_ffi", "MIRROR host={} served={served}", server.split("://").nth(1).unwrap_or(server));
+            }
+            e.mirror = Some(served);
+            if served {
+                e.set_capability(cap, true);
+            }
+        }
+    }
+
     pub fn health_report(&self) -> Vec<(String, Option<bool>, Option<bool>, u64, u32, bool)> {
         let now = std::time::Instant::now();
         let h = match self.health.lock() {
@@ -818,8 +1152,8 @@ impl BlossomClient {
                 let st = h.get(s).cloned().unwrap_or_default();
                 (
                     s.clone(),
-                    st.chunk_json,
-                    st.manifest_octet,
+                    st.json,
+                    st.octet,
                     st.ewma_micros as u64,
                     st.consecutive_failures,
                     st.cooling(now),
@@ -859,6 +1193,9 @@ impl BlossomClient {
         // the background replicator takes as many as asked.
         // Consecutive chunks take turns over every healthy, confirmed server: one server
         // carrying all of a big file is both its bottleneck and the first to rate-limit.
+        // Ranked once the request may go: a server that failed while this one waited for
+        // its turn is already at the back.
+        let mut turn = Some(crate::link::upload_window().enter().await);
         let ranked = self.eligible_ranked(cap);
         let best = ranked.iter().take_while(|(t, _)| *t == 0).count();
         let mut candidates: Vec<String> = ranked.into_iter().map(|(_, s)| s).collect();
@@ -867,32 +1204,34 @@ impl BlossomClient {
             candidates[..best].rotate_left(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % best);
         }
         if candidates.is_empty() {
-            return Err(MediaError::UploadFailed(
-                "нет ни одной точки, принимающей это представление".into(),
-            ));
+            return Err(MediaError::Refused("no endpoint accepts this representation".into()));
         }
 
         let mut locations: Vec<crate::media_ref::ChunkLocation> = Vec::new();
         let mut landed: Vec<String> = Vec::new();
         let mut last: Option<StorageFailure> = None;
+        let mut refused_by_all = true;
         for server in &candidates {
             if locations.len() >= desired {
                 break;
             }
-            let started = std::time::Instant::now();
-            // A chunk takes a few seconds even on a slow link. A server that holds it
-            // longer is stalling: move on at once rather than wait out the 40 s client
-            // timeout while every other chunk of the file is already sent.
-            let put = match tokio::time::timeout(CHUNK_PUT_TIMEOUT, self.put_once(server, data, content_type, &auth_token)).await {
-                Ok(r) => r,
-                Err(_) => Err(StorageFailure {
-                    endpoint: server.clone(),
-                    status: None,
-                    class: FailureClass::Transient,
-                    retry_after: None,
-                    detail: format!("no answer in {}s", CHUNK_PUT_TIMEOUT.as_secs()),
-                }),
+            let turn = match turn.take() {
+                Some(t) => t,
+                None => crate::link::upload_window().enter().await,
             };
+            let started = std::time::Instant::now();
+            let network = crate::link::network_epoch();
+            // A stalled server is cut by put_once's progress watch; a slow one is let finish.
+            let put = {
+                let _flight = InFlight::begin(&self.health, server);
+                self.put_once(server, data, content_type, &auth_token).await
+            };
+            turn.finish(match &put {
+                Ok(_) => crate::link::Outcome::Delivered,
+                Err(f) if f.status.is_some() => crate::link::Outcome::Answered,
+                Err(f) if f.unreached => crate::link::Outcome::Unreached,
+                Err(_) => crate::link::Outcome::Broken,
+            });
             match put {
                 Ok(d) => {
                     self.note_success(server, cap, started.elapsed().as_micros() as f64);
@@ -907,14 +1246,16 @@ impl BlossomClient {
                     landed.push(server.clone());
                 }
                 Err(f) => {
-                    self.note_failure(server, cap, &f);
-                    // A rights refusal and a missing capability are pointless
-                    // to retry — move to the next endpoint immediately.
+                    // Cut by a network switch, not refused by the server: nothing to learn.
+                    if !(f.unreached && network != crate::link::network_epoch()) {
+                        self.note_failure(server, cap, &f);
+                    }
+                    refused_by_all &= f.is_refusal();
                     // No status = the request never got an answer: say why.
                     if f.status.is_none() {
                         tracing::warn!("STORAGE_FAIL {} cause={}", f.short(), f.detail);
                     } else {
-                        debug!("хранилище отклонило: {}", f.short());
+                        debug!("storage refused: {}", f.short());
                     }
                     last = Some(f);
                 }
@@ -922,29 +1263,26 @@ impl BlossomClient {
         }
 
         if locations.len() < required {
-            let why = last.map(|f| f.short()).unwrap_or_else(|| "точек не осталось".into());
-            return Err(MediaError::UploadFailed(format!(
-                "копий {} из требуемых {} ({why})",
-                locations.len(),
-                required
-            )));
+            let why = last.map(|f| f.short()).unwrap_or_else(|| "no endpoint left".into());
+            let text = format!("{} of {required} copies ({why})", locations.len());
+            return Err(if refused_by_all { MediaError::Refused(text) } else { MediaError::UploadFailed(text) });
         }
-        // Redundancy without making the sender wait: copy the blob to the next
-        // suitable servers in the background. A file on one server is lost the
-        // day that server drops it.
+        // A file on one server is lost the day that server drops it: more copies
+        // follow, once the user's sends leave the link alone.
         if desired == 1 {
-            self.replicate_in_background(&candidates, &landed, data, content_type, &auth_token);
+            self.queue_replicas(&candidates, &landed, &locations[0].url, &sha256_hex, content_type, signer);
         }
         Ok(locations)
     }
 
-    fn replicate_in_background(
+    fn queue_replicas(
         &self,
         candidates: &[String],
         landed: &[String],
-        data: &[u8],
+        source: &str,
+        sha256_hex: &str,
         content_type: &str,
-        auth_token: &str,
+        signer: &MediaSigner,
     ) {
         let targets: Vec<String> = candidates
             .iter()
@@ -952,32 +1290,29 @@ impl BlossomClient {
             .take(BACKGROUND_REPLICAS)
             .cloned()
             .collect();
-        if targets.is_empty() || tokio::runtime::Handle::try_current().is_err() {
+        if targets.is_empty() {
             return;
         }
-        let this = self.clone();
-        let data = data.to_vec();
-        let content_type = content_type.to_string();
-        let auth_token = auth_token.to_string();
-        let cap = StorageCapability::of_content_type(&content_type);
-        tokio::spawn(async move {
-            let Ok(_permit) = replica_slots().acquire().await else { return };
-            for server in targets {
-                let started = std::time::Instant::now();
-                match this.put_once(&server, &data, &content_type, &auth_token).await {
-                    Ok(_) => this.note_success(&server, cap, started.elapsed().as_micros() as f64),
-                    Err(f) => {
-                        this.note_failure(&server, cap, &f);
-                        debug!("replica refused: {}", f.short());
-                    }
-                }
-            }
+        let Ok(auth) = signer.sign_auth_event_for("upload", sha256_hex, REPLICA_AUTH_LIFETIME) else { return };
+        enqueue_replica(Replica {
+            client: self.clone(),
+            source: source.to_string(),
+            sha256: sha256_hex.to_string(),
+            content_type: content_type.to_string(),
+            auth,
+            targets,
+            queued: std::time::Instant::now(),
         });
     }
 
     /// Download a blob from the given URL.
     #[instrument(skip(self))]
     pub async fn download(&self, url: &str) -> MediaResult<Vec<u8>> {
+        self.download_watched(url, &Moved::new()).await
+    }
+
+    /// [`Self::download`] reporting byte movement, so a caller can tell slow from stalled.
+    pub(crate) async fn download_watched(&self, url: &str, moved: &Moved) -> MediaResult<Vec<u8>> {
         // The address came from a foreign MediaRef — untrusted data. Passing
         // it through the policy is MANDATORY and stands here, at the single
         // exit point, so no call can bypass it.
@@ -985,16 +1320,19 @@ impl BlossomClient {
         let url = approved.url.as_str();
         debug!(url = %url, "Downloading blob from Blossom relay");
 
-        let response = self
-            .http
-            .get(url)
-            .send()
+        moved.tick();
+        // The client-wide total would cut a slow chunk; the stall bounds below cut a dead one.
+        let response = tokio::time::timeout(GET_STALL, self.http.get(url).timeout(std::time::Duration::from_secs(3600)).send())
             .await
+            .map_err(|_| MediaError::DownloadFailed(format!("no answer in {}s", GET_STALL.as_secs())))?
             .map_err(|e| MediaError::DownloadFailed(format!("HTTP request failed: {e}")))?;
+        moved.tick();
+        moved.reached.store(true, std::sync::atomic::Ordering::Relaxed);
 
         if !response.status().is_success() {
+            moved.refused.store(true, std::sync::atomic::Ordering::Relaxed);
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = tokio::time::timeout(GET_STALL, response.text()).await.ok().and_then(|r| r.ok()).unwrap_or_default();
             if matches!(status.as_u16(), 404 | 410) {
                 return Err(MediaError::NotOnServer(format!("status {status}")));
             }
@@ -1005,7 +1343,7 @@ impl BlossomClient {
 
         // The body of an untrusted server is read with a limit. `bytes()`
         // would buffer as much as they send — checking length afterwards is too late.
-        Self::read_bounded(response, crate::limits::MAX_MANIFEST_BYTES).await
+        Self::read_bounded(response, crate::limits::MAX_MANIFEST_BYTES, moved).await
     }
 
     /// Delete a blob from the relay by its SHA-256 hash.
@@ -1270,6 +1608,8 @@ mod t2_manifest_probe {
     }
 }
 
+const DISCOVERY_MISS_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Replica-search memory for the client's lifetime.
 ///
 /// Two different quantities that must not be mixed:
@@ -1282,7 +1622,9 @@ mod t2_manifest_probe {
 ///    become an extra request on every one of six hundred chunks.
 #[derive(Default)]
 pub(crate) struct DiscoveryMemory {
-    missing: std::sync::Mutex<std::collections::HashSet<(String, String)>>,
+    /// When a server said it does not hold an object. Trusted only briefly: a fresh
+    /// file's copies reach the other servers seconds after it is published.
+    missing: std::sync::Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
     preferred: std::sync::Mutex<Option<String>>,
 }
 
@@ -1292,7 +1634,7 @@ impl BlossomClient {
         self.discovery
             .missing
             .lock()
-            .map(|m| m.contains(&(server.to_string(), object_id.to_string())))
+            .map(|m| m.get(&(server.to_string(), object_id.to_string())).is_some_and(|t| t.elapsed() < DISCOVERY_MISS_TTL))
             .unwrap_or(false)
     }
 
@@ -1304,7 +1646,7 @@ impl BlossomClient {
             if m.len() > 4096 {
                 m.clear();
             }
-            m.insert((server.to_string(), object_id.to_string()));
+            m.insert((server.to_string(), object_id.to_string()), std::time::Instant::now());
         }
     }
 
@@ -1534,6 +1876,7 @@ impl BlossomClient {
     async fn read_bounded(
         mut response: reqwest::Response,
         limit: u64,
+        moved: &Moved,
     ) -> MediaResult<Vec<u8>> {
         if let Some(declared) = response.content_length() {
             if declared > limit {
@@ -1543,11 +1886,12 @@ impl BlossomClient {
             }
         }
         let mut out: Vec<u8> = Vec::new();
-        while let Some(part) = response
-            .chunk()
+        while let Some(part) = tokio::time::timeout(GET_STALL, response.chunk())
             .await
+            .map_err(|_| MediaError::DownloadFailed(format!("body stalled for {}s", GET_STALL.as_secs())))?
             .map_err(|e| MediaError::DownloadFailed(format!("чтение тела: {e}")))?
         {
+            moved.tick();
             out.extend_from_slice(&part);
             if out.len() as u64 > limit {
                 return Err(MediaError::DownloadFailed(format!(
@@ -1556,5 +1900,168 @@ impl BlossomClient {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod replica_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    type Seen = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
+    /// A store that records every request line with its body and serves `blobs`;
+    /// `mirror` says whether it has BUD-04 `/mirror`.
+    async fn store(blobs: Vec<(String, Vec<u8>)>, mirror: bool) -> (String, Seen) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen: Seen = Default::default();
+        let (log, url) = (seen.clone(), base.clone());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let (log, blobs, url) = (log.clone(), blobs.clone(), url.clone());
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 8192];
+                    let head_end = loop {
+                        let n = sock.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break p + 4;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                    let len = head
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .unwrap_or(0);
+                    while buf.len() < head_end + len {
+                        let n = sock.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let body = buf[head_end..].to_vec();
+                    let mut words = head.split_whitespace();
+                    let line = format!("{} {}", words.next().unwrap_or(""), words.next().unwrap_or(""));
+                    log.lock().unwrap().push((line.clone(), body.clone()));
+                    let (status, out) = match line.as_str() {
+                        "PUT /mirror" if mirror => ("200 OK", descriptor(&url, b"")),
+                        "PUT /mirror" => ("404 Not Found", Vec::new()),
+                        "PUT /upload" => ("200 OK", descriptor(&url, &body)),
+                        get => match blobs.iter().find(|(id, _)| get == format!("GET /{id}")) {
+                            Some((_, b)) => ("200 OK", b.clone()),
+                            None => ("404 Not Found", Vec::new()),
+                        },
+                    };
+                    let mut resp = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", out.len()).into_bytes();
+                    resp.extend_from_slice(&out);
+                    let _ = sock.write_all(&resp).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (base, seen)
+    }
+
+    fn descriptor(base: &str, body: &[u8]) -> Vec<u8> {
+        let sha = compute_sha256_hex(body);
+        serde_json::json!({ "url": format!("{base}/{sha}"), "sha256": sha, "size": body.len(), "uploaded": 0 })
+            .to_string()
+            .into_bytes()
+    }
+
+    fn job(client: &BlossomClient, source: &str, blob: &[u8], target: &str) -> Replica {
+        let sha = compute_sha256_hex(blob);
+        Replica {
+            client: client.clone(),
+            source: format!("{source}/{sha}"),
+            auth: MediaSigner::generate().sign_auth_event_for("upload", &sha, REPLICA_AUTH_LIFETIME).unwrap(),
+            sha256: sha,
+            content_type: "application/json".into(),
+            targets: vec![target.to_string()],
+            queued: Instant::now(),
+        }
+    }
+
+    fn lines(seen: &Seen) -> Vec<String> {
+        seen.lock().unwrap().iter().map(|(l, _)| l.clone()).collect()
+    }
+
+    async fn wait_for(seen: &Seen, line: &str, within: Duration) -> bool {
+        let until = Instant::now() + within;
+        while Instant::now() < until {
+            if lines(seen).iter().any(|l| l == line) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    #[test]
+    fn an_unproven_server_takes_one_request_at_a_time() {
+        let (a, b) = ("https://a.example".to_string(), "https://b.example".to_string());
+        let client = BlossomClient::with_servers(&[a.clone(), b.clone()]).listed_only();
+        let order = |c: &BlossomClient| -> Vec<String> {
+            c.eligible_ranked(StorageCapability::Octet).into_iter().map(|(_, s)| s).collect()
+        };
+        assert_eq!(order(&client), [a.clone(), b.clone()]);
+        client.health.lock().unwrap().entry(a.clone()).or_default().in_flight = 1;
+        assert_eq!(order(&client), [b.clone(), a.clone()], "a server still being probed waits");
+        client.health.lock().unwrap().get_mut(&a).unwrap().ok_on = Some(crate::link::network_epoch());
+        assert_eq!(order(&client), [a, b], "a server that took a blob on this network takes more");
+    }
+
+    #[test]
+    fn a_server_this_network_cannot_reach_goes_last_until_the_network_changes() {
+        let mut e = EndpointState::default();
+        let now = Instant::now();
+        let f = StorageFailure { unreached: true, ..StorageFailure::at("https://x", None, None, String::new()) };
+        e.note_failure(StorageCapability::Json, &f, now);
+        assert!(e.cooling(now + Duration::from_secs(300)));
+        assert!(!e.cooling(now + UNREACHED_COOLDOWN + Duration::from_secs(1)));
+        e.unreached_on = Some(crate::link::network_epoch().wrapping_sub(1));
+        assert!(!e.cooling(now), "a server unreachable on the previous network gets its turn again");
+    }
+
+    #[tokio::test]
+    async fn server_side_copies_go_while_the_user_uploads() {
+        let blob = b"{\"chunk\":1}".to_vec();
+        let (target, seen) = store(Vec::new(), true).await;
+        let client = BlossomClient::with_servers(&[target.clone()]).listed_only();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(replicate(rx));
+        let _sending = crate::link::upload_window().enter().await;
+        tx.send(job(&client, "http://127.0.0.1:9", &blob, &target)).unwrap_or_else(|_| panic!("worker gone"));
+        assert!(wait_for(&seen, "PUT /mirror", Duration::from_secs(2)).await, "no server-side copy: {:?}", lines(&seen));
+        assert_eq!(client.mirror_known(&target), Some(true));
+    }
+
+    #[tokio::test]
+    async fn copies_from_the_phone_wait_for_a_quiet_link() {
+        let blob = b"{\"chunk\":2}".to_vec();
+        let (source, _) = store(vec![(compute_sha256_hex(&blob), blob.clone())], false).await;
+        let (target, seen) = store(Vec::new(), false).await;
+        let client = BlossomClient::with_servers(&[source.clone(), target.clone()]).listed_only();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(replicate(rx));
+        let sending = crate::link::upload_window().enter().await;
+        tx.send(job(&client, &source, &blob, &target)).unwrap_or_else(|_| panic!("worker gone"));
+        assert!(wait_for(&seen, "PUT /mirror", Duration::from_secs(2)).await, "no /mirror attempt: {:?}", lines(&seen));
+        tokio::time::sleep(REPLICA_QUIET + Duration::from_secs(1)).await;
+        assert!(!lines(&seen).iter().any(|l| l == "PUT /upload"), "bytes went out during the user's upload");
+        drop(sending);
+        assert!(wait_for(&seen, "PUT /upload", Duration::from_secs(20)).await, "no copy once the link went quiet");
+        let uploaded = seen.lock().unwrap().iter().find(|(l, _)| l == "PUT /upload").map(|(_, b)| b.clone());
+        assert_eq!(uploaded, Some(blob));
+        assert_eq!(client.mirror_known(&target), Some(false));
     }
 }

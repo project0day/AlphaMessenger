@@ -96,6 +96,8 @@ data class MediaSendItem(
      * whole album on every restart.
      */
     val uploadedRef: String? = null,
+    /** The key of a pre-upload made for this item while the set was composed; see [MediaPreUpload]. */
+    val preUploadKey: String? = null,
 ) {
     val isVideo: Boolean get() = draft.isVideo
     val mediaType: String get() = if (isVideo) "video" else "image"
@@ -278,6 +280,7 @@ internal object MediaSendJson {
         put("revision", item.editRevision)
         put("ready", item.ready)
         item.uploadedRef?.let { put("uploaded_ref", it) }
+        item.preUploadKey?.let { put("pre_upload_key", it) }
         put("draft", draftToJson(item.draft))
     }
 
@@ -290,6 +293,7 @@ internal object MediaSendJson {
             editRevision = o.optLong("revision"),
             ready = o.optBoolean("ready", false),
             uploadedRef = o.optString("uploaded_ref", "").takeIf { it.isNotEmpty() },
+            preUploadKey = o.optString("pre_upload_key", "").takeIf { it.isNotEmpty() },
         )
     }
 

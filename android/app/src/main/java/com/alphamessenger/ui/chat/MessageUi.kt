@@ -151,6 +151,8 @@ data class ReplyInfo(
     /** Quoted media kind: "image"|"video"|"audio"|"voice"|"file"|"album"|null.
      *  Drives the right-side icon tile when there's no image thumbnail. */
     val kind: String? = null,
+    /** A quoted file's name: its line and its type icon. */
+    val fileName: String? = null,
 )
 
 enum class MessageStatus { SENDING, SENT, DELIVERED, READ }
@@ -469,7 +471,9 @@ fun MessageInfo.toMessageUi(ownId: String, labels: MessageUiLabels): MessageUi {
     // flag them so replies/quotes can say "Voice message" instead of "Music".
     val isVoiceNote = resolvedMediaType == "audio" && (resolvedFilename?.startsWith("voice") == true)
     val resolvedSize = mediaJson?.optLong("original_size", 0L)?.takeIf { it > 0L }
-    val resolvedLocalPath = mediaJson?.optString("local_path")?.takeIf { isOwn && it.isNotBlank() }
+    // A path is trusted only where this phone wrote it: own messages, and what the assistant made in its local chat.
+    val localWriter = isOwn || (senderId == "assistant" && chatId.startsWith("assistant:"))
+    val resolvedLocalPath = mediaJson?.optString("local_path")?.takeIf { localWriter && it.isNotBlank() }
     val resolvedPending = mediaJson?.optBoolean("pending", false) ?: false
     val resolvedPoster = mediaJson?.optString("poster_b64")?.takeIf { it.isNotBlank() }
     // Sender-measured display metadata, carried inside the ref (the sender is the
@@ -628,6 +632,7 @@ fun List<MessageInfo>.foldToBubbles(ownId: String, labels: MessageUiLabels): Lis
                 var qKind: String? = null
                 var qAllVideo = false
                 var qAllImage = false
+                var qFile: String? = null
                 if (quoted != null && quoted.msgType == MessageType.MEDIA) {
                     val mj = quoted.mediaRef?.let { runCatching { org.json.JSONObject(it) }.getOrNull() }
                     val isAlbum = mj?.optBoolean("album", false) == true
@@ -636,6 +641,7 @@ fun List<MessageInfo>.foldToBubbles(ownId: String, labels: MessageUiLabels): Lis
                         val mt = node.optString("media_type", "image")
                         val fn = node.optString("filename", "")
                         qIsVideo = mt == "video"
+                        if (mt == "file") qFile = fn.takeIf { it.isNotBlank() }
                         qPoster = node.optString("poster_b64", "").takeIf { it.isNotBlank() }
                         qThumb = node.optString("local_path", "").takeIf { it.isNotBlank() && (mt == "image" || mt == "video") }
                             // Received pictures: the downloaded copy, found by its content hash.
@@ -669,6 +675,7 @@ fun List<MessageInfo>.foldToBubbles(ownId: String, labels: MessageUiLabels): Lis
                     val icon = inlineQuote?.substringBefore(' ')?.takeIf { it.isNotBlank() && it.first().code > 0x2000 }
                     if (icon != null) "$icon $cap" else cap
                 }
+                    ?: qFile
                     ?: inlineQuote
                     ?: quoted?.content?.takeIf { it.isNotBlank() }
                     ?: qKind?.let { labels.mediaKind(it, qAllVideo, qAllImage) }
@@ -686,8 +693,8 @@ fun List<MessageInfo>.foldToBubbles(ownId: String, labels: MessageUiLabels): Lis
                         senderId = quoted?.senderId?.takeIf { it.isNotBlank() && it != "self" && it != ownId },
                         // A quote is one plain line: the formatting markers are not its words.
                         // A fragment of the message (not its start) is marked as a quote.
-                        text = com.alphamessenger.ui.chat.text.Markup.plain(quotedText).take(80).let { t ->
-                            val whole = quoted?.content?.let { com.alphamessenger.ui.chat.text.Markup.plain(it).trim() }.orEmpty()
+                        text = com.alphamessenger.ui.chat.text.Markup.plain(quotedText.replace(FWD_MARK, "")).take(80).let { t ->
+                            val whole = quoted?.content?.let { com.alphamessenger.ui.chat.text.Markup.plain(it.removePrefix(FWD_MARK)).trim() }.orEmpty()
                             val part = inlineQuote?.trim().orEmpty()
                             if (part.isNotEmpty() && whole.length > part.length && !whole.startsWith(part) && whole.contains(part)) "❝ $t" else t
                         },
@@ -695,6 +702,7 @@ fun List<MessageInfo>.foldToBubbles(ownId: String, labels: MessageUiLabels): Lis
                         thumbPath = qThumb,
                         isVideoQuote = qIsVideo,
                         kind = qKind,
+                        fileName = qFile,
                     ),
                     quotedMessageId = quotedId,
                 )

@@ -116,6 +116,21 @@ object MediaOutputFactory {
         done
     }
 
+    /** Whether producing [item] re-encodes its video: a long, heavy job, not a copy or a rewrap. */
+    suspend fun reencodes(
+        context: Context,
+        item: MediaSendItem,
+        maxEdge: Int,
+        quality: Int,
+        policy: MediaExportPolicy,
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (!item.isVideo) return@withContext false
+        val meta = SourceProbe.read(context, item.draft.uri)
+            .let { if (it.durationMs <= 0L) it.copy(durationMs = item.draft.durationMs) else it }
+        MediaExportPlanner.plan(meta, MediaEditSpec.of(item.draft, maxEdge, quality), policy).route ==
+            com.alphamessenger.ui.media.export.ExportRoute.TRANSCODE
+    }
+
     /** What to expect from the finished file. Empty — nothing to check (photo). */
     data class Expectation(
         val durationMs: Long = 0L,

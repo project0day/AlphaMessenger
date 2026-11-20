@@ -382,13 +382,15 @@ pub fn active_codec() -> &'static dyn BlobEnvelopeCodec {
 //
 // v1 exposed `chunk`, `total`, `alg` and the exact ciphertext length in clear
 // JSON: a server learned file sizes (and so photo vs video) and could recognise
-// the app by the field set. v2 is `{"d":"<base64>"}` where the payload is
-// `0x02 || masked_len(4) || ciphertext || zero padding` to ONE fixed size.
-// The length is masked with a keystream derived from the media key and the chunk
-// index, so only holders of the key can strip the padding; reordering is still
-// caught by the per-index AEAD nonce. Encoding stays deterministic (stable
-// content ids for dedup and resume). The JSON shell is kept because public
-// Blossom servers only accept application/json (raw bytes → 415).
+// the app by the field set. A v2 chunk is `0x02 || masked_len(4) || ciphertext ||
+// zero padding` to ONE fixed size: to a server, the same count of random bytes
+// for every chunk of every file. The length is masked with a keystream derived
+// from the media key and the chunk index, so only holders of the key can strip
+// the padding; reordering is still caught by the per-index AEAD nonce. Encoding
+// is deterministic (stable content ids for dedup and resume).
+//
+// It is stored as raw bytes. Chunks stored before 2026-11-20 carry the same body in
+// a `{"d":"<base64>"}` shell (a third larger), and still read.
 
 const WIRE_V2: u8 = 2;
 const WIRE_V2_HEADER: usize = 1 + 4;
@@ -403,6 +405,9 @@ fn length_mask(media_key: &[u8; 32], index: u32) -> [u8; 4] {
     m.copy_from_slice(&h.as_bytes()[..4]);
     m
 }
+
+/// How a chunk is declared to storage: opaque bytes, whatever the file inside.
+pub const CHUNK_CONTENT_TYPE: &str = "application/octet-stream";
 
 /// Wrap one chunk ciphertext for storage (wire v2).
 pub fn wrap_chunk(media_key: &[u8; 32], index: u32, ciphertext: &[u8]) -> MediaResult<Vec<u8>> {
@@ -422,7 +427,7 @@ pub fn wrap_chunk(media_key: &[u8; 32], index: u32, ciphertext: &[u8]) -> MediaR
     body.extend_from_slice(ciphertext);
     body.resize(size, 0);
     M_ENCODED.fetch_add(1, Ordering::Relaxed);
-    Ok(format!("{{\"d\":\"{}\"}}", b64_encode(&body)).into_bytes())
+    Ok(body)
 }
 
 #[derive(Deserialize)]
@@ -431,12 +436,25 @@ struct WireV2 {
     d: String,
 }
 
+/// A raw v2 body is told apart by its first byte and one of the sizes v2 pads to:
+/// a JSON shell starts with `{`, and a legacy raw ciphertext is never padded.
+fn is_v2_body(blob: &[u8]) -> bool {
+    blob.first() == Some(&WIRE_V2)
+        && (blob.len() == WIRE_V2_BODY || (blob.len() > WIRE_V2_BODY && blob.len() % 65536 == 0))
+}
+
 fn try_unwrap_v2(blob: &[u8], media_key: &[u8; 32], index: u32) -> Option<Vec<u8>> {
     if blob.len() > limits::MAX_ENCODED_BLOB {
         return None;
     }
+    if is_v2_body(blob) {
+        return open_v2(blob, media_key, index);
+    }
     let w: WireV2 = serde_json::from_slice(blob).ok()?;
-    let body = b64_decode(&w.d, "d").ok()?;
+    open_v2(&b64_decode(&w.d, "d").ok()?, media_key, index)
+}
+
+fn open_v2(body: &[u8], media_key: &[u8; 32], index: u32) -> Option<Vec<u8>> {
     if body.len() < WIRE_V2_HEADER || body[0] != WIRE_V2 {
         return None;
     }
@@ -454,7 +472,7 @@ fn try_unwrap_v2(blob: &[u8], media_key: &[u8; 32], index: u32) -> Option<Vec<u8
     Some(body[WIRE_V2_HEADER..end].to_vec())
 }
 
-/// Unwrap a downloaded chunk: wire v2 first, then v1 / legacy raw blobs.
+/// Unwrap a downloaded chunk: wire v2 (raw or in its JSON shell), then v1 / legacy raw blobs.
 pub fn unwrap_chunk(blob: Vec<u8>, media_key: &[u8; 32], index: u32) -> Vec<u8> {
     match try_unwrap_v2(&blob, media_key, index) {
         Some(ct) => ct,
@@ -485,22 +503,39 @@ mod tests {
         (0..n).map(|i| (i % 251) as u8).collect()
     }
 
+    fn json_shell(body: &[u8]) -> Vec<u8> {
+        format!("{{\"d\":\"{}\"}}", b64_encode(body)).into_bytes()
+    }
+
     #[test]
     fn wire_v2_roundtrip_fixed_size_and_featureless() {
         let key = [7u8; 32];
         let small = wrap_chunk(&key, 0, &ct(100)).unwrap();
         let full = wrap_chunk(&key, 5, &ct(crate::crypto::STREAM_CHUNK_SIZE + 16)).unwrap();
         assert_eq!(small.len(), full.len(), "all chunks must look the same size");
-        let text = String::from_utf8(small.clone()).unwrap();
-        assert!(text.starts_with("{\"d\":\""));
-        for leak in ["chunk", "total", "alg", "crc"] {
-            assert!(!text.contains(leak));
-        }
+        assert_eq!(small.len(), WIRE_V2_BODY, "raw bytes, no base64 shell");
+        // Past the version byte, only the masked length and the ciphertext: no field names, no size.
+        assert!(!small.windows(5).any(|w| w == b"chunk" || w == b"total"));
         assert_eq!(unwrap_chunk(small.clone(), &key, 0), ct(100));
         assert_eq!(unwrap_chunk(full, &key, 5), ct(crate::crypto::STREAM_CHUNK_SIZE + 16));
         assert_eq!(wrap_chunk(&key, 0, &ct(100)).unwrap(), small, "deterministic");
         // Wrong key / index can't recover the length → not this chunk's data.
         assert_ne!(unwrap_chunk(small.clone(), &[8u8; 32], 0), ct(100));
+    }
+
+    #[test]
+    fn chunks_stored_in_the_json_shell_still_read() {
+        let key = [3u8; 32];
+        let body = wrap_chunk(&key, 4, &ct(5000)).unwrap();
+        assert_eq!(unwrap_chunk(json_shell(&body), &key, 4), ct(5000));
+    }
+
+    #[test]
+    fn legacy_raw_ciphertext_is_never_taken_for_a_v2_body() {
+        let key = [3u8; 32];
+        let mut legacy = ct(crate::crypto::STREAM_CHUNK_SIZE + 16);
+        legacy[0] = WIRE_V2;
+        assert_eq!(unwrap_chunk(legacy.clone(), &key, 0), legacy);
     }
 
     #[test]

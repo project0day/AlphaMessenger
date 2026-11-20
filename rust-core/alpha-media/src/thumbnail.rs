@@ -146,6 +146,40 @@ impl ThumbnailGenerator {
     }
 }
 
+/// The same picture as a smaller JPEG whose base64 fits `limit`, at the largest size that
+/// does (the smallest tried if none does); `None` if `b64` is not an image.
+pub fn fit_poster_b64(b64: &str, limit: usize) -> Option<String> {
+    use base64::Engine;
+    let codec = base64::engine::general_purpose::STANDARD;
+    if b64.len() <= limit {
+        return Some(b64.to_string());
+    }
+    let img = image::load_from_memory(&codec.decode(b64).ok()?).ok()?;
+    let edge = img.width().max(img.height());
+    let mut smallest = None;
+    let mut last_edge = 0;
+    for max in [256u32, 200, 160, 128, 96, 72, 56, 40] {
+        let max = max.min(edge);
+        if max == last_edge {
+            continue;
+        }
+        last_edge = max;
+        let small = img.thumbnail(max, max).to_rgb8();
+        for quality in [60u8, 40] {
+            let mut jpeg = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality)
+                .encode(small.as_raw(), small.width(), small.height(), image::ExtendedColorType::Rgb8)
+                .ok()?;
+            let out = codec.encode(&jpeg);
+            if out.len() <= limit {
+                return Some(out);
+            }
+            smallest = Some(out);
+        }
+    }
+    smallest
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

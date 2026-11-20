@@ -1445,6 +1445,12 @@ internal open class UniffiVTableCallbackInterfaceAlphaMessengerCallback(
 
 
 
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1607,6 +1613,8 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_direct_chat_exists(`ptr`: Pointer,`npubOrHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_discard_pre_upload(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,`opId`: RustBuffer.ByValue,`filePath`: RustBuffer.ByValue,`refJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_download_backup(`ptr`: Pointer,`blobUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_download_media(`ptr`: Pointer,`mediaRefJson`: RustBuffer.ByValue,`outputPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1699,8 +1707,10 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_insert_assistant_media(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,`filePath`: RustBuffer.ByValue,`mediaType`: RustBuffer.ByValue,`caption`: RustBuffer.ByValue,`metaJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_alpha_ffi_fn_method_alphamessengercore_insert_assistant_message(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_insert_assistant_message(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`id`: RustBuffer.ByValue,`replyTo`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_insert_assistant_reaction(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,`targetId`: RustBuffer.ByValue,`emoji`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_inspect_backup(`ptr`: Pointer,`container`: RustBuffer.ByValue,`password`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_is_chat_request(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1811,6 +1821,8 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_poll_vote(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,`pollId`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_pre_upload_media(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,`opId`: RustBuffer.ByValue,`filePath`: RustBuffer.ByValue,`mediaType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_presence_arm(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_presence_capabilities(`ptr`: Pointer,`userId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2325,6 +2337,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_direct_chat_exists(
     ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_discard_pre_upload(
+    ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_download_backup(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_download_media(
@@ -2418,6 +2432,8 @@ internal interface UniffiLib : Library {
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_insert_assistant_media(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_insert_assistant_message(
+    ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_insert_assistant_reaction(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_inspect_backup(
     ): Short
@@ -2528,6 +2544,8 @@ internal interface UniffiLib : Library {
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_poll_results(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_poll_vote(
+    ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_pre_upload_media(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_presence_arm(
     ): Short
@@ -3046,6 +3064,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_direct_chat_exists() != 9669.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_discard_pre_upload() != 31612.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_download_backup() != 13108.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3184,7 +3205,10 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_insert_assistant_media() != 403.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_insert_assistant_message() != 43547.toShort()) {
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_insert_assistant_message() != 11929.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_insert_assistant_reaction() != 49951.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_inspect_backup() != 62271.toShort()) {
@@ -3350,6 +3374,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_poll_vote() != 40216.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_pre_upload_media() != 14942.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_presence_arm() != 20522.toShort()) {
@@ -4343,6 +4370,11 @@ public interface AlphaMessengerCoreInterface {
     
     fun `directChatExists`(`npubOrHex`: kotlin.String): kotlin.Boolean
     
+    /**
+     * Stop a pre-upload no message used, and delete what of it reached the servers.
+     */
+    fun `discardPreUpload`(`chatId`: kotlin.String, `opId`: kotlin.String, `filePath`: kotlin.String, `refJson`: kotlin.String)
+    
     fun `downloadBackup`(`blobUrl`: kotlin.String): kotlin.ByteArray
     
     fun `downloadMedia`(`mediaRefJson`: kotlin.String, `outputPath`: kotlin.String)
@@ -4435,7 +4467,9 @@ public interface AlphaMessengerCoreInterface {
     
     fun `insertAssistantMedia`(`chatId`: kotlin.String, `filePath`: kotlin.String, `mediaType`: kotlin.String, `caption`: kotlin.String?, `metaJson`: kotlin.String?): kotlin.String
     
-    fun `insertAssistantMessage`(`chatId`: kotlin.String, `body`: kotlin.String, `id`: kotlin.String?): kotlin.String
+    fun `insertAssistantMessage`(`chatId`: kotlin.String, `body`: kotlin.String, `id`: kotlin.String?, `replyTo`: kotlin.String?): kotlin.String
+    
+    fun `insertAssistantReaction`(`chatId`: kotlin.String, `targetId`: kotlin.String, `emoji`: kotlin.String)
     
     fun `inspectBackup`(`container`: kotlin.ByteArray, `password`: kotlin.String): kotlin.String
     
@@ -4546,6 +4580,11 @@ public interface AlphaMessengerCoreInterface {
     fun `pollResults`(`chatId`: kotlin.String, `pollId`: kotlin.String): kotlin.String
     
     fun `pollVote`(`chatId`: kotlin.String, `pollId`: kotlin.String, `options`: List<kotlin.UInt>)
+    
+    /**
+     * Upload a file of a message still being composed, over the chat's own route.
+     */
+    fun `preUploadMedia`(`chatId`: kotlin.String, `opId`: kotlin.String, `filePath`: kotlin.String, `mediaType`: kotlin.String): kotlin.String
     
     fun `presenceArm`()
     
@@ -5713,6 +5752,20 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     
 
     
+    /**
+     * Stop a pre-upload no message used, and delete what of it reached the servers.
+     */override fun `discardPreUpload`(`chatId`: kotlin.String, `opId`: kotlin.String, `filePath`: kotlin.String, `refJson`: kotlin.String)
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_discard_pre_upload(
+        it, FfiConverterString.lower(`chatId`),FfiConverterString.lower(`opId`),FfiConverterString.lower(`filePath`),FfiConverterString.lower(`refJson`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(MessengerException::class)override fun `downloadBackup`(`blobUrl`: kotlin.String): kotlin.ByteArray {
             return FfiConverterByteArray.lift(
     callWithPointer {
@@ -6289,16 +6342,28 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     
 
     
-    @Throws(MessengerException::class)override fun `insertAssistantMessage`(`chatId`: kotlin.String, `body`: kotlin.String, `id`: kotlin.String?): kotlin.String {
+    @Throws(MessengerException::class)override fun `insertAssistantMessage`(`chatId`: kotlin.String, `body`: kotlin.String, `id`: kotlin.String?, `replyTo`: kotlin.String?): kotlin.String {
             return FfiConverterString.lift(
     callWithPointer {
     uniffiRustCallWithError(MessengerException) { _status ->
     UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_insert_assistant_message(
-        it, FfiConverterString.lower(`chatId`),FfiConverterString.lower(`body`),FfiConverterOptionalString.lower(`id`),_status)
+        it, FfiConverterString.lower(`chatId`),FfiConverterString.lower(`body`),FfiConverterOptionalString.lower(`id`),FfiConverterOptionalString.lower(`replyTo`),_status)
 }
     }
     )
     }
+    
+
+    
+    @Throws(MessengerException::class)override fun `insertAssistantReaction`(`chatId`: kotlin.String, `targetId`: kotlin.String, `emoji`: kotlin.String)
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(MessengerException) { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_insert_assistant_reaction(
+        it, FfiConverterString.lower(`chatId`),FfiConverterString.lower(`targetId`),FfiConverterString.lower(`emoji`),_status)
+}
+    }
+    
     
 
     
@@ -6981,6 +7046,22 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
 }
     }
     
+    
+
+    
+    /**
+     * Upload a file of a message still being composed, over the chat's own route.
+     */
+    @Throws(MessengerException::class)override fun `preUploadMedia`(`chatId`: kotlin.String, `opId`: kotlin.String, `filePath`: kotlin.String, `mediaType`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCallWithError(MessengerException) { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_pre_upload_media(
+        it, FfiConverterString.lower(`chatId`),FfiConverterString.lower(`opId`),FfiConverterString.lower(`filePath`),FfiConverterString.lower(`mediaType`),_status)
+}
+    }
+    )
+    }
     
 
     override fun `presenceArm`()
@@ -9419,6 +9500,14 @@ sealed class MessengerException: kotlin.Exception() {
             get() = ""
     }
     
+    class MediaRefused(
+        
+        val `description`: kotlin.String
+        ) : MessengerException() {
+        override val message
+            get() = "description=${ `description` }"
+    }
+    
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<MessengerException> {
         override fun lift(error_buf: RustBuffer.ByValue): MessengerException = FfiConverterTypeMessengerError.lift(error_buf)
@@ -9455,6 +9544,9 @@ public object FfiConverterTypeMessengerError : FfiConverterRustBuffer<MessengerE
                 )
             7 -> MessengerException.MediaGone()
             8 -> MessengerException.MediaUnknownServer()
+            9 -> MessengerException.MediaRefused(
+                FfiConverterString.read(buf),
+                )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -9499,6 +9591,11 @@ public object FfiConverterTypeMessengerError : FfiConverterRustBuffer<MessengerE
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
+            is MessengerException.MediaRefused -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`description`)
+            )
         }
     }
 
@@ -9540,6 +9637,11 @@ public object FfiConverterTypeMessengerError : FfiConverterRustBuffer<MessengerE
             }
             is MessengerException.MediaUnknownServer -> {
                 buf.putInt(8)
+                Unit
+            }
+            is MessengerException.MediaRefused -> {
+                buf.putInt(9)
+                FfiConverterString.write(value.`description`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

@@ -53,6 +53,8 @@ impl AlphaMessengerCore {
             let conn = self.db.connection();
             let _ = KeyValueRepo::set(&conn, KV_CLAIM_AT, &at.to_string());
             let _ = KeyValueRepo::delete(&conn, KV_REPLACED_AT);
+            // A fresh pool at the next start, and with it the sweep of the replaced install's KeyPackages.
+            let _ = conn.execute("DELETE FROM key_value_store WHERE key LIKE 'last_published_keypackage_at:%'", []);
         }
         let body = serde_json::json!({ "sig": sig, "install": install, "at": at }).to_string();
         let content = alpha_transport::sealed::seal(&key, &CLAIM_AAD, body.as_bytes())
@@ -103,6 +105,34 @@ impl AlphaMessengerCore {
         }
         let _ = self.stop_sync();
         at
+    }
+
+    /// KeyPackages under our key that this phone cannot open (consumed, or left by an
+    /// install that was erased or moved) are withdrawn: whoever picks one sends a
+    /// Welcome nobody can read. Runs on the read-back that follows each pool publish,
+    /// so it costs no query of its own. Returns how many we hold.
+    pub(super) fn sweep_own_key_packages(&self, keys: &nostr::Keys, events: &[nostr::Event]) -> usize {
+        let (held, dead): (usize, Vec<nostr::EventId>) = {
+            let Ok(mls) = self.mls_session.lock() else { return 0 };
+            let mut held = 0usize;
+            let mut dead = Vec::new();
+            for e in events {
+                let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, e.content.trim()) else { continue };
+                match mls.holds_key_package(&bytes) {
+                    Some(true) => held += 1,
+                    Some(false) => dead.push(e.id),
+                    None => {}
+                }
+            }
+            (held, dead)
+        };
+        // Phones of ours linked to each other publish under the same key: theirs are not ours to withdraw.
+        if !dead.is_empty() && !alpha_database::devices::linked() {
+            let bridge = NostrMlsBridge::new((*self.transport).clone());
+            let sent = runtime().block_on(bridge.withdraw_key_packages(keys, &dead));
+            tracing::info!(target: "ACCOUNT", "KeyPackages under our key: {held} held, {} withdrawn (relays: {sent})", dead.len());
+        }
+        held
     }
 
     pub(super) fn replaced_at_kv(&self) -> Option<i64> {

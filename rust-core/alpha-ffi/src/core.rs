@@ -952,14 +952,16 @@ fn net_switches() -> &'static NetSwitches {
     static SW: std::sync::OnceLock<NetSwitches> = std::sync::OnceLock::new();
     SW.get_or_init(|| {
         let rt = runtime();
+        let opened = |what: &str, r: std::io::Result<std::net::SocketAddr>| {
+            r.map_err(|e| tracing::warn!("NET_SWITCH {what} listener: {e}")).ok()
+        };
         let start = |what: &str, allow: fn(&std::net::IpAddr) -> bool| {
-            rt.block_on(alpha_transport::net_switch::start(allow))
-                .map_err(|e| tracing::warn!("NET_SWITCH {what} listener: {e}")).ok()
+            opened(what, rt.block_on(alpha_transport::net_switch::start(allow)))
         };
         NetSwitches {
             relay: start("relay", |_| true),
             groups: start("groups", |_| true),
-            media: start("media", alpha_media::egress::resolved_allowed),
+            media: opened("media", rt.block_on(alpha_transport::net_switch::start_transfers(alpha_media::egress::resolved_allowed))),
         }
     })
 }
@@ -1086,6 +1088,9 @@ pub enum MessengerError {
     /// The file is only on a server the sender named; reached only through Tor.
     #[error("Media is only on an unknown server")]
     MediaUnknownServer,
+    /// Every media server turned the upload down (rights, policy, format): retrying will not help.
+    #[error("Media refused: {description}")]
+    MediaRefused { description: String },
 }
 
 /// A failed download, with "the copies are gone" kept apart from network faults.
@@ -6734,9 +6739,17 @@ impl AlphaMessengerCore {
             .unwrap_or_else(|_| "offline".to_string())
     }
 
-    /// A peer's `last_seen` unix seconds (0 = unknown).
+    /// A peer's `last_seen` unix seconds (0 = unknown). Kept in the database, so it
+    /// outlives a restart; written only when it moved by a minute or more.
     pub fn presence_last_seen(&self, user_id: String) -> i64 {
-        self.presence.lock().map(|p| p.last_seen(&user_id)).unwrap_or(0)
+        let live = self.presence.lock().map(|p| p.last_seen(&user_id)).unwrap_or(0);
+        let key = format!("presence_seen:{user_id}");
+        let conn = self.db.connection();
+        let kept = KeyValueRepo::get(&conn, &key).ok().flatten().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        if live >= kept + 60 {
+            let _ = KeyValueRepo::set(&conn, &key, &live.to_string());
+        }
+        live.max(kept)
     }
 
     /// A peer's custom text status ("" = none) — what their profile lets us see.
@@ -8227,6 +8240,12 @@ impl AlphaMessengerCore {
     /// encrypted with the media key and uploaded as one blob — so the Nostr event
     /// size becomes independent of the file size / chunk count.
     fn externalize_ref_if_large(&self, media_ref: &MediaRef) -> Result<MediaRef, MessengerError> {
+        self.externalize_ref(media_ref, false)
+    }
+
+    /// [`Self::externalize_ref_if_large`], or unconditionally with `force` (a message's
+    /// media over its wire budget).
+    fn externalize_ref(&self, media_ref: &MediaRef, force: bool) -> Result<MediaRef, MessengerError> {
         use sha2::Digest;
         // NEVER re-externalize an ALREADY-slim external-manifest ref. Wrapping it in a
         // new manifest would store the SLIM ref (chunks=None, blob_urls=[]) inside; the
@@ -8242,31 +8261,29 @@ impl AlphaMessengerCore {
         const MAX_INLINE_REF_SIZE: usize = 16 * 1024;
         let full_json = serde_json::to_string(media_ref)
             .map_err(|e| MessengerError::InternalError { description: format!("manifest serialize: {e}") })?;
-        if full_json.len() <= MAX_INLINE_REF_SIZE {
+        if !force && full_json.len() <= MAX_INLINE_REF_SIZE {
             return Ok(media_ref.clone());
         }
         let key: [u8; 32] = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &media_ref.key)
             .map_err(|e| MessengerError::InvalidArgument { description: format!("manifest: bad key: {e}") })?
             .try_into().map_err(|_| MessengerError::InvalidArgument { description: "manifest: key not 32 bytes".into() })?;
-        let enc = alpha_media::crypto::MediaCrypto::encrypt(full_json.as_bytes(), &key)
+        let blob = alpha_media::manifest_blob::seal(full_json.as_bytes(), &key)
             .map_err(|e| MessengerError::InternalError { description: format!("manifest encrypt: {e}") })?;
-        // Stable blob layout: nonce(24) || plaintext_hash(32) || orig_size(8 LE) || ciphertext.
-        let mut blob = Vec::with_capacity(64 + enc.ciphertext.len());
-        blob.extend_from_slice(&enc.nonce);
-        blob.extend_from_slice(&enc.hash);
-        blob.extend_from_slice(&enc.original_size.to_le_bytes());
-        blob.extend_from_slice(&enc.ciphertext);
         let manifest_hash = hex::encode(sha2::Sha256::digest(&blob));
         let signer = self.media_signer();
         let rt = runtime();
-        let descriptor = rt.block_on(self.blossom_for(media_ref.tor).upload(&blob, &signer, "application/octet-stream"))
-            .map_err(|e| MessengerError::NetworkError { description: format!("manifest upload: {e}") })?;
-        // Size breakdown (TEMP diag): which inline lists dominate the wire ref.
-        let chunks_len = media_ref.chunks.as_ref()
-            .and_then(|c| serde_json::to_string(c).ok()).map(|s| s.len()).unwrap_or(0);
-        let blobs_len = serde_json::to_string(&media_ref.blob_urls).map(|s| s.len()).unwrap_or(0);
-        let thumbs_len = media_ref.thumbnail_urls.as_ref()
-            .and_then(|t| serde_json::to_string(t).ok()).map(|s| s.len()).unwrap_or(0);
+        // The whole file hangs on this blob: it goes where such blobs are accepted, and is
+        // copied to more servers at once, as a chunk is.
+        let started = std::time::Instant::now();
+        let manifest_url = rt
+            .block_on(self.blossom_for(media_ref.tor).upload_mirrored(
+                &blob, &signer, "application/octet-stream", alpha_media::blossom::ReplicationPolicy::primary(),
+            ))
+            .map_err(|e| MessengerError::NetworkError { description: format!("manifest upload: {e}") })?
+            .into_iter()
+            .next()
+            .map(|l| l.url)
+            .ok_or_else(|| MessengerError::NetworkError { description: "manifest upload: no copy".into() })?;
         let mut slim = media_ref.clone();
         // Strip EVERY per-chunk inline list — chunks, the per-chunk blob_urls (one
         // URL PER CHUNK: 1921 for a 480 MB video), and the thumbnail chunk URLs.
@@ -8276,11 +8293,11 @@ impl AlphaMessengerCore {
         slim.chunks = None;
         slim.blob_urls = Vec::new();
         slim.thumbnail_urls = None;
-        slim.manifest_url = Some(descriptor.url);
+        slim.manifest_url = Some(manifest_url);
         slim.manifest_hash = Some(manifest_hash);
         slim.format_version = Some(2);
         let slim_len = serde_json::to_string(&slim).map(|s| s.len()).unwrap_or(0);
-        tracing::info!(target: "alpha_ffi", "MANIFEST externalized: full={}B -> slim={}B (stripped chunks={}B blob_urls={}B thumb_urls={}B)", full_json.len(), slim_len, chunks_len, blobs_len, thumbs_len);
+        tracing::warn!(target: "alpha_ffi", "MANIFEST_UP full={}B slim={}B ms={}", full_json.len(), slim_len, started.elapsed().as_millis());
         Ok(slim)
     }
 
@@ -8351,16 +8368,7 @@ impl AlphaMessengerCore {
                     return Err(MessengerError::InternalError { description: "manifest hash mismatch".into() });
                 }
             }
-            if blob.len() < 64 {
-                return Err(MessengerError::InternalError { description: "manifest blob too short".into() });
-            }
-            let mut nonce = [0u8; 24]; nonce.copy_from_slice(&blob[0..24]);
-            let mut phash = [0u8; 32]; phash.copy_from_slice(&blob[24..56]);
-            let mut szb = [0u8; 8]; szb.copy_from_slice(&blob[56..64]);
-            let enc = alpha_media::crypto::EncryptedMedia {
-                nonce, hash: phash, original_size: u64::from_le_bytes(szb), ciphertext: blob[64..].to_vec(),
-            };
-            let plain = alpha_media::crypto::MediaCrypto::decrypt(&enc, &key)
+            let plain = alpha_media::manifest_blob::open(&blob, &key)
                 .map_err(|e| MessengerError::InternalError { description: format!("manifest decrypt: {e}") })?;
             current = serde_json::from_slice(&plain)
                 .map_err(|e| MessengerError::InternalError { description: format!("manifest parse: {e}") })?;
@@ -8413,11 +8421,17 @@ impl AlphaMessengerCore {
         // a big ref (200+ chunks) publish instantly instead of choking the relay.
         let (wire_ref, local_ref): (String, String) = match serde_json::from_value::<MediaRef>(v.clone()) {
             Ok(mr) => {
-                let slim = self.externalize_ref_if_large(&mr)?;
+                use alpha_media::wire_budget::{body_len, fit_previews, items_to_externalize, MEDIA_WIRE_BUDGET};
+                let heavy = items_to_externalize(&[body_len(&mr)], MEDIA_WIRE_BUDGET)[0];
+                let slim = self.externalize_ref(&mr, heavy)?;
                 let wv = serde_json::to_value(&slim)
                     .map_err(|e| MessengerError::InternalError { description: e.to_string() })?;
-                (strip_local_path(&wv), local_copy_of(&wv, &v, slim.is_external_manifest() && !mr.is_external_manifest())
-                    .unwrap_or_else(|| mls_ref.clone()))
+                let local = local_copy_of(&wv, &v, slim.is_external_manifest() && !mr.is_external_manifest())
+                    .unwrap_or_else(|| mls_ref.clone());
+                let mut wire = [wv];
+                if let Some(m) = wire[0].as_object_mut() { m.remove("local_path"); }
+                fit_previews(&mut wire, MEDIA_WIRE_BUDGET);
+                (wire[0].to_string(), local)
             }
             Err(_) => (mls_ref.clone(), mls_ref.clone()),
         };
@@ -8729,11 +8743,26 @@ impl AlphaMessengerCore {
         op_id: String,
         meta_json: Option<String>,
     ) -> Result<String, MessengerError> {
+        let tor = self.op_is_secret(&op_id);
+        self.upload_blob_ref_routed(file_path, media_type, poster_b64, op_id, meta_json, tor)
+    }
+
+    /// [`Self::upload_blob_ref_only`] over the route the caller settled: Tor for a secret chat.
+    fn upload_blob_ref_routed(
+        &self,
+        file_path: String,
+        media_type: String,
+        poster_b64: Option<String>,
+        op_id: String,
+        meta_json: Option<String>,
+        tor: bool,
+    ) -> Result<String, MessengerError> {
         // One sender per upload. The second gets an error instead of
         // starting a parallel upload — see UploadClaim.
         let _claim = UploadClaim::take(&op_id).ok_or_else(|| MessengerError::NetworkError {
             description: "эта отправка уже идёт".into(),
         })?;
+        let t_prep = std::time::Instant::now();
         if let Some(local) = self.local_upload_ref(&op_id, &file_path, &media_type, &poster_b64, &meta_json) {
             return Ok(local);
         }
@@ -8760,10 +8789,12 @@ impl AlphaMessengerCore {
         // other types — and it produces a streaming ref that download_media_inner
         // already handles for ANY type (it branches on stream_chunks, not on
         // media_type). One architecture for all files.
-        let tor = self.op_is_secret(&op_id);
         let (key, as_written) = self.stable_media_key(&op_id, &file_path);
         let media = self.media_for(tor);
         let checkpoint = self.checkpoint_for(&op_id, &file_path);
+        if t_prep.elapsed() >= std::time::Duration::from_millis(500) {
+            tracing::warn!(target: "alpha_ffi", "UPLOAD_PREP key_and_checkpoint ms={}", t_prep.elapsed().as_millis());
+        }
         let checkpoint = checkpoint.as_ref().map(|c| c as &dyn alpha_media::resume::ChunkCheckpoint);
         let progress = move |done, total| ued.emit(CoreEvent::MediaProgress {
             op_id: op.clone(), downloaded: done, total, terminal: total > 0 && done >= total,
@@ -8778,7 +8809,10 @@ impl AlphaMessengerCore {
                 media.upload_streaming_file(path, &filename, mt, &signer, key, &progress, &cancelled, checkpoint).await
             }
         })
-        .map_err(|e| MessengerError::NetworkError { description: format!("media upload failed: {}", e) })?;
+        .map_err(|e| match e {
+            alpha_media::MediaError::Refused(why) => MessengerError::MediaRefused { description: why },
+            e => MessengerError::NetworkError { description: format!("media upload failed: {e}") },
+        })?;
 
         let mut media_ref = MediaRef::from_upload_result(&result);
         media_ref.tor = tor;
@@ -8879,10 +8913,14 @@ impl AlphaMessengerCore {
         let mut mls_items: Vec<serde_json::Value> = Vec::with_capacity(items.len());
         // What this phone keeps: a big item as its slim ref plus our file, like a receiver.
         let mut local_items: Vec<serde_json::Value> = Vec::with_capacity(items.len());
-        for it in &items {
-            let (mut wire, local) = match serde_json::from_value::<MediaRef>(it.clone()) {
-                Ok(mr) => {
-                    let slim = self.externalize_ref_if_large(&mr)?;
+        use alpha_media::wire_budget::{body_len, fit_previews, items_to_externalize, MEDIA_WIRE_BUDGET};
+        let refs: Vec<Option<MediaRef>> = items.iter().map(|it| serde_json::from_value(it.clone()).ok()).collect();
+        let heavy = items_to_externalize(&refs.iter().map(|r| r.as_ref().and_then(body_len)).collect::<Vec<_>>(), MEDIA_WIRE_BUDGET);
+        for (k, it) in items.iter().enumerate() {
+            let (mut wire, local) = match &refs[k] {
+                Some(mr) => {
+                    let mr = mr.clone();
+                    let slim = self.externalize_ref(&mr, heavy[k])?;
                     let wv = serde_json::to_value(&slim)
                         .map_err(|e| MessengerError::InternalError { description: e.to_string() })?;
                     let local = local_copy_of(&wv, it, slim.is_external_manifest() && !mr.is_external_manifest())
@@ -8891,12 +8929,13 @@ impl AlphaMessengerCore {
                     (wv, local)
                 }
                 // Not a MediaRef shape (shouldn't happen) — pass the item through.
-                Err(_) => (it.clone(), it.clone()),
+                None => (it.clone(), it.clone()),
             };
             if let Some(m) = wire.as_object_mut() { m.remove("local_path"); }
             mls_items.push(wire);
             local_items.push(local);
         }
+        fit_previews(&mut mls_items, MEDIA_WIRE_BUDGET);
         // "Don't keep on servers": recipients fetch at once (ns flag) and we
         // delete the blobs from storage after delivery.
         if self.chat_no_store(chat_id.clone()) {
@@ -9051,6 +9090,47 @@ impl AlphaMessengerCore {
     /// refuse to commit: nothing is sent, nothing is queued, the row is gone.
     ///
     /// Idempotent, and safe to call for an id that is not uploading.
+    /// Upload a file while its message is still being composed, so Send finds it up.
+    /// The route is the chat's: a secret chat's file goes only through Tor.
+    pub fn pre_upload_media(
+        &self,
+        chat_id: String,
+        op_id: String,
+        file_path: String,
+        media_type: String,
+    ) -> Result<String, MessengerError> {
+        let tor = secret_chat::is_secret(&self.db.connection(), &chat_id);
+        let r = self.upload_blob_ref_routed(file_path, media_type, None, op_id.clone(), None, tor);
+        // The ref carries the key; the resume state of this upload is not needed again.
+        if r.is_ok() {
+            self.clear_send_state(&op_id, "pre-upload done");
+        }
+        r
+    }
+
+    /// A pre-upload no message used: no more of it goes up, and every blob that did
+    /// leaves the servers, by the route it went up (an unknown chat is taken for a secret
+    /// one). The deletion is recorded first, so a restart still makes it.
+    pub fn discard_pre_upload(&self, chat_id: String, op_id: String, file_path: String, ref_json: String) {
+        if let Ok(mut s) = upload_cancel_set().lock() {
+            s.insert(op_id.clone());
+        }
+        let mut ids = alpha_media::pipeline::blob_ids_in_ref(&ref_json);
+        if let Some(cp) = self.checkpoint_for(&op_id, &file_path) {
+            use alpha_media::resume::ChunkCheckpoint;
+            ids.extend(cp.load().into_iter().map(|c| c.transport_object_id.as_hex().to_string()));
+        }
+        ids.sort();
+        ids.dedup();
+        if !ids.is_empty() {
+            let conn = self.db.connection();
+            let tor = chat_id.is_empty() || secret_chat::is_secret(&conn, &chat_id) || ref_json.contains("\"tor\":true");
+            let json = serde_json::json!({ "ids": ids, "due": chrono::Utc::now().timestamp(), "tor": tor }).to_string();
+            let _ = KeyValueRepo::set(&conn, &format!("{KV_PURGE_PREFIX}{op_id}"), &json);
+        }
+        self.clear_send_state(&op_id, "pre-upload dropped");
+    }
+
     pub fn cancel_media_upload(&self, msg_id: String) {
         if let Ok(mut s) = upload_cancel_set().lock() {
             s.insert(msg_id.clone());
@@ -9967,6 +10047,7 @@ impl AlphaMessengerCore {
     /// runs on live sockets.
     pub fn set_network_available(&self, available: bool) -> Result<(), MessengerError> {
         let rt = runtime();
+        alpha_media::network_changed();
         rt.block_on(self.transport.set_network_available(available));
         if !available {
             return Ok(());
@@ -14917,10 +14998,9 @@ impl AlphaMessengerCore {
         // only mark the throttle timestamp once it's confirmed visible — so a
         // failed publish is retried on the next start instead of being skipped.
         let own_pubkey = keys.public_key();
-        let visible = match rt.block_on(bridge.fetch_key_packages(&own_pubkey)) {
-            Ok(kps) => kps.len(),
-            Err(e) => { tracing::warn!(target: "TRANSPORT", "verify own KeyPackage: fetch failed: {}", e); 0 }
-        };
+        let on_relays = rt.block_on(bridge.fetch_key_package_events(&own_pubkey));
+        // The same read-back withdraws what this phone can no longer open.
+        let visible = self.sweep_own_key_packages(&keys, &on_relays);
         if visible > 0 {
             tracing::info!(target: "ACCOUNT", "verify: own KeyPackage VISIBLE on relays ({} found) — account publishable", visible);
             let conn = self.db.connection();

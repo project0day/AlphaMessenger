@@ -11,6 +11,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.HorizontalDivider
@@ -30,12 +31,12 @@ import com.alphamessenger.ui.theme.AlphaColorScheme
  *
  * ONE [Column] that ALWAYS exists. Renders, in order:
  *   1. [HorizontalDivider]
- *   2. [inputBar] — ALWAYS composed, NEVER destroyed. All its persistent
+ *   2. [header] (reply / edit / forward card), then [inputBar] — ALWAYS composed, NEVER destroyed. All its persistent
  *      state (FocusRequester / ScrollState / TextFieldValue) lives in
  *      [BottomSurfaceState]. During ATTACH it collapses to 0 height (the
  *      attach panel has its own caption bar) but stays IN the composition —
  *      the collapse/expand is animated so the surface never jumps.
- *      During locked recording, [lockedRecordingBar] is drawn ON TOP of it
+ *      During locked recording, [lockedRecordingBar] is drawn ON TOP of the input row
  *      (overlay per spec — the InputBar survives underneath).
  *   3. [bottomPanel] — ONE slot whose height = [BottomSurfaceState.bottomPanelHeight]
  *      and whose CONTENT follows [BottomSurfaceState.panelMode].
@@ -59,6 +60,8 @@ fun BottomSurfaceV2(
     panelModifier: Modifier = Modifier,
     /** Around the input bar and the locked-recording bar together: one width for both. */
     barModifier: Modifier = Modifier,
+    /** Reply / edit / forward / link preview, above the input row: no recording bar covers it. */
+    header: @Composable () -> Unit = {},
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
@@ -88,7 +91,8 @@ fun BottomSurfaceV2(
 
         // InputBar — ALWAYS composed, and it stays in place while the attach sheet
         // lies over the chat; the locked-recording bar overlays it when locked.
-        Box(modifier = Modifier.fillMaxWidth().then(barModifier)) {
+        Column(modifier = Modifier.fillMaxWidth().then(barModifier)) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp)) { header() }
             Box(
                 modifier = Modifier.fillMaxWidth()
                     // Locked recording: the bar sits UNDER the recording strip — the

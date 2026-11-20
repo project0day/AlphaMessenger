@@ -46,13 +46,29 @@ fun Modifier.bubbleShell(
     contentPadding: PaddingValues = BubbleTokens.contentPadding(isOutgoing, showTail),
     /** Message id — publishes the bubble bounds for the viewer's element flight. */
     registerId: String? = null,
-): Modifier = bubbleShellOf(
+): Modifier = if (LocalBubbleFilled.current) bubbleShellOf(
+    isOutgoing, bubbleShape, Color.Transparent, maxWidth, onTap, onLongPress, contentPadding, registerId, null,
+) else bubbleShellOf(
     isOutgoing, bubbleShape, bubbleColor, maxWidth, onTap, onLongPress, contentPadding, registerId,
-    // An own bubble in its usual colour gets the theme's gradient (own themes).
+    bubbleBrush(isOutgoing, bubbleColor),
+)
+
+/** Inside a bubble that already paints its shape (a quote above media): the inner shell draws no fill. */
+val LocalBubbleFilled = androidx.compose.runtime.staticCompositionLocalOf { false }
+
+/** The bubble's shape and fill alone, for a container that holds a whole bubble's parts. */
+@androidx.compose.runtime.Composable
+fun Modifier.bubbleFill(isOutgoing: Boolean, bubbleShape: Shape, bubbleColor: Color): Modifier =
+    clipDrawing(bubbleShape).then(
+        bubbleBrush(isOutgoing, bubbleColor)?.let { Modifier.background(it) } ?: Modifier.background(bubbleColor),
+    )
+
+// An own bubble in its usual colour gets the theme's gradient (own themes).
+@androidx.compose.runtime.Composable
+private fun bubbleBrush(isOutgoing: Boolean, bubbleColor: Color): androidx.compose.ui.graphics.Brush? =
     if (isOutgoing) com.alphamessenger.ui.theme.LocalAlphaColorScheme.current.let { cs ->
         cs.outBubbleBrush?.takeIf { bubbleColor == cs.outBubble }
-    } else null,
-)
+    } else null
 
 private fun Modifier.bubbleShellOf(
     @Suppress("UNUSED_PARAMETER") isOutgoing: Boolean,

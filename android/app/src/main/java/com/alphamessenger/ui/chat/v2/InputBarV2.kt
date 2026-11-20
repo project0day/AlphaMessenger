@@ -131,8 +131,6 @@ fun InputBarV2(
     onGlass: Boolean = false,
     /** An answer is being written for this chat: with the field empty, the button stops it. */
     onStop: (() -> Unit)? = null,
-    /** Reply / edit / forward / link preview: a card at the top of the field. */
-    header: @Composable () -> Unit = {},
     /** Slow mode: seconds until the next message may go. The field stays
      *  open (the next one can be typed); the send button counts down. */
     cooldownSeconds: Long = 0,
@@ -315,7 +313,6 @@ fun InputBarV2(
                 MentionList(if (mention != null) matches else emptyList(), colors) { c ->
                     mention?.let { replace(insertMention(tfv, it.first, c)) }
                 }
-                header()
                 Row(verticalAlignment = Alignment.Bottom) {
                     if (!twoRow) FieldIcon(emojiIcon, emojiLabel, emojiTint, enabled, onEmoji)
                     // The platform field: selection, its menu (with formatting), scrolling

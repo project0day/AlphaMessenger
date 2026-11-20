@@ -198,6 +198,17 @@ class TransferEngine(
     )
     private val considered = ConcurrentHashMap<String, ConsideredEntry>()
 
+    /** Byte reports under one op that count as another's: a send taking over an upload already running. */
+    private val progressAliases = ConcurrentHashMap<String, String>()
+
+    fun followProgress(from: String, to: String) {
+        progressAliases[from] = to
+    }
+
+    fun stopFollowing(from: String) {
+        progressAliases.remove(from)
+    }
+
     // --- Inspector counters (rule 10) ---
     private val retries = AtomicInteger(0)
     private val peakBps = AtomicLong(0)
@@ -267,8 +278,9 @@ class TransferEngine(
                 // progress immune to the ordering race between the first byte from
                 // Rust and the UI registering the stage: an album's five items used
                 // to fold onto ONE key here and show a spinner with no %.
-                val key = opToKey[opId]
-                    ?: TransferKey.upload(opId).value.takeIf { live.containsKey(it) }
+                val op = progressAliases[opId] ?: opId
+                val key = opToKey[op]
+                    ?: TransferKey.upload(op).value.takeIf { live.containsKey(it) }
                     ?: return@collect
                 onBytes(key, done, total)
             }
@@ -316,7 +328,8 @@ class TransferEngine(
         // the message itself is being published. Carry the previous progress.
         // Encrypting too: the finished video's upload continues what went up while it was encoded.
         val carried = when (state) {
-            TransferState.Publishing, TransferState.Replicating, TransferState.Encrypting -> live[key.value]?.progress
+            TransferState.Publishing, TransferState.Replicating, TransferState.Encrypting,
+            is TransferState.Retrying -> live[key.value]?.progress
             else -> null
         }
         put(
@@ -590,7 +603,17 @@ class TransferEngine(
                 waitingTurn[key.value] = go
                 try { awaitTurn(after, go) } finally { waitingTurn.remove(key.value, go) }
             }
-            val path = runCatching { repo.downloadTracked(key.ref, opId) }.getOrNull()
+            var path = runCatching { repo.downloadTracked(key.ref, opId) }.getOrNull()
+            // A fresh file may still be on its way to the servers this network reaches:
+            // a few quiet retries, each resuming from `.part`, before ↻ is offered.
+            for ((i, pause) in AUTO_RETRY_MS.withIndex()) {
+                if (path != null || !isActive || repo.isGone(key.ref)) break
+                put(key, TransferState.Retrying(i + 1))
+                delay(pause)
+                if (!isActive) break
+                put(key, TransferState.Downloading(snapshotOf(key).progress))
+                path = runCatching { repo.downloadTracked(key.ref, opId) }.getOrNull()
+            }
             // Paused or cancelled while it ran: they already wrote the state.
             if (!isActive) return@launch
             opToKey.remove(opId)
@@ -892,6 +915,8 @@ class TransferEngine(
         if (cur is TransferState.CacheEvicted) return  // user deleted cache — ignore stray bytes
         val isUpload = rawKey.startsWith(TransferKey.UP)
         if (!isUpload && !sessions.containsKey(rawKey)) return
+        // A retry resumes from the bytes kept on disk, which can be fewer than were shown.
+        if (!isUpload && done < (live[rawKey]?.progress?.bytes ?: 0L)) return
 
         val now = System.currentTimeMillis()
         val prev = speed[rawKey]
@@ -1213,6 +1238,9 @@ class TransferEngine(
 
         /** Don't resample the rate faster than this — the EMA just gets noisy. */
         const val SPEED_SAMPLE_MS = 300L
+
+        /** Pauses before each automatic download retry. */
+        val AUTO_RETRY_MS = longArrayOf(3_000L, 8_000L, 20_000L, 45_000L)
 
         /** Higher = smoother but laggier. 0.7 tracks real changes within a second
          *  while killing per-chunk jitter. */

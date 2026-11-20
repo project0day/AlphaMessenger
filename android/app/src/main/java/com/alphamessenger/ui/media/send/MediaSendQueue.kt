@@ -75,6 +75,7 @@ class MediaSendQueue @Inject constructor(
     private val repository: AlphaCoreRepository,
     private val transfers: TransferEngine,
     private val network: com.alphamessenger.data.NetworkMonitor,
+    private val preUploads: MediaPreUpload,
 ) {
 
     private val store = MediaSendStore(context)
@@ -110,6 +111,12 @@ class MediaSendQueue @Inject constructor(
 
     /** Job writes during parallel uploads: updates are serialized. */
     private val writeLock = Mutex()
+
+    /** The core's last upload failure per send: tells a weak link from a server that says no. */
+    private val lastFailure = ConcurrentHashMap<String, Throwable>()
+
+    /** Automatic re-runs per send, for the pause before the next. */
+    private val retries = ConcurrentHashMap<String, Int>()
 
     /** What is running now: lets ✕ abort the work itself, not just the spinner. */
     private val running = ConcurrentHashMap<String, Job>()
@@ -190,7 +197,9 @@ class MediaSendQueue @Inject constructor(
         if (chatId.isBlank() || drafts.isEmpty()) return null
         val sendId = java.util.UUID.randomUUID().toString()
         MediaTrace.event(sendId, null, MediaTrace.SEND_TAP, "items" to drafts.size)
-        val items = claimSources(sendId, drafts, photoMaxEdge, photoQuality)
+        // Keyed on the drafts as composed: claiming may move their files.
+        val preKeys = drafts.map { preUploads.keyOf(it, photoMaxEdge, photoQuality, hd, videoEdge) }
+        val items = claimSources(sendId, drafts, photoMaxEdge, photoQuality, preKeys)
         if (items.isEmpty()) return null
 
         var job = MediaSendJob(
@@ -288,6 +297,8 @@ class MediaSendQueue @Inject constructor(
         val job = store.find(messageId) ?: return
         android.util.Log.i(TAG, "отмена ${job.sendId} (${job.messageId})")
         canceled.add(job.sendId)
+        retries.remove(job.sendId)
+        lastFailure.remove(job.sendId)
         // The core checks its flag between chunks — otherwise bytes would keep flowing.
         runCatching { repository.cancelMediaUpload(messageId) }
         val work = running.remove(job.sendId)
@@ -328,6 +339,8 @@ class MediaSendQueue @Inject constructor(
         }
         android.util.Log.i(TAG, "повтор ${job.sendId} (${job.messageId})")
         canceled.remove(job.sendId)
+        retries.remove(job.sendId)
+        lastFailure.remove(job.sendId)
         persist(job.withState(MediaSendState.QUEUED))
         markInFlight(job)
         pump()
@@ -505,14 +518,17 @@ class MediaSendQueue @Inject constructor(
         // the job, and the next attempt uploads only what is missing.
         if (okRefs.size < job.items.size) {
             if (!hasNetwork()) {
-                android.util.Log.i(
-                    TAG,
-                    "${job.sendId}: загружено ${okRefs.size} из ${job.items.size}, сети нет — ждём подключения",
-                )
-                persist(job.withState(MediaSendState.UPLOADING))
+                android.util.Log.w(TAG, "${job.sendId}: uploaded ${okRefs.size} of ${job.items.size}, waiting for the network")
+                persist(fresh(job).withState(MediaSendState.UPLOADING))
                 return Outcome.WAIT_NETWORK
             }
-            android.util.Log.e(TAG, "${job.sendId}: загружено только ${okRefs.size} из ${job.items.size}")
+            val why = lastFailure[job.sendId]?.message.orEmpty()
+            if (!refused(job) && young(job)) {
+                android.util.Log.w(TAG, "${job.sendId}: uploaded ${okRefs.size} of ${job.items.size}, retrying later: $why")
+                retryLater(job)
+                return Outcome.WAIT_NETWORK
+            }
+            android.util.Log.e(TAG, "${job.sendId}: uploaded ${okRefs.size} of ${job.items.size}, giving up: $why")
             fail(job, MediaSendFailure.UPLOAD_FAILED)
             return Outcome.FAILED
         }
@@ -548,6 +564,11 @@ class MediaSendQueue @Inject constructor(
         if (!ok) {
             if (!hasNetwork()) {
                 android.util.Log.i(TAG, "${job.sendId}: публикация не прошла, сети нет — ждём подключения")
+                return Outcome.WAIT_NETWORK
+            }
+            if (young(job)) {
+                android.util.Log.w(TAG, "${job.sendId}: publish failed, retrying later")
+                retryLater(job)
                 return Outcome.WAIT_NETWORK
             }
             android.util.Log.e(TAG, "${job.sendId}: публикация не удалась")
@@ -587,6 +608,8 @@ class MediaSendQueue @Inject constructor(
             }
         }
         forget(job.messageId)
+        retries.remove(job.sendId)
+        lastFailure.remove(job.sendId)
         return Outcome.DONE
     }
 
@@ -611,6 +634,27 @@ class MediaSendQueue @Inject constructor(
         // Already-uploaded items are not uploaded again — the double-send protection after a restart.
         item.uploadedRef?.let { return item.index to it }
         val opId = job.opId(item.index)
+        // Went up while the set was composed: only the publish is left. If it is still
+        // going up, the bubble shows its bytes meanwhile.
+        item.preUploadKey?.let { key ->
+            val running = preUploads.opIdOf(item.draft.id, key)
+            if (running != null) {
+                transfers.onUploadEncrypting(opId)
+                transfers.followProgress(running, opId)
+            }
+            try {
+                preUploads.adopt(item.draft.id, key, item.outputPath)
+            } finally {
+                running?.let(transfers::stopFollowing)
+            }
+        }?.let { ref ->
+            own.encoded.complete(Unit)
+            val merged = mergeMeta(ref, measured(item))
+            rememberRef(job.sendId, item.index, merged)
+            transfers.onUploadPublishing(opId)
+            MediaTrace.event(job.sendId, item.index, "PRE_UPLOADED")
+            return item.index to merged
+        }
         if (File(item.outputPath).length() <= 0L) {
             prev?.encoded?.await()
             prepare(job, item, opId)
@@ -625,27 +669,32 @@ class MediaSendQueue @Inject constructor(
         // No network permit here: the shared limit lives in the core, around ONE
         // chunk, so files start at once and share the line by chunk.
         transfers.onUploadEncrypting(opId)
-        val meta = measured(item)
-        var ref: String? = null
-        var attempt = 0
-        while (ref == null && attempt < 3 && job.sendId !in canceled) {
-            if (!hasNetwork()) {
-                android.util.Log.i(TAG, "${job.sendId}#${item.index}: повтор пропущен — сети нет (попытка ${attempt + 1})")
-                break
+        return kotlinx.coroutines.coroutineScope {
+            // Duration and poster are measured while the bytes go up: only the finished
+            // ref carries them (the poster among the metadata), so the upload never waits.
+            val measuring = async(Dispatchers.IO) {
+                measured(item).also { MediaTrace.event(job.sendId, item.index, "METADATA") }
             }
-            ref = repository.uploadBlobRefOnly(
-                item.outputPath, item.mediaType, meta?.poster?.takeIf { it.isNotBlank() }, opId,
-            )
-            if (ref == null) { attempt++; delay(400L * attempt) }
+            var ref: String? = null
+            var attempt = 0
+            while (ref == null && attempt < 3 && job.sendId !in canceled && !refused(job)) {
+                if (!hasNetwork()) {
+                    android.util.Log.w(TAG, "${job.sendId}#${item.index}: no network, retry deferred (attempt ${attempt + 1})")
+                    break
+                }
+                ref = repository.uploadBlobRef(item.outputPath, item.mediaType, null, opId)
+                    .onFailure { lastFailure[job.sendId] = it }.getOrNull()
+                if (ref == null) { attempt++; delay(400L * attempt) }
+            }
+            if (job.sendId in canceled) throw ItemStop(null)
+            // Uploaded, not yet sent: the album goes out as one message once every item is up.
+            if (ref != null) transfers.onUploadPublishing(opId) else transfers.onUploadFailed(opId)
+            val merged = ref?.let { mergeMeta(it, measuring.await()) }
+            // The ref goes to disk IMMEDIATELY: otherwise process death would force
+            // the same bytes to be re-uploaded.
+            if (merged != null) rememberRef(job.sendId, item.index, merged)
+            item.index to merged
         }
-        if (job.sendId in canceled) throw ItemStop(null)
-        // Uploaded, not yet sent: the album goes out as one message once every item is up.
-        if (ref != null) transfers.onUploadPublishing(opId) else transfers.onUploadFailed(opId)
-        val merged = ref?.let { mergeMeta(it, meta) }
-        // The ref goes to disk IMMEDIATELY: otherwise process death would force
-        // the same bytes to be re-uploaded.
-        if (merged != null) rememberRef(job.sendId, item.index, merged)
-        return item.index to merged
     }
 
     /** Produce the item's file. A re-encoded video starts going up while it is written. */
@@ -792,6 +841,37 @@ class MediaSendQueue @Inject constructor(
 
     // --- Execution details ---
 
+    /** The job as on disk: uploads write their refs there, past the copy a worker holds. */
+    private fun fresh(job: MediaSendJob): MediaSendJob =
+        store.all().firstOrNull { it.sendId == job.sendId } ?: job
+
+    /** A refusal no retry can change: rights, a format no server takes. */
+    private fun refused(job: MediaSendJob): Boolean =
+        lastFailure[job.sendId] is uniffi.alphamessenger.MessengerException.MediaRefused
+
+    /** Sends keep trying for a day, then ask the user. */
+    private fun young(job: MediaSendJob): Boolean =
+        System.currentTimeMillis() - job.createdAt < RETRY_LIFESPAN_MS
+
+    /**
+     * A weak link is not a failure: the send waits as for the network and comes
+     * back on its own, with growing pauses, from what is already uploaded.
+     */
+    private fun retryLater(job: MediaSendJob) {
+        val now = fresh(job)
+        persist(now.withState(MediaSendState.UPLOADING))
+        now.items.forEach { if (it.uploadedRef == null) transfers.onUploadWaitingNetwork(job.opId(it.index)) }
+        val n = retries.merge(job.sendId, 1, Int::plus) ?: 1
+        val base = (RETRY_FIRST_MS shl (n - 1).coerceAtMost(4)).coerceAtMost(RETRY_MAX_MS)
+        // Spread out, so sends that failed together do not all return at the same instant.
+        val pause = base + kotlin.random.Random.nextLong(base / 4 + 1)
+        MediaTrace.event(job.sendId, null, "RETRY_LATER", "attempt" to n, "pause_ms" to pause)
+        scope.launch {
+            delay(pause)
+            if (job.sendId !in canceled) pump()
+        }
+    }
+
     private fun fail(job: MediaSendJob, reason: MediaSendFailure) {
         persist(job.failedWith(reason))
         job.items.forEach { transfers.onUploadFailed(job.opId(it.index)) }
@@ -907,6 +987,7 @@ class MediaSendQueue @Inject constructor(
         drafts: List<MediaDraftItem>,
         photoMaxEdge: Int,
         photoQuality: Int,
+        preKeys: List<String>,
     ): List<MediaSendItem> {
         val dir = store.workDir(sendId)
         val cacheRoot = context.cacheDir.absolutePath
@@ -929,12 +1010,16 @@ class MediaSendQueue @Inject constructor(
                 draft = claimed,
                 outputPath = File(dir, "$i.r$revision.$ext").absolutePath,
                 editRevision = revision,
+                preUploadKey = preKeys.getOrNull(i),
             )
         }
     }
 
     companion object {
         private const val TAG = "AlphaSendQueue"
+        private const val RETRY_FIRST_MS = 5_000L
+        private const val RETRY_MAX_MS = 60_000L
+        private const val RETRY_LIFESPAN_MS = 24 * 60 * 60 * 1000L
 
         /**
          * Local-echo manifest — what the bubble is drawn from IMMEDIATELY.

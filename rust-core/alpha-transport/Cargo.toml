@@ -28,6 +28,7 @@ hkdf = { workspace = true }
 sha2 = "0.10"
 rand = { workspace = true }
 tokio-socks = "0.5"
+socket2 = { version = "0.6", features = ["all"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"

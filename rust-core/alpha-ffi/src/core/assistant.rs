@@ -150,7 +150,8 @@ impl AlphaMessengerCore {
 
     /// Store a reply of the assistant in its chat; returns the message id.
     /// [id]: given up front, so the answer on screen keeps one identity from its first word to its stored row.
-    pub fn insert_assistant_message(&self, chat_id: String, body: String, id: Option<String>) -> Result<String, MessengerError> {
+    /// [reply_to]: a message of this chat the answer quotes.
+    pub fn insert_assistant_message(&self, chat_id: String, body: String, id: Option<String>, reply_to: Option<String>) -> Result<String, MessengerError> {
         if !is_assistant_chat(&chat_id) {
             return Err(MessengerError::InvalidArgument { description: "not an assistant chat".into() });
         }
@@ -163,11 +164,38 @@ impl AlphaMessengerCore {
             let conn = self.db.connection();
             self.ensure_assistant_contact(&conn);
         }
+        let reply_to = reply_to.filter(|r| self.in_assistant_chat(&chat_id, r));
         let builder = MessageBuilder::text(&body);
-        let msg = match id.as_deref() { Some(id) => builder.id(id), None => builder }.build();
+        let builder = match id.as_deref() { Some(id) => builder.id(id), None => builder };
+        let msg = match reply_to.as_deref() { Some(r) => builder.reply_to(r), None => builder }.build();
         let id = msg.id().to_string();
         self.persist_alpha_message(&chat_id, &msg, ASSISTANT_SENDER_ID)?;
         Ok(id)
+    }
+
+    /// The assistant reacts to a message of its chat; its one reaction there, replaced by a new one.
+    pub fn insert_assistant_reaction(&self, chat_id: String, target_id: String, emoji: String) -> Result<(), MessengerError> {
+        if !is_assistant_chat(&chat_id) || !self.in_assistant_chat(&chat_id, &target_id) {
+            return Err(MessengerError::InvalidArgument { description: "no such message in this chat".into() });
+        }
+        let emoji = emoji.trim();
+        if emoji.is_empty() || emoji.chars().count() > 8 || emoji.chars().any(|c| c.is_alphanumeric()) {
+            return Err(MessengerError::InvalidArgument { description: "not an emoji".into() });
+        }
+        {
+            let conn = self.db.connection();
+            let _ = conn.execute(
+                "DELETE FROM messages WHERE chat_id = ?1 AND sender_id = ?2 AND msg_type = 'reaction' AND reply_to = ?3",
+                rusqlite::params![chat_id, ASSISTANT_SENDER_ID, target_id],
+            );
+        }
+        let msg = MessageBuilder::reaction(&target_id, emoji).build();
+        self.persist_alpha_message(&chat_id, &msg, ASSISTANT_SENDER_ID)
+    }
+
+    fn in_assistant_chat(&self, chat_id: &str, message_id: &str) -> bool {
+        let conn = self.db.connection();
+        matches!(MessageRepo::get(&conn, message_id), Ok(Some(m)) if m.chat_id == chat_id)
     }
 
     /// A picture or a voice the assistant made, stored in its chat from a file on

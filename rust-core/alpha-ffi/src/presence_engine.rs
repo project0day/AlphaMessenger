@@ -119,6 +119,8 @@ struct UserPresence {
     status_color: Option<u32>,
     /// ts of the update that last set the manual/custom fields (newest wins).
     manual_ts: i64,
+    /// Newest on-screen ts from a beat too old to count for presence.
+    seen_ts: i64,
 }
 
 pub struct PresenceEngine {
@@ -243,8 +245,15 @@ impl PresenceEngine {
         if user_id.is_empty() || device_id.is_empty() || ts <= 0 {
             return false;
         }
-        // TTL + future-skew sanity on the peer-claimed ts.
-        if ts > now + MAX_FUTURE_SKEW_SECS || now - ts > PRESENCE_TTL_SECS {
+        if ts > now + MAX_FUTURE_SKEW_SECS {
+            return false;
+        }
+        // Too old to say the peer is here now, still the latest we know of when they were.
+        if now - ts > PRESENCE_TTL_SECS {
+            if foreground {
+                let u = self.users.entry(user_id.to_string()).or_default();
+                u.seen_ts = u.seen_ts.max(ts);
+            }
             return false;
         }
         let u = self.users.entry(user_id.to_string()).or_default();
@@ -349,11 +358,11 @@ impl PresenceEngine {
             .collect()
     }
 
-    /// `last_seen` unix-secs = newest peer-claimed heartbeat `ts` across devices.
+    /// `last_seen` unix-secs = newest peer-claimed on-screen heartbeat `ts`, stale ones included.
     pub fn last_seen(&self, user_id: &str) -> i64 {
         self.users
             .get(user_id)
-            .map(|u| u.devices.values().map(|d| d.last_fg_ts).max().unwrap_or(0))
+            .map(|u| u.devices.values().map(|d| d.last_fg_ts).max().unwrap_or(0).max(u.seen_ts))
             .unwrap_or(0)
     }
 
@@ -454,6 +463,15 @@ mod tests {
 
     fn ok(e: &mut PresenceEngine, u: &str, dev: &str, seq: u64, ts: i64, now: i64) -> bool {
         e.ingest_update(V, u, dev, seq, ts, false, None, None, Vec::new(), now)
+    }
+
+    #[test]
+    fn a_beat_too_old_for_presence_still_tells_when_they_were_here() {
+        let mut e = PresenceEngine::new();
+        let now = 100_000;
+        assert!(!ok(&mut e, "a", "d1", 1, now - 3 * 3600, now));
+        assert_eq!(e.effective_status("a", now), EffectiveStatus::Offline);
+        assert_eq!(e.last_seen("a"), now - 3 * 3600);
     }
 
     #[test]

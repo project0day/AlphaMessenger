@@ -15,7 +15,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 chacha20poly1305 = { workspace = true }
 blake3 = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
 base64 = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }

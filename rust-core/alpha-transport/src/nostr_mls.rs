@@ -412,6 +412,17 @@ impl NostrMlsBridge {
         Some(NostrRelayClient::publish_detached(extra, events, Duration::from_secs(6)).await)
     }
 
+    /// Withdraws KeyPackages (NIP-09 deletion) from our relays and the well-known ones.
+    pub async fn withdraw_key_packages(&self, keys: &Keys, ids: &[nostr::EventId]) -> usize {
+        if ids.is_empty() { return 0; }
+        let req = nostr::nips::nip09::EventDeletionRequest::new().ids(ids.iter().copied()).reason("key package no longer held");
+        let Ok(ev) = EventBuilder::delete(req).sign_with_keys(keys) else { return 0 };
+        let ours = self.relay_client.publish(ev.clone()).await.is_ok();
+        let extra = self.relay_client.well_known_extra().await;
+        let copies = if extra.is_empty() { 0 } else { NostrRelayClient::publish_detached(extra, vec![ev], Duration::from_secs(6)).await };
+        usize::from(ours) + copies
+    }
+
     /// Fetch KeyPackages published by a given public key, newest first.
     pub async fn fetch_key_packages(
         &self,
@@ -420,9 +431,8 @@ impl NostrMlsBridge {
         Ok(self.fetch_device_key_packages(pubkey).await.into_iter().map(|(_, kp)| kp).collect())
     }
 
-    /// KeyPackages of `pubkey` with the phone each belongs to (`None`: an
-    /// older build that does not say), newest first.
-    pub async fn fetch_device_key_packages(&self, pubkey: &PublicKey) -> Vec<(Option<String>, Vec<u8>)> {
+    /// The kind-443 KeyPackage events of `pubkey` as the relays hold them (any order).
+    pub async fn fetch_key_package_events(&self, pubkey: &PublicKey) -> Vec<nostr::Event> {
         // A fresh connection: allow for the handshakes (through Tor too).
         const LOOKUP_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -449,12 +459,18 @@ impl NostrMlsBridge {
         urls.extend(self.relay_client.well_known_extra().await);
         urls.extend(self.relay_client.inbox_route(pubkey));
         dedup_relays(&mut urls);
-        let mut events = NostrRelayClient::fetch_anonymous(urls, filter, LOOKUP_TIMEOUT)
+        NostrRelayClient::fetch_anonymous(urls, filter, LOOKUP_TIMEOUT)
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!("fetch_key_packages: lookup failed: {e}");
                 Vec::new()
-            });
+            })
+    }
+
+    /// KeyPackages of `pubkey` with the phone each belongs to (`None`: an
+    /// older build that does not say), newest first.
+    pub async fn fetch_device_key_packages(&self, pubkey: &PublicKey) -> Vec<(Option<String>, Vec<u8>)> {
+        let mut events = self.fetch_key_package_events(pubkey).await;
         let total = events.len();
 
         // Sort newest first. A peer may have several KPs sitting on

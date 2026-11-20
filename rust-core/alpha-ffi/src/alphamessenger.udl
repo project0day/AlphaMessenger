@@ -59,6 +59,7 @@ interface MessengerError {
     KeyPackageExhausted(string peer);
     MediaGone();
     MediaUnknownServer();
+    MediaRefused(string description);
 };
 
 // Callback interface for receiving events from Rust
@@ -551,6 +552,11 @@ interface AlphaMessengerCore {
     void enqueue_pending_media_album(string chat_id, string msg_id, string items_json, string? caption, u32 ttl_secs);
     void delete_pending_media(string msg_id);
     void cancel_media_upload(string msg_id);
+    /// Upload a file of a message still being composed, over the chat's own route.
+    [Throws=MessengerError]
+    string pre_upload_media(string chat_id, string op_id, string file_path, string media_type);
+    /// Stop a pre-upload no message used, and delete what of it reached the servers.
+    void discard_pre_upload(string chat_id, string op_id, string file_path, string ref_json);
     void cancel_media_download(string op_id);
     u32 flush_pending_media();
 
@@ -621,7 +627,9 @@ interface AlphaMessengerCore {
     [Throws=MessengerError]
     ChatInfo ensure_assistant_chat(string profile_id, string name);
     [Throws=MessengerError]
-    string insert_assistant_message(string chat_id, string body, string? id);
+    string insert_assistant_message(string chat_id, string body, string? id, string? reply_to);
+    [Throws=MessengerError]
+    void insert_assistant_reaction(string chat_id, string target_id, string emoji);
     [Throws=MessengerError]
     string insert_assistant_media(string chat_id, string file_path, string media_type, string? caption, string? meta_json);
     [Throws=MessengerError]

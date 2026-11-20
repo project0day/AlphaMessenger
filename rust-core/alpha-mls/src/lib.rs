@@ -782,3 +782,34 @@ mod storage_marker_tests {
         assert!(!snap.iter().any(|(k, _)| contains(k, &m1) && contains(k, &m2)));
     }
 }
+
+#[cfg(test)]
+mod key_package_ownership_tests {
+    use crate::credential::AlphaCredential;
+    use crate::provider::AlphaCryptoProvider;
+    use crate::session::MlsSessionManager;
+    use openmls_traits::OpenMlsProvider;
+
+    fn account(label: &[u8]) -> MlsSessionManager<AlphaCryptoProvider> {
+        let provider = AlphaCryptoProvider::new();
+        let (_, signer) = AlphaCredential::generate(label).unwrap();
+        let cred = AlphaCredential::new(label, &signer).unwrap();
+        cred.store_signer(provider.storage()).unwrap();
+        MlsSessionManager::new(provider, signer, cred)
+    }
+
+    /// Ours until a Welcome consumes it; another install's never; garbage is not a KeyPackage.
+    #[test]
+    fn holds_only_unconsumed_own_key_packages() {
+        let mut alice = account(b"alice");
+        let mut bob = account(b"bob");
+        let kp = bob.generate_key_packages().unwrap().key_package_bytes().unwrap();
+        assert_eq!(bob.holds_key_package(&kp), Some(true));
+        assert_eq!(alice.holds_key_package(&kp), Some(false));
+        assert_eq!(bob.holds_key_package(b"not a key package"), None);
+
+        let (gid, _, welcome) = alice.create_direct_chat(&kp).unwrap();
+        assert_eq!(bob.join_chat(&welcome).unwrap(), gid);
+        assert_eq!(bob.holds_key_package(&kp), Some(false));
+    }
+}
