@@ -443,7 +443,7 @@ mod security_gate {
         let k = key(1);
         let mut seen = HashSet::new();
         for i in 0..10_000u32 {
-            assert!(seen.insert(StreamCrypto::derive_nonce(&k, i)), "повтор nonce на индексе {i}");
+            assert!(seen.insert(StreamCrypto::derive_nonce(&k, i)), "nonce repeated at index {i}");
         }
         // A different key — a different nonce space.
         let k2 = key(2);
@@ -465,7 +465,7 @@ mod security_gate {
         moved.nonce = StreamCrypto::derive_nonce(&k, 18); // and re-derived the nonce
         assert!(
             StreamCrypto::decrypt_chunk(&moved, &k).is_err(),
-            "перестановка чанка обязана быть отвергнута",
+            "a reordered chunk must be refused",
         );
         // The same chunk with only the index swapped — also rejected (nonce won't match).
         let mut idx_only = c17.clone();
@@ -480,7 +480,7 @@ mod security_gate {
         let a = StreamCrypto::encrypt_chunk(&pt(500, 1), &ka, 3).unwrap();
         assert!(
             StreamCrypto::decrypt_chunk(&a, &kb).is_err(),
-            "чанк из другого файла обязан быть отвергнут",
+            "a chunk of another file must be refused",
         );
     }
 
@@ -492,20 +492,20 @@ mod security_gate {
 
         let mut ct = good.clone();
         ct.ciphertext[10] ^= 0x01;
-        assert!(StreamCrypto::decrypt_chunk(&ct, &k).is_err(), "бит шифротекста");
+        assert!(StreamCrypto::decrypt_chunk(&ct, &k).is_err(), "a ciphertext bit");
 
         let mut tag = good.clone();
         let last = tag.ciphertext.len() - 1;
         tag.ciphertext[last] ^= 0x80;
-        assert!(StreamCrypto::decrypt_chunk(&tag, &k).is_err(), "бит тега Poly1305");
+        assert!(StreamCrypto::decrypt_chunk(&tag, &k).is_err(), "a Poly1305 tag bit");
 
         let mut nonce = good.clone();
         nonce.nonce[0] ^= 0xFF;
-        assert!(StreamCrypto::decrypt_chunk(&nonce, &k).is_err(), "подменённый nonce");
+        assert!(StreamCrypto::decrypt_chunk(&nonce, &k).is_err(), "a swapped nonce");
 
         let mut trunc = good.clone();
         trunc.ciphertext.truncate(trunc.ciphertext.len() - 1);
-        assert!(StreamCrypto::decrypt_chunk(&trunc, &k).is_err(), "усечение");
+        assert!(StreamCrypto::decrypt_chunk(&trunc, &k).is_err(), "truncation");
     }
 
     /// PLAINTEXT_HASH_TAMPER_REJECTED: a swapped BLAKE3 in the descriptor.
@@ -516,7 +516,7 @@ mod security_gate {
         c.hash[0] ^= 0xFF;
         assert!(
             StreamCrypto::decrypt_chunk(&c, &k).is_err(),
-            "расхождение BLAKE3 обязано отвергать чанк",
+            "a BLAKE3 mismatch must refuse the chunk",
         );
     }
 
@@ -577,9 +577,9 @@ mod t3_deterministic {
         let (ct1, blob1, id1) = produce();
         let (ct2, blob2, id2) = produce();
 
-        assert_eq!(ct1, ct2, "шифротекст не воспроизводится");
-        assert_eq!(blob1, blob2, "конверт не воспроизводится");
-        assert_eq!(id1, id2, "идентичность объекта не воспроизводится");
+        assert_eq!(ct1, ct2, "the ciphertext does not reproduce");
+        assert_eq!(blob1, blob2, "the envelope does not reproduce");
+        assert_eq!(id1, id2, "the object identity does not reproduce");
     }
 
     /// The inverse property: a different key — a different object. Without
@@ -607,6 +607,6 @@ mod t3_deterministic {
         let a = generate_key();
         let b = generate_key();
         assert_eq!(a.len(), 32);
-        assert_ne!(*a, *b, "два вызова дали одинаковый ключ");
+        assert_ne!(*a, *b, "two calls gave the same key");
     }
 }

@@ -44,6 +44,7 @@ class MarkupBlocksTest {
         assertFalse(Markup.hasBlock("two `ticks` only"))
     }
 
+    // Cyrillic samples on purpose: case folding must work beyond ASCII.
     @Test
     fun searchMatchesWordStartsInAnyCase() {
         assertTrue(SearchMatch.matches("Передай Привет Маше", "прив маш"))

@@ -27,21 +27,21 @@ pub struct Approved {
 pub async fn check(raw: &str) -> MediaResult<Approved> {
     let deny = |why: &str| MediaError::DownloadFailed(format!("egress: {why}"));
 
-    let url = reqwest::Url::parse(raw).map_err(|e| deny(&format!("неразбираемый адрес: {e}")))?;
+    let url = reqwest::Url::parse(raw).map_err(|e| deny(&format!("unparsable address: {e}")))?;
 
     // Scheme. Outgoing — TLS only; anything else is not up for discussion.
     let scheme = url.scheme();
     if scheme != "https" && !(cfg!(test) && scheme == "http") {
-        return Err(deny(&format!("схема {scheme} запрещена, наружу только https")));
+        return Err(deny(&format!("scheme {scheme} not allowed, https only")));
     }
 
     // Credentials in the URL — a sign of trying to smuggle something past the parser.
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(deny("адрес с учётными данными запрещён"));
+        return Err(deny("an address with credentials is not allowed"));
     }
 
-    let host = url.host_str().ok_or_else(|| deny("адрес без узла"))?;
-    let port = url.port_or_known_default().ok_or_else(|| deny("неизвестный порт"))?;
+    let host = url.host_str().ok_or_else(|| deny("an address without a host"))?;
+    let port = url.port_or_known_default().ok_or_else(|| deny("unknown port"))?;
 
     // The testbench — only in test builds and only in its own form
     // `http://127.0.0.1:<port>`. A plain `https://127.0.0.1` stays forbidden
@@ -58,7 +58,7 @@ pub async fn check(raw: &str) -> MediaResult<Approved> {
     // meaningful as answers of a local VPN's resolver, never typed in a URL.
     if let Ok(ip) = host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
         if !is_globally_routable(&ip) {
-            return Err(deny(&format!("назначение {ip} не является глобальным")));
+            return Err(deny(&format!("destination {ip} is not global")));
         }
         return Ok(Approved { url: url.to_string() });
     }
@@ -74,15 +74,15 @@ pub async fn check(raw: &str) -> MediaResult<Approved> {
     // differently across resolutions.
     let addrs: Vec<IpAddr> = tokio::net::lookup_host((host, port))
         .await
-        .map_err(|e| deny(&format!("имя не разрешается: {e}")))?
+        .map_err(|e| deny(&format!("the name does not resolve: {e}")))?
         .map(|s| s.ip())
         .collect();
     if addrs.is_empty() {
-        return Err(deny("имя не дало ни одного адреса"));
+        return Err(deny("the name gave no address"));
     }
     for ip in &addrs {
         if !resolved_allowed(ip) {
-            return Err(deny(&format!("назначение {ip} не является глобальным")));
+            return Err(deny(&format!("destination {ip} is not global")));
         }
     }
     Ok(Approved { url: url.to_string() })
@@ -185,7 +185,7 @@ mod tests {
             "https://100.64.0.1/abc",
             "https://240.0.0.1/abc",
         ] {
-            assert!(denied(u).await, "адрес обязан быть отвергнут: {u}");
+            assert!(denied(u).await, "the address must be refused: {u}");
         }
     }
 
@@ -199,7 +199,7 @@ mod tests {
             "https://",
             "gopher://example.com/x",
         ] {
-            assert!(denied(u).await, "адрес обязан быть отвергнут: {u}");
+            assert!(denied(u).await, "the address must be refused: {u}");
         }
     }
 
@@ -207,7 +207,7 @@ mod tests {
     async fn ssrf_allows_ordinary_public_https() {
         // A public address must pass — otherwise the guard would break federation.
         let r = check("https://nostr.download/abc").await;
-        assert!(r.is_ok(), "публичный https обязан проходить: {r:?}");
+        assert!(r.is_ok(), "a public https address must pass: {r:?}");
     }
 
     #[test]
@@ -253,13 +253,13 @@ impl reqwest::dns::Resolve for SafeResolver {
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
                 .collect();
             if addrs.is_empty() {
-                return Err("egress: имя не дало адресов".into());
+                return Err("egress: the name gave no addresses".into());
             }
             // A mixed answer (public + internal) is rejected WHOLESALE.
             // Picking the "good" addresses out of a suspicious answer means
             // trusting a source that already behaved hostilely.
             if addrs.iter().any(|s| !resolved_allowed(&s.ip())) {
-                return Err("egress: разрешение имени содержит недопустимый адрес".into());
+                return Err("egress: the name resolved to a forbidden address".into());
             }
             let iter: Box<dyn Iterator<Item = std::net::SocketAddr> + Send> =
                 Box::new(addrs.into_iter());

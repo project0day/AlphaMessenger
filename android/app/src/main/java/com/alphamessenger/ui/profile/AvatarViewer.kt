@@ -29,7 +29,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -74,16 +76,27 @@ fun avatarPages(avatarPath: String, videoPath: String, coverPath: String): List<
 
 /**
  * A profile's pictures, full screen: swipe sideways between them, down to
- * close; save to the gallery or share. Videos play silently in a loop.
+ * close; save to the gallery or share, and — on our own profile ([onRemove]) —
+ * remove one. Videos play silently in a loop.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun AvatarViewer(name: String, pages: List<AvatarPage>, start: Int = 0, onDismiss: () -> Unit) {
+fun AvatarViewer(
+    name: String,
+    pages: List<AvatarPage>,
+    start: Int = 0,
+    onDismiss: () -> Unit,
+    onRemove: ((AvatarPage) -> Unit)? = null,
+) {
     if (pages.isEmpty()) return
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
-    val pager = rememberPagerState(initialPage = start.coerceIn(0, pages.lastIndex)) { pages.size }
+    // A removed picture leaves the list while the viewer stays open.
+    val current by androidx.compose.runtime.rememberUpdatedState(pages)
+    val pager = rememberPagerState(initialPage = start.coerceIn(0, pages.lastIndex)) { current.size }
     val drag = remember { Animatable(0f) }
+    var confirmRemove by remember { androidx.compose.runtime.mutableStateOf<AvatarPage?>(null) }
+    val shown = pages[pager.currentPage.coerceIn(0, pages.lastIndex)]
 
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = true, decorFitsSystemWindows = false)) {
         com.alphamessenger.ui.chat.map.FullscreenDialogWindow(darkIcons = false)
@@ -127,12 +140,12 @@ fun AvatarViewer(name: String, pages: List<AvatarPage>, start: Int = 0, onDismis
                     IconButton(onClick = onDismiss) { Icon(AlphaIcons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.common_back), tint = Color.White) }
                     Column(Modifier.weight(1f)) {
                         Text(name, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        val p = pages[pager.currentPage]
+                        val p = shown
                         val date = remember(p.path) {
                             java.text.DateFormat.getDateInstance(java.text.DateFormat.LONG).format(java.util.Date(File(p.path).lastModified()))
                         }
                         Text(
-                            stringResource(R.string.avatar_viewer_position, pager.currentPage + 1, pages.size) + " · " + stringResource(p.label) + " · " + date,
+                            stringResource(R.string.avatar_viewer_position, pages.indexOf(p) + 1, pages.size) + " · " + stringResource(p.label) + " · " + date,
                             color = Color.White.copy(alpha = 0.7f), fontSize = 12.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
                     }
@@ -166,7 +179,7 @@ fun AvatarViewer(name: String, pages: List<AvatarPage>, start: Int = 0, onDismis
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     ViewerButton(AlphaIcons.Outlined.Download, stringResource(R.string.common_save), Modifier.weight(1f)) {
-                        val p = pages[pager.currentPage]
+                        val p = shown
                         scope.launch {
                             val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                 com.alphamessenger.util.GallerySaver.save(ctx, File(p.path), p.isVideo)
@@ -176,15 +189,35 @@ fun AvatarViewer(name: String, pages: List<AvatarPage>, start: Int = 0, onDismis
                         }
                     }
                     ViewerButton(AlphaIcons.Outlined.Share, stringResource(R.string.common_share), Modifier.weight(1f)) {
-                        val p = pages[pager.currentPage]
+                        val p = shown
                         scope.launch {
                             com.alphamessenger.util.ShareOut.share(ctx,
                                 listOf(com.alphamessenger.util.ShareOut.Item(p.path, null, if (p.isVideo) "video" else "image")),
                                 ctx.getString(R.string.common_share))
                         }
                     }
+                    if (onRemove != null) {
+                        ViewerButton(AlphaIcons.Outlined.DeleteOutline, stringResource(R.string.common_delete), Modifier.weight(1f)) {
+                            confirmRemove = shown
+                        }
+                    }
                 }
             }
+        }
+        confirmRemove?.let { page ->
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { confirmRemove = null },
+                title = { Text(stringResource(if (page.label == R.string.common_cover) R.string.avatar_viewer_remove_cover else R.string.avatar_viewer_remove_avatar)) },
+                text = { Text(stringResource(R.string.avatar_viewer_remove_text)) },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = { confirmRemove = null; onRemove?.invoke(page) }) {
+                        Text(stringResource(R.string.common_delete), color = Color(0xFFE5484D))
+                    }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = { confirmRemove = null }) { Text(stringResource(R.string.common_cancel)) }
+                },
+            )
         }
     }
 }

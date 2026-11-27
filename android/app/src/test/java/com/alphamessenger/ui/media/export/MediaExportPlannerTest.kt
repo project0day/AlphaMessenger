@@ -8,10 +8,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Планировщик — чистая функция, поэтому его поведение проверяется целиком, без
- * устройства и без файлов. Это единственный способ не дать политике разъехаться:
- * правило «HDR приводится к SDR независимо от обрезки» иначе снова превратится в
- * побочный эффект чужого условия, как уже было.
+ * The planner is a pure function, so its behaviour is checked whole, with no device
+ * and no files. It is the one way to keep the policy from drifting: "HDR goes to SDR
+ * whatever the trim" would otherwise turn into a side effect of another condition
+ * again, as it once did.
  */
 class MediaExportPlannerTest {
 
@@ -32,50 +32,50 @@ class MediaExportPlannerTest {
         fileBytes = 350_000_000,
     )
 
-    // ── Ничего не менялось ────────────────────────────────────────────────
+    // ── Nothing changed ──────────────────────────────────────────────────
 
     @Test
-    fun `sdr без правок переиспользуется`() {
+    fun `unedited sdr is reused`() {
         val plan = MediaExportPlanner.plan(sdr, MediaEditSpec())
         assertEquals(ExportRoute.REUSE, plan.route)
         assertNull(plan.profile)
         assertEquals(0, plan.videoBitrate)
     }
 
-    // ── Время и звук: пиксели не трогаем ──────────────────────────────────
+    // ── Time and sound: pixels untouched ─────────────────────────────────
 
     @Test
-    fun `обрезка по времени идёт переносом потока`() {
+    fun `a time trim is a stream copy`() {
         val plan = MediaExportPlanner.plan(sdr, MediaEditSpec(trimStartMs = 5_000, trimEndMs = 20_000))
         assertEquals(ExportRoute.REMUX, plan.route)
         assertEquals(5_000L, plan.trimStartMs)
         assertEquals(20_000L, plan.trimEndMs)
-        assertTrue(plan.reason.contains("пиксели не изменяются"))
+        assertTrue(plan.reason.contains("pixels unchanged"))
     }
 
     @Test
-    fun `выключение звука идёт переносом потока`() {
+    fun `muting is a stream copy`() {
         val plan = MediaExportPlanner.plan(sdr, MediaEditSpec(muted = true))
         assertEquals(ExportRoute.REMUX, plan.route)
         assertTrue(plan.removeAudio)
     }
 
     @Test
-    fun `звук нельзя выключить там где его нет`() {
+    fun `sound that is not there cannot be muted`() {
         val plan = MediaExportPlanner.plan(sdr.copy(hasAudio = false), MediaEditSpec(muted = true))
         assertEquals(ExportRoute.REUSE, plan.route)
     }
 
     @Test
-    fun `дрожание в конце шкалы не считается обрезкой`() {
+    fun `jitter at the end of the scale is not a trim`() {
         val plan = MediaExportPlanner.plan(sdr, MediaEditSpec(trimEndMs = 59_980))
         assertEquals(ExportRoute.REUSE, plan.route)
     }
 
-    // ── Геометрия: только перекодирование ─────────────────────────────────
+    // ── Geometry: transcode only ─────────────────────────────────────────
 
     @Test
-    fun `обрезка кадра требует перекодирования`() {
+    fun `a frame crop needs a transcode`() {
         val plan = MediaExportPlanner.plan(
             sdr, MediaEditSpec(crop = CropRect(0.1f, 0.1f, 0.9f, 0.9f)),
         )
@@ -85,15 +85,15 @@ class MediaExportPlannerTest {
     }
 
     @Test
-    fun `поворот требует перекодирования`() {
+    fun `a rotation needs a transcode`() {
         val plan = MediaExportPlanner.plan(sdr, MediaEditSpec(rotationDegrees = 90))
         assertEquals(ExportRoute.TRANSCODE, plan.route)
     }
 
-    // ── HDR: решает политика, а не обрезка ────────────────────────────────
+    // ── HDR: the policy decides, not the trim ────────────────────────────
 
     @Test
-    fun `dolby vision без правок всё равно приводится к sdr по умолчанию`() {
+    fun `unedited dolby vision still goes to sdr by default`() {
         val plan = MediaExportPlanner.plan(dolbyVision, MediaEditSpec())
         assertEquals(ExportRoute.TRANSCODE, plan.route)
         assertTrue(plan.toneMapHdrToSdr)
@@ -101,14 +101,14 @@ class MediaExportPlannerTest {
     }
 
     @Test
-    fun `dolby vision с обрезкой тоже приводится к sdr`() {
+    fun `trimmed dolby vision goes to sdr too`() {
         val plan = MediaExportPlanner.plan(dolbyVision, MediaEditSpec(trimStartMs = 3_000))
         assertEquals(ExportRoute.TRANSCODE, plan.route)
         assertTrue(plan.toneMapHdrToSdr)
     }
 
     @Test
-    fun `при политике сохранения hdr без правок остаётся как есть`() {
+    fun `with the keep hdr policy an unedited file stays as is`() {
         val plan = MediaExportPlanner.plan(
             dolbyVision, MediaEditSpec(),
             MediaExportPolicy(hdr = MediaExportPolicy.HdrPolicy.KEEP_HDR_WHEN_SUPPORTED),
@@ -118,7 +118,7 @@ class MediaExportPlannerTest {
     }
 
     @Test
-    fun `при политике сохранения hdr обрезка времени не включает перекодирование`() {
+    fun `with the keep hdr policy a time trim does not transcode`() {
         val plan = MediaExportPlanner.plan(
             dolbyVision, MediaEditSpec(trimStartMs = 1_000),
             MediaExportPolicy(hdr = MediaExportPolicy.HdrPolicy.KEEP_HDR_WHEN_SUPPORTED),
@@ -127,7 +127,7 @@ class MediaExportPlannerTest {
     }
 
     @Test
-    fun `политика original не трогает цвет никогда`() {
+    fun `the original policy never touches colour`() {
         val plan = MediaExportPlanner.plan(
             dolbyVision, MediaEditSpec(crop = CropRect(0f, 0f, 0.5f, 0.5f)),
             MediaExportPolicy(hdr = MediaExportPolicy.HdrPolicy.ORIGINAL),
@@ -136,31 +136,31 @@ class MediaExportPlannerTest {
         assertTrue(!plan.toneMapHdrToSdr)
     }
 
-    // ── Материализация — ось, независимая от маршрута ─────────────────────
+    // ── Materialization: an axis apart from the route ────────────────────
 
     @Test
-    fun `переиспользование всё равно требует своей копии`() {
+    fun `reuse still needs its own copy`() {
         val plan = MediaExportPlanner.plan(sdr, MediaEditSpec())
         assertEquals(ExportRoute.REUSE, plan.route)
         assertEquals(Materialization.COPY_TO_OWNED_STORAGE, plan.materialization)
     }
 
     @Test
-    fun `обработка создаёт файл сама и копировать нечего`() {
+    fun `processing makes the file itself, nothing to copy`() {
         val plan = MediaExportPlanner.plan(sdr, MediaEditSpec(trimStartMs = 1_000))
         assertEquals(Materialization.PRODUCED_BY_EXPORT, plan.materialization)
     }
 
-    // ── Геометрия видео: представима, но в V1 не выполняется ──────────────
+    // ── Video geometry: representable, not executed ──────────────────────
 
     @Test
-    fun `геометрия видео помечается в плане отдельным признаком`() {
+    fun `video geometry is a separate flag in the plan`() {
         val plan = MediaExportPlanner.plan(sdr, MediaEditSpec(rotationDegrees = 90))
         assertTrue(plan.videoGeometryRequested)
     }
 
     @Test
-    fun `для фотографии признак геометрии видео не ставится`() {
+    fun `a photo never gets the video geometry flag`() {
         val plan = MediaExportPlanner.plan(
             SourceMetadata(kind = SourceMetadata.Kind.IMAGE),
             MediaEditSpec(rotationDegrees = 90),
@@ -168,37 +168,37 @@ class MediaExportPlannerTest {
         assertTrue(!plan.videoGeometryRequested)
     }
 
-    // ── Документы ─────────────────────────────────────────────────────────
+    // ── Documents ────────────────────────────────────────────────────────
 
     @Test
-    fun `отправка файлом не конвертируется даже для hdr`() {
+    fun `a file send is never converted, even hdr`() {
         val plan = MediaExportPlanner.plan(dolbyVision, MediaEditSpec(sendAsFile = true))
         assertEquals(ExportRoute.REUSE, plan.route)
-        assertTrue(plan.reason.contains("файлом"))
+        assertTrue(plan.reason.contains("as a file"))
     }
 
-    // ── Фото ──────────────────────────────────────────────────────────────
+    // ── Photo ────────────────────────────────────────────────────────────
 
     @Test
-    fun `фотография всегда пересобирается по профилю`() {
+    fun `a photo is always rebuilt to the profile`() {
         val plan = MediaExportPlanner.plan(
             SourceMetadata(kind = SourceMetadata.Kind.IMAGE), MediaEditSpec(),
         )
         assertEquals(ExportRoute.TRANSCODE, plan.route)
     }
 
-    // ── Профиль ───────────────────────────────────────────────────────────
+    // ── Profile ──────────────────────────────────────────────────────────
 
     @Test
-    fun `битрейт не превышает битрейт исходника`() {
+    fun `the bitrate never exceeds the source bitrate`() {
         val plan = MediaExportPlanner.plan(sdr, MediaEditSpec(rotationDegrees = 90))
         assertTrue(plan.videoBitrate <= sdr.videoBitrate)
     }
 
     @Test
-    fun `битрейт исходника неизвестен — берётся качественный по разрешению`() {
-        // Файл настолько мал, что за вычетом звука на видео не остаётся ничего:
-        // битрейт исходника определить нельзя, и профиль считает его по кадру.
+    fun `an unknown source bitrate takes a quality bitrate by resolution`() {
+        // The file is so small that nothing is left for video once sound is taken out:
+        // the source bitrate cannot be known, so the profile derives it from the frame.
         val tiny = sdr.copy(fileBytes = 100_000)
         val plan = MediaExportPlanner.plan(tiny, MediaEditSpec(rotationDegrees = 90))
         val expected = (1920L * 1080 * 30 * MediaExportProfile.V1_COMPATIBILITY.bitsPerPixel).toInt()
@@ -206,24 +206,24 @@ class MediaExportPlannerTest {
     }
 
     @Test
-    fun `лёгкий исходник не раздувается нижней границей профиля`() {
-        // 60 секунд, 5 МБ → около 540 кбит/с видео. Нижняя граница профиля выше,
-        // но результат не должен уехать получателю втрое тяжелее исходника.
+    fun `a light source is not inflated by the profile floor`() {
+        // 60 seconds, 5 MB → about 540 kbit/s of video. The profile floor is higher,
+        // but the result must not reach the recipient three times heavier than the source.
         val light = sdr.copy(fileBytes = 5_000_000)
         val plan = MediaExportPlanner.plan(light, MediaEditSpec(rotationDegrees = 90))
         assertTrue(
-            "битрейт ${plan.videoBitrate} превысил двойной от исходника ${light.videoBitrate}",
+            "bitrate ${plan.videoBitrate} over twice the source ${light.videoBitrate}",
             plan.videoBitrate <= light.videoBitrate * 2,
         )
     }
 
     @Test
-    fun `4k не уменьшается профилем совместимости`() {
+    fun `the compatibility profile does not shrink 4k`() {
         assertNull(MediaExportProfile.V1_COMPATIBILITY.scaledSize(dolbyVision))
     }
 
     @Test
-    fun `кадр крупнее потолка уменьшается до чётных сторон`() {
+    fun `a frame over the ceiling shrinks to even sides`() {
         val huge = sdr.copy(width = 7680, height = 4320)
         val scaled = MediaExportProfile.V1_COMPATIBILITY.scaledSize(huge)
         assertNotNull(scaled)
@@ -231,23 +231,23 @@ class MediaExportPlannerTest {
         assertEquals(0, scaled.second % 2)
     }
 
-    // ── Отпечаток ─────────────────────────────────────────────────────────
+    // ── Fingerprint ──────────────────────────────────────────────────────
 
     @Test
-    fun `отпечаток меняется вместе с правкой`() {
+    fun `the fingerprint changes with the edit`() {
         val a = MediaEditSpec(trimStartMs = 0).canonical()
         val b = MediaEditSpec(trimStartMs = 1).canonical()
         assertTrue(a != b)
     }
 
     @Test
-    fun `отпечаток меняется вместе с качеством`() {
+    fun `the fingerprint changes with the quality`() {
         val a = MediaEditSpec(photoQuality = 80).canonical()
         val b = MediaEditSpec(photoQuality = 90).canonical()
         assertTrue(a != b)
     }
 
-    // ── Ключ готового файла ───────────────────────────────────────────────
+    // ── Output key ───────────────────────────────────────────────────────
 
     private fun revision(
         source: String = "file:///src.mp4",
@@ -256,27 +256,27 @@ class MediaExportPlannerTest {
     ) = com.alphamessenger.ui.media.send.MediaSendJob.revisionOf(source, spec, profileVersion)
 
     @Test
-    fun `один и тот же источник правки и профиль дают один ключ`() {
+    fun `the same source, edit and profile give one key`() {
         assertEquals(revision(), revision())
     }
 
     @Test
-    fun `смена версии профиля даёт другой ключ`() {
+    fun `a new profile version gives another key`() {
         assertTrue(revision(profileVersion = 1) != revision(profileVersion = 2))
     }
 
     @Test
-    fun `смена правки даёт другой ключ`() {
+    fun `another edit gives another key`() {
         assertTrue(revision() != revision(spec = MediaEditSpec(trimStartMs = 1)))
     }
 
     @Test
-    fun `смена источника даёт другой ключ`() {
+    fun `another source gives another key`() {
         assertTrue(revision() != revision(source = "file:///other.mp4"))
     }
 
     @Test
-    fun `ключ неотрицателен — он идёт в имя файла`() {
+    fun `the key is never negative, it goes into a file name`() {
         assertTrue(revision() >= 0L)
     }
 }

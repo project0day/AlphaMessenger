@@ -19,6 +19,9 @@ const DOWNLOAD_START: usize = 8;
 pub(crate) struct LinkWindow {
     start: usize,
     max: usize,
+    /// Grows like slow start (doubling toward the measured target) instead of one
+    /// request per full window. Measured on cellular uploads only.
+    doubling: bool,
     state: Mutex<State>,
     freed: tokio::sync::Notify,
 }
@@ -55,10 +58,11 @@ pub(crate) struct Turn {
 }
 
 impl LinkWindow {
-    const fn new(start: usize, max: usize) -> Self {
+    const fn new(start: usize, max: usize, doubling: bool) -> Self {
         Self {
             start,
             max,
+            doubling,
             state: Mutex::new(State {
                 limit: start,
                 active: 0,
@@ -137,7 +141,7 @@ impl LinkWindow {
                 };
                 let target = (DRAIN_TARGET.as_millis() as u64 / s.per_request_ms).clamp(1, self.max as u64) as usize;
                 if target > limit {
-                    limit + 1
+                    if self.doubling { (limit * 2).min(target) } else { limit + 1 }
                 } else if target < limit {
                     target.max(limit / 2).max(1)
                 } else {
@@ -147,9 +151,7 @@ impl LinkWindow {
         };
         if next != limit {
             s.limit = next;
-            let per = s.per_request_ms;
             drop(s);
-            tracing::warn!(target: "alpha_ffi", "LINK_WINDOW max={} {limit}->{next} per_request_ms={per} {outcome:?}", self.max);
             if next > limit {
                 self.freed.notify_waiters();
             }
@@ -174,13 +176,31 @@ impl Drop for Turn {
 }
 
 pub(crate) fn upload_window() -> &'static LinkWindow {
-    static W: LinkWindow = LinkWindow::new(UPLOAD_START, crate::pipeline::GLOBAL_UPLOAD_SLOTS);
+    static W: LinkWindow = LinkWindow::new(UPLOAD_START, crate::pipeline::GLOBAL_UPLOAD_SLOTS, true);
     &W
 }
 
 pub(crate) fn download_window() -> &'static LinkWindow {
-    static W: LinkWindow = LinkWindow::new(DOWNLOAD_START, crate::pipeline::GLOBAL_CHUNK_SLOTS);
+    static W: LinkWindow = LinkWindow::new(DOWNLOAD_START, crate::pipeline::GLOBAL_CHUNK_SLOTS, false);
     &W
+}
+
+/// An upload window of its own, for a test that must not share the process-wide one.
+#[cfg(test)]
+pub(crate) fn isolated_upload_window() -> &'static LinkWindow {
+    Box::leak(Box::new(LinkWindow::new(UPLOAD_START, crate::pipeline::GLOBAL_UPLOAD_SLOTS, true)))
+}
+
+/// Until the OS says otherwise the network is taken as paid for by the byte.
+static METERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether the current network is metered (cellular, a hotspot), as the OS reports it.
+pub fn set_metered(metered: bool) {
+    METERED.store(metered, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn metered() -> bool {
+    METERED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 static NETWORK_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -202,7 +222,7 @@ mod tests {
     use super::*;
 
     fn leaked(start: usize, max: usize) -> &'static LinkWindow {
-        Box::leak(Box::new(LinkWindow::new(start, max)))
+        Box::leak(Box::new(LinkWindow::new(start, max, true)))
     }
 
     fn limit(w: &LinkWindow) -> usize {
@@ -229,6 +249,22 @@ mod tests {
             wave(w, Duration::from_millis(400), Outcome::Delivered).await;
         }
         assert_eq!(limit(w), 8);
+    }
+
+    #[tokio::test]
+    async fn a_fast_link_doubles_toward_its_cap() {
+        let w = leaked(2, 24);
+        wave(w, Duration::from_millis(400), Outcome::Delivered).await;
+        assert_eq!(limit(w), 4);
+        wave(w, Duration::from_millis(400), Outcome::Delivered).await;
+        assert_eq!(limit(w), 8);
+    }
+
+    #[tokio::test]
+    async fn a_download_window_steps_one_at_a_time() {
+        let w: &'static LinkWindow = Box::leak(Box::new(LinkWindow::new(2, 24, false)));
+        wave(w, Duration::from_millis(400), Outcome::Delivered).await;
+        assert_eq!(limit(w), 3);
     }
 
     #[tokio::test]

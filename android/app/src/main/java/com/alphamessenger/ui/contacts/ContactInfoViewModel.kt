@@ -1089,10 +1089,10 @@ class ContactInfoViewModel @Inject constructor(
         }
     }
 
-    /** Self profile: update own avatar (path to a saved JPEG). */
+    /** Self profile: our new photo (a file from [com.alphamessenger.ui.settings.saveOwnPhoto]). */
     fun setMyAvatar(path: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { repository.setMyProfile(avatarPath = path) }
+            repository.setMyPhoto(path).join()
             loadChatInfo()
         }
     }

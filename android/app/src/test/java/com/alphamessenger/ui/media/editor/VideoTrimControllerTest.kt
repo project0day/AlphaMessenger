@@ -6,7 +6,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Математика отрезка. Те же правила, что и у рамки кадра: шаг считается от текущего. */
+/** Segment math. The same rules as the frame box: a step counts from the current value. */
 class VideoTrimControllerTest {
 
     private val duration = 20_000L
@@ -77,11 +77,9 @@ class VideoTrimControllerTest {
     @Test
     fun tinyTailIsNotTrim() {
         val t = VideoTrim(0L, duration - 10L)
-        assertFalse("хвост в 10 мс — не обрезка", t.hasTrim(duration))
+        assertFalse("a 10 ms tail is not a trim", t.hasTrim(duration))
     }
 
-    // Перевод отрезка в элемент набора здесь не проверяем: он требует android.net.Uri,
-    // а в обычных тестах системных классов нет. Логика перевода тривиальна —
-    // копирование трёх полей; ошибиться в ней негде, а тащить ради неё Robolectric
-    // в сборку дороже, чем польза.
+    // Segment to item conversion is not tested here: it needs android.net.Uri, which
+    // plain unit tests lack, and it only copies three fields.
 }

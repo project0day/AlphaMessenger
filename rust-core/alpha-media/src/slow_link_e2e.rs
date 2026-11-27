@@ -127,7 +127,7 @@ fn temp_file(chunks: usize) -> std::path::PathBuf {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "slow, shares the process-wide upload pool: cargo test -p alpha-media slow_link_e2e -- --ignored --test-threads=1"]
 async fn weak_link_slows_upload_but_completes() {
-    const CHUNKS: usize = crate::pipeline::UPLOAD_CONCURRENCY;
+    const CHUNKS: usize = 8;
     crate::link::network_changed();
     let file = temp_file(CHUNKS);
     let store = spawn_slow_store(true, LINK_RATE).await;
@@ -153,7 +153,7 @@ async fn weak_link_slows_upload_but_completes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "slow, shares the process-wide upload pool: cargo test -p alpha-media slow_link_e2e -- --ignored --test-threads=1"]
 async fn a_narrow_link_is_carried_a_chunk_or_two_at_a_time() {
-    const CHUNKS: usize = crate::pipeline::UPLOAD_CONCURRENCY;
+    const CHUNKS: usize = 8;
     crate::link::network_changed();
     let file = temp_file(CHUNKS);
     let store = spawn_slow_store(true, NARROW_RATE).await;
@@ -285,7 +285,7 @@ async fn spawn_slow_reader_store() -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "slow, shares the process-wide upload pool: cargo test -p alpha-media slow_link_e2e -- --ignored --test-threads=1"]
 async fn weak_link_slows_download_but_completes() {
-    const CHUNKS: usize = 2 * crate::pipeline::UPLOAD_CONCURRENCY;
+    const CHUNKS: usize = 16;
     crate::link::network_changed();
     let file = temp_file(CHUNKS);
     let addr = spawn_slow_reader_store().await;

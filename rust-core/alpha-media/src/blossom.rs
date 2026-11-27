@@ -227,6 +227,8 @@ impl EndpointState {
 }
 
 const EWMA_DECAY: f64 = 0.7;
+/// How much slower than twice the fastest a server may answer and still take its turn.
+const SLOW_SERVER_MARGIN_MICROS: u64 = 1_000_000;
 const AUTH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
 const RATE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(120);
@@ -251,6 +253,7 @@ pub struct BlobDescriptor {
 ///
 /// The `MediaSigner` holds the Nostr key pair used to authenticate
 /// uploads and deletions on Blossom relays.
+#[derive(Clone)]
 pub struct MediaSigner {
     keys: nostr::Keys,
     /// Media uploads: every blob is authorized by a FRESH key, so a server can't
@@ -412,6 +415,9 @@ pub struct BlossomClient {
     discovery: Arc<DiscoveryMemory>,
     /// Endpoint health and capabilities. One per client, in memory.
     health: Arc<std::sync::Mutex<std::collections::HashMap<String, EndpointState>>>,
+    /// The window this client's uploads take turns in: the process-wide one, or a
+    /// test's own.
+    upload_window: &'static crate::link::LinkWindow,
 }
 
 /// Media servers the user added. They go before the public ones in every
@@ -428,7 +434,8 @@ pub fn set_own_servers(urls: Vec<String>) {
 }
 
 pub fn own_servers() -> Vec<String> {
-    OWN_SERVERS.read().map(|s| s.clone()).unwrap_or_default()
+    let all = OWN_SERVERS.read().map(|s| s.clone()).unwrap_or_default();
+    if PROJECT_SERVERS_ON { all } else { all.into_iter().filter(|s| !project_server(s)).collect() }
 }
 
 /// Servers the project's health map finds down or losing blobs: tried last, never dropped
@@ -463,18 +470,30 @@ const RETIRED_BLOSSOM_SERVERS: &[&str] = &[
 /// these store and serve them in under ~1.5 s. Picked for how long they have run
 /// and how many use them, each by another operator. primal and nostr.media take
 /// JSON only, jumble.social allows 30 writes an hour and yakihonne takes 4–6 s a
-/// chunk: retired, their old copies still read.
+/// chunk: retired, their old copies still read. klepak.net and edufeed.org were added
+/// 2026-11-21 as the fastest (0.5–1 s); they are young, which the three copies cover.
 pub const DEFAULT_BLOSSOM_SERVERS: &[&str] = &[
     "https://nostr.download",
     "https://blossom.data.haus",
     "https://blossom.nmail.li",
     "https://blossom.ditto.pub",
+    "https://cdn.klepak.net",
+    "https://blossom.edufeed.org",
 ];
 
 /// The project's long-term store for the official channel: read-only for
 /// everyone (uploads need its owner's secret path), so readers fetch from it
 /// and find copies on it, but never upload there.
 pub const ARCHIVE_BLOSSOM_SERVERS: &[&str] = &["https://rs-blossom-b2.rs-nostr-relay.workers.dev"];
+
+/// The project's own servers (the archive above, any of the user's servers on the
+/// project's host) take part only while this is on: a switch for when they fail.
+pub const PROJECT_SERVERS_ON: bool = true;
+const PROJECT_HOST: &str = "rs-nostr-relay.workers.dev";
+
+pub(crate) fn project_server(url: &str) -> bool {
+    url.split("://").nth(1).and_then(|r| r.split('/').next()).is_some_and(|h| h.to_ascii_lowercase().ends_with(PROJECT_HOST))
+}
 
 /// Extra copies made in the background after a blob landed on its first server:
 /// three in all, so a file outlives two servers dropping it.
@@ -571,23 +590,78 @@ const REPLICA_QUIET: std::time::Duration = std::time::Duration::from_secs(3);
 /// Server-side copies in flight at once. They cost the phone a request, not the bytes, so they
 /// start as soon as a blob lands: a receiver on another network may reach only the copy.
 const MIRROR_SLOTS: usize = 4;
-/// A copy's authorization lasts this long; a copy still queued near its end is dropped.
+/// How long a copy's authorization lasts; it is signed as the copy goes.
 const REPLICA_AUTH_LIFETIME: std::time::Duration = std::time::Duration::from_secs(3600);
 /// Copies waiting at most: they are redundancy, never worth unbounded memory.
 const REPLICA_BACKLOG: usize = 4096;
 
 static REPLICAS_WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// A copy still to be made. It holds the address of the landed copy, not the bytes.
+/// A copy still to be made. It holds the address of the landed copy, not the bytes, and
+/// signs its request when it goes, so a copy that waited hours is still authorized.
 #[derive(Clone)]
 struct Replica {
     client: BlossomClient,
     source: String,
     sha256: String,
     content_type: String,
-    auth: String,
+    signer: MediaSigner,
     targets: Vec<String>,
-    queued: std::time::Instant,
+}
+
+impl Replica {
+    fn auth(&self) -> Option<String> {
+        self.signer.sign_auth_event_for("upload", &self.sha256, REPLICA_AUTH_LIFETIME).ok()
+    }
+}
+
+/// A copy that needs the phone's own bytes, kept on disk until it is made: it may wait
+/// for an unmetered network longer than the app lives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaitingCopy {
+    pub sha256: String,
+    /// Where the blob already is.
+    pub source: String,
+    pub content_type: String,
+    pub target: String,
+    /// Made over Tor (a secret chat's blob).
+    pub tor: bool,
+}
+
+/// Durable record of [WaitingCopy]s, kept by the app's database.
+pub trait CopyLedger: Send + Sync {
+    fn waiting(&self, copy: &WaitingCopy);
+    fn settled(&self, sha256: &str, target: &str);
+}
+
+static COPY_LEDGER: std::sync::RwLock<Option<std::sync::Arc<dyn CopyLedger>>> = std::sync::RwLock::new(None);
+
+pub fn set_copy_ledger(ledger: std::sync::Arc<dyn CopyLedger>) {
+    *COPY_LEDGER.write().unwrap_or_else(|p| p.into_inner()) = Some(ledger);
+}
+
+fn ledger() -> Option<std::sync::Arc<dyn CopyLedger>> {
+    COPY_LEDGER.read().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+/// Copies recorded by an earlier run go back into the queue. Must run inside a runtime.
+pub fn resume_copies(client: &BlossomClient, signer: &MediaSigner, copies: Vec<WaitingCopy>) {
+    replicas_of(client, signer, copies).into_iter().for_each(enqueue_replica);
+}
+
+fn replicas_of(client: &BlossomClient, signer: &MediaSigner, copies: Vec<WaitingCopy>) -> Vec<Replica> {
+    copies
+        .into_iter()
+        .filter(|c| c.tor == client.tor)
+        .map(|copy| Replica {
+            client: client.clone(),
+            source: copy.source,
+            sha256: copy.sha256,
+            content_type: copy.content_type,
+            signer: signer.clone(),
+            targets: vec![copy.target],
+        })
+        .collect()
 }
 
 fn replica_queue() -> &'static std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Replica>>> {
@@ -624,7 +698,8 @@ fn enqueue_replica(job: Replica) {
 }
 
 /// Server-side copies go at once, a few at a time; the ones a server cannot make itself
-/// queue for the phone's bytes, which go one at a time and only while the user sends nothing.
+/// queue for the phone's bytes, which go one at a time, only while the user sends nothing
+/// and never over a metered network.
 async fn replicate(mut jobs: tokio::sync::mpsc::UnboundedReceiver<Replica>) {
     use std::sync::atomic::Ordering;
     let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MIRROR_SLOTS));
@@ -638,6 +713,15 @@ async fn replicate(mut jobs: tokio::sync::mpsc::UnboundedReceiver<Replica>) {
             tokio::spawn(async move {
                 let _slot = slot;
                 if !job.client.mirror_to(&job, &target).await {
+                    if let Some(l) = ledger() {
+                        l.waiting(&WaitingCopy {
+                            sha256: job.sha256.clone(),
+                            source: job.source.clone(),
+                            content_type: job.content_type.clone(),
+                            target: target.clone(),
+                            tor: job.client.tor,
+                        });
+                    }
                     let _ = bytes_tx.send((job, target));
                 }
             });
@@ -647,21 +731,21 @@ async fn replicate(mut jobs: tokio::sync::mpsc::UnboundedReceiver<Replica>) {
 
 async fn copy_bytes(mut copies: tokio::sync::mpsc::UnboundedReceiver<(Replica, String)>) {
     while let Some((job, target)) = copies.recv().await {
-        wait_for_quiet_link().await;
-        if job.queued.elapsed() + std::time::Duration::from_secs(300) >= REPLICA_AUTH_LIFETIME {
-            continue;
-        }
+        wait_for_free_link(job.client.upload_window).await;
         job.client.upload_copy(&job, &target).await;
+        if let Some(l) = ledger() {
+            l.settled(&job.sha256, &target);
+        }
     }
 }
 
-async fn wait_for_quiet_link() {
+async fn wait_for_free_link(window: &crate::link::LinkWindow) {
     loop {
-        let quiet = crate::link::upload_window().quiet_for();
-        if quiet >= REPLICA_QUIET {
+        let quiet = window.quiet_for();
+        if quiet >= REPLICA_QUIET && !crate::link::metered() {
             return;
         }
-        tokio::time::sleep(REPLICA_QUIET - quiet).await;
+        tokio::time::sleep(REPLICA_QUIET).await;
     }
 }
 
@@ -796,12 +880,19 @@ impl BlossomClient {
             http: Self::http_client(Route::AppWide),
             discovery: Arc::new(DiscoveryMemory::default()),
             health: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            upload_window: crate::link::upload_window(),
         }
     }
 
     /// This client talks to its own list only, never the user's servers (a server test).
     pub fn listed_only(mut self) -> Self {
         self.include_own = false;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_upload_window(mut self, window: &'static crate::link::LinkWindow) -> Self {
+        self.upload_window = window;
         self
     }
 
@@ -830,6 +921,7 @@ impl BlossomClient {
             http: Self::http_client(Route::AppWide),
             discovery: Arc::new(DiscoveryMemory::default()),
             health: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            upload_window: crate::link::upload_window(),
         }
     }
 
@@ -1015,10 +1107,16 @@ impl BlossomClient {
             return false;
         }
         let cap = StorageCapability::of_content_type(&job.content_type);
-        match self.mirror_once(server, &job.source, &job.auth).await {
-            Ok(_) => {
+        let Some(auth) = job.auth() else { return true };
+        match self.mirror_once(server, &job.source, &auth).await {
+            // A copy counts only once the server names the same hash and then serves it.
+            Ok(d) if d.sha256.eq_ignore_ascii_case(&job.sha256) && self.holds(server, &job.sha256).await => {
                 self.note_mirror(server, cap, true);
                 true
+            }
+            Ok(_) => {
+                self.note_mirror(server, cap, false);
+                false
             }
             Err(f) if f.status.is_some_and(mirror_unsupported) => {
                 self.note_mirror(server, cap, false);
@@ -1032,6 +1130,12 @@ impl BlossomClient {
         }
     }
 
+    /// Whether `server` serves the blob `sha256` (BUD-01 HEAD).
+    async fn holds(&self, server: &str, sha256: &str) -> bool {
+        let head = self.http.head(format!("{server}/{sha256}")).send();
+        matches!(tokio::time::timeout(std::time::Duration::from_secs(20), head).await, Ok(Ok(r)) if r.status().is_success())
+    }
+
     /// A copy of `job` onto `server` from the phone: the landed copy is fetched and uploaded.
     async fn upload_copy(&self, job: &Replica, server: &str) {
         let cap = StorageCapability::of_content_type(&job.content_type);
@@ -1039,8 +1143,9 @@ impl BlossomClient {
             Ok(d) if compute_sha256_hex(&d) == job.sha256 => d,
             _ => return,
         };
+        let Some(auth) = job.auth() else { return };
         let started = std::time::Instant::now();
-        match self.put_once(server, &data, &job.content_type, &job.auth).await {
+        match self.put_once(server, &data, &job.content_type, &auth).await {
             Ok(_) => self.note_success(server, cap, started.elapsed().as_micros() as f64),
             Err(f) => {
                 self.note_failure(server, cap, &f);
@@ -1104,6 +1209,15 @@ impl BlossomClient {
             })
             .collect();
         ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        // Chunks take turns over the healthy servers; one much slower than the fastest
+        // would hold every send to its pace, so it steps out of the turn.
+        let fastest = ranked.iter().filter(|r| r.0 == 0 && r.1 > 0).map(|r| r.1).min();
+        if let Some(fastest) = fastest {
+            for r in ranked.iter_mut().filter(|r| r.0 == 0 && r.1 > 2 * fastest + SLOW_SERVER_MARGIN_MICROS) {
+                r.0 = 1;
+            }
+            ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        }
         ranked.into_iter().map(|(t, _, s)| (t, s)).collect()
     }
 
@@ -1130,9 +1244,6 @@ impl BlossomClient {
     fn note_mirror(&self, server: &str, cap: StorageCapability, served: bool) {
         if let Ok(mut h) = self.health.lock() {
             let e = h.entry(server.to_string()).or_default();
-            if e.mirror != Some(served) {
-                tracing::warn!(target: "alpha_ffi", "MIRROR host={} served={served}", server.split("://").nth(1).unwrap_or(server));
-            }
             e.mirror = Some(served);
             if served {
                 e.set_capability(cap, true);
@@ -1195,7 +1306,7 @@ impl BlossomClient {
         // carrying all of a big file is both its bottleneck and the first to rate-limit.
         // Ranked once the request may go: a server that failed while this one waited for
         // its turn is already at the back.
-        let mut turn = Some(crate::link::upload_window().enter().await);
+        let mut turn = Some(self.upload_window.enter().await);
         let ranked = self.eligible_ranked(cap);
         let best = ranked.iter().take_while(|(t, _)| *t == 0).count();
         let mut candidates: Vec<String> = ranked.into_iter().map(|(_, s)| s).collect();
@@ -1217,7 +1328,7 @@ impl BlossomClient {
             }
             let turn = match turn.take() {
                 Some(t) => t,
-                None => crate::link::upload_window().enter().await,
+                None => self.upload_window.enter().await,
             };
             let started = std::time::Instant::now();
             let network = crate::link::network_epoch();
@@ -1284,25 +1395,37 @@ impl BlossomClient {
         content_type: &str,
         signer: &MediaSigner,
     ) {
-        let targets: Vec<String> = candidates
-            .iter()
-            .filter(|s| !landed.contains(s))
-            .take(BACKGROUND_REPLICAS)
-            .cloned()
-            .collect();
-        if targets.is_empty() {
-            return;
+        if let Some(job) = self.replica_for(candidates, landed, source, sha256_hex, content_type, signer) {
+            enqueue_replica(job);
         }
-        let Ok(auth) = signer.sign_auth_event_for("upload", sha256_hex, REPLICA_AUTH_LIFETIME) else { return };
-        enqueue_replica(Replica {
+    }
+
+    fn replica_for(
+        &self,
+        candidates: &[String],
+        landed: &[String],
+        source: &str,
+        sha256_hex: &str,
+        content_type: &str,
+        signer: &MediaSigner,
+    ) -> Option<Replica> {
+        // Servers that copy by themselves first: a copy onto one that cannot costs the
+        // phone the bytes again, so such a server is a target only when too few others are.
+        let mut targets: Vec<String> = candidates.iter().filter(|s| !landed.contains(s)).cloned().collect();
+        targets.sort_by_key(|s| match self.mirror_known(s) {
+            Some(true) => 0,
+            None => 1,
+            Some(false) => 2,
+        });
+        targets.truncate(BACKGROUND_REPLICAS);
+        (!targets.is_empty()).then(|| Replica {
             client: self.clone(),
             source: source.to_string(),
             sha256: sha256_hex.to_string(),
             content_type: content_type.to_string(),
-            auth,
+            signer: signer.clone(),
             targets,
-            queued: std::time::Instant::now(),
-        });
+        })
     }
 
     /// Download a blob from the given URL.
@@ -1380,6 +1503,40 @@ impl BlossomClient {
         } else {
             Err(MediaError::DeleteFailed(last_err))
         }
+    }
+
+    /// Asks every server that may hold `sha256` to drop it and returns those that could
+    /// not answer for it — unreachable, busy or failing — where it may still be. A
+    /// deletion, a "not here" and a refusal no retry can change all settle a server.
+    pub async fn delete_everywhere(&self, sha256: &str, signer: &MediaSigner) -> MediaResult<Vec<String>> {
+        self.delete_on(sha256, signer, &self.all_servers()).await
+    }
+
+    /// As [`Self::delete_everywhere`], on `servers` only — those still configured: a
+    /// server the user removed is no longer ours to ask.
+    pub async fn delete_on(&self, sha256: &str, signer: &MediaSigner, servers: &[String]) -> MediaResult<Vec<String>> {
+        let auth_token = signer.sign_auth_event("delete", sha256)?;
+        let configured = self.all_servers();
+        let mut left = Vec::new();
+        for server in servers.iter().filter(|s| configured.contains(s)) {
+            let answer = self
+                .http
+                .delete(format!("{server}/{sha256}"))
+                .header("Authorization", format!("Nostr {auth_token}"))
+                .send()
+                .await;
+            let settled = match answer {
+                Ok(r) => {
+                    let s = r.status();
+                    s.is_success() || (s.is_client_error() && s != reqwest::StatusCode::TOO_MANY_REQUESTS)
+                }
+                Err(_) => false,
+            };
+            if !settled {
+                left.push(server.clone());
+            }
+        }
+        Ok(left)
     }
 }
 
@@ -1539,10 +1696,10 @@ mod t1_probe {
     }
 
     #[tokio::test]
-    #[ignore = "сетевая диагностика: cargo test -p alpha-media t1_probe -- --ignored --nocapture"]
+    #[ignore = "network diagnostics: cargo test -p alpha-media t1_probe -- --ignored --nocapture"]
     async fn t1_capability_matrix() {
         println!("\n=== T1 CAPABILITY MATRIX ===");
-        println!("тело пробы: 8192 B, по одному на representation");
+        println!("probe body: 8192 B, one per representation");
         for (i, server) in crate::DEFAULT_BLOSSOM_SERVERS.iter().enumerate() {
             println!("\n[{server}]");
             // The current production envelope format is JSON.
@@ -1550,7 +1707,7 @@ mod t1_probe {
             // A candidate that is only MEASURED here, never enabled.
             println!("{}", probe_one(server, "application/octet-stream", (i + 100) as u8).await);
         }
-        println!("\nлимиты размера и 429/Retry-After: UNKNOWN — безопасно не устанавливаются");
+        println!("\nsize limits and 429/Retry-After: UNKNOWN, not set");
         println!("=== END ===\n");
     }
 }
@@ -1577,12 +1734,12 @@ mod t2_manifest_probe {
     }
 
     #[tokio::test]
-    #[ignore = "сетевая диагностика: cargo test -p alpha-media t2_manifest_probe -- --ignored --nocapture"]
+    #[ignore = "network diagnostics: cargo test -p alpha-media t2_manifest_probe -- --ignored --nocapture"]
     async fn t2_manifest_capability_matrix() {
         println!("\n=== T2 MANIFEST CAPABILITY MATRIX ===");
         let body = manifest_shaped_body();
         let local = compute_sha256_hex(&body);
-        println!("тело манифест-образное: {} B, sha256={local}", body.len());
+        println!("manifest-like body: {} B, sha256={local}", body.len());
         for server in crate::DEFAULT_BLOSSOM_SERVERS.iter() {
             let client = BlossomClient::new(server);
             let signer = MediaSigner::generate();
@@ -1674,7 +1831,7 @@ impl BlossomClient {
     }
 
     /// The user's own servers, then this client's list, without repeats.
-    pub(crate) fn all_servers(&self) -> Vec<String> {
+    pub fn all_servers(&self) -> Vec<String> {
         let mut out = if self.include_own { own_servers() } else { Vec::new() };
         for s in &self.servers {
             if !out.iter().any(|o| o.trim_end_matches('/') == s.trim_end_matches('/')) { out.push(s.clone()); }
@@ -1697,13 +1854,9 @@ impl BlossomClient {
                 out.push(s.clone());
             }
         }
-        // Read-only archive last; skipped when the owner already lists it under its upload path.
-        let host = |u: &str| u.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or(u).to_ascii_lowercase();
-        for a in ARCHIVE_BLOSSOM_SERVERS {
-            if !out.iter().any(|o| host(o) == host(a)) {
-                out.push(a.to_string());
-            }
-        }
+        // The read-only archive is not searched: it holds the channel's files, and a
+        // ref that has a copy there names it. Searching it for every file of every
+        // chat spent its whole daily allowance on objects it never had.
         out
     }
 }
@@ -1721,7 +1874,7 @@ impl BlossomClient {
     pub async fn discover_by_content_id(&self, content_id: &str) -> MediaResult<Vec<u8>> {
         let id = content_id.trim().to_ascii_lowercase();
         if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(MediaError::DownloadFailed("content-id: не 64 hex".into()));
+            return Err(MediaError::DownloadFailed("content-id: not 64 hex".into()));
         }
         let mut last: Option<MediaError> = None;
         // Any answer other than "not here" (a timeout, a 5xx) leaves the object possibly alive.
@@ -1739,7 +1892,7 @@ impl BlossomClient {
                         return Ok(body);
                     }
                     // The server answered but returned the WRONG object. Cannot accept.
-                    tracing::warn!(target: "alpha_ffi", "DISCOVER {base}: тело не соответствует идентичности");
+                    tracing::warn!(target: "alpha_ffi", "DISCOVER {base}: body does not match the identity");
                     self.discovery_note_missing(base, &id);
                     last = Some(MediaError::DownloadFailed("content-id mismatch".into()));
                 }
@@ -1750,7 +1903,7 @@ impl BlossomClient {
                 }
             }
         }
-        if unsure { Err(last.unwrap_or(MediaError::DownloadFailed("нет кандидатов".into()))) } else { Err(MediaError::Gone) }
+        if unsure { Err(last.unwrap_or(MediaError::DownloadFailed("no candidates".into()))) } else { Err(MediaError::Gone) }
     }
 }
 
@@ -1836,7 +1989,7 @@ mod t2_manifest_acceptance {
         // The direct address on A does not answer — exactly as in resolve_manifest.
         assert!(client.download(&format!("{a}/{id}")).await.is_err());
         let got = client.discover_by_content_id(&id).await
-            .expect("манифест обязан найтись на втором хранилище");
+            .expect("the manifest must be found on the second store");
         assert_eq!(got, body);
     }
 
@@ -1851,7 +2004,7 @@ mod t2_manifest_acceptance {
 
         let client = BlossomClient::with_servers(&[b]);
         let r = client.discover_by_content_id(&id).await;
-        assert!(r.is_err(), "подменённый манифест обязан быть отвергнут по идентичности");
+        assert!(r.is_err(), "a swapped manifest must be refused by identity");
     }
 
     /// An invalid identity generates no arbitrary requests.
@@ -1860,7 +2013,7 @@ mod t2_manifest_acceptance {
         let a = spawn(HashMap::new()).await;
         let client = BlossomClient::with_servers(&[a]);
         for bad in ["", "../etc/passwd", "nothex", &"a".repeat(63)] {
-            assert!(client.discover_by_content_id(bad).await.is_err(), "принято: {bad}");
+            assert!(client.discover_by_content_id(bad).await.is_err(), "accepted: {bad}");
         }
     }
 }
@@ -1881,7 +2034,7 @@ impl BlossomClient {
         if let Some(declared) = response.content_length() {
             if declared > limit {
                 return Err(MediaError::DownloadFailed(format!(
-                    "тело объявлено как {declared} Б при пределе {limit} Б"
+                    "body declared as {declared} B over the limit of {limit} B"
                 )));
             }
         }
@@ -1889,13 +2042,13 @@ impl BlossomClient {
         while let Some(part) = tokio::time::timeout(GET_STALL, response.chunk())
             .await
             .map_err(|_| MediaError::DownloadFailed(format!("body stalled for {}s", GET_STALL.as_secs())))?
-            .map_err(|e| MediaError::DownloadFailed(format!("чтение тела: {e}")))?
+            .map_err(|e| MediaError::DownloadFailed(format!("reading the body: {e}")))?
         {
             moved.tick();
             out.extend_from_slice(&part);
             if out.len() as u64 > limit {
                 return Err(MediaError::DownloadFailed(format!(
-                    "тело превысило предел {limit} Б — сервер объявил не то, что прислал"
+                    "body over the limit of {limit} B: the server sent more than it declared"
                 )));
             }
         }
@@ -1918,10 +2071,11 @@ mod replica_tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let seen: Seen = Default::default();
         let (log, url) = (seen.clone(), base.clone());
+        let mirrored: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
         tokio::spawn(async move {
             loop {
                 let Ok((mut sock, _)) = listener.accept().await else { return };
-                let (log, blobs, url) = (log.clone(), blobs.clone(), url.clone());
+                let (log, blobs, url, mirrored) = (log.clone(), blobs.clone(), url.clone(), mirrored.clone());
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
                     let mut buf = Vec::new();
@@ -1953,7 +2107,18 @@ mod replica_tests {
                     let line = format!("{} {}", words.next().unwrap_or(""), words.next().unwrap_or(""));
                     log.lock().unwrap().push((line.clone(), body.clone()));
                     let (status, out) = match line.as_str() {
-                        "PUT /mirror" if mirror => ("200 OK", descriptor(&url, b"")),
+                        "PUT /mirror" if mirror => {
+                            let from: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                            let sha = from["url"].as_str().and_then(|u| u.rsplit('/').next()).unwrap_or("").to_string();
+                            mirrored.lock().unwrap().push(sha.clone());
+                            let d = serde_json::json!({ "url": format!("{url}/{sha}"), "sha256": sha, "size": 0, "uploaded": 0 });
+                            ("200 OK", serde_json::to_vec(&d).unwrap())
+                        }
+                        head if head.starts_with("HEAD /") => {
+                            let id = &head["HEAD /".len()..];
+                            let held = mirrored.lock().unwrap().iter().any(|m| m == id) || blobs.iter().any(|(b, _)| b == id);
+                            (if held { "200 OK" } else { "404 Not Found" }, Vec::new())
+                        }
                         "PUT /mirror" => ("404 Not Found", Vec::new()),
                         "PUT /upload" => ("200 OK", descriptor(&url, &body)),
                         get => match blobs.iter().find(|(id, _)| get == format!("GET /{id}")) {
@@ -1983,11 +2148,10 @@ mod replica_tests {
         Replica {
             client: client.clone(),
             source: format!("{source}/{sha}"),
-            auth: MediaSigner::generate().sign_auth_event_for("upload", &sha, REPLICA_AUTH_LIFETIME).unwrap(),
+            signer: MediaSigner::generate(),
             sha256: sha,
             content_type: "application/json".into(),
             targets: vec![target.to_string()],
-            queued: Instant::now(),
         }
     }
 
@@ -2004,6 +2168,18 @@ mod replica_tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         false
+    }
+
+    #[test]
+    fn a_much_slower_server_steps_out_of_the_turn() {
+        let (a, b, c) = ("https://a.example".to_string(), "https://b.example".to_string(), "https://c.example".to_string());
+        let client = BlossomClient::with_servers(&[a.clone(), b.clone(), c.clone()]).listed_only();
+        for (s, micros) in [(&a, 600_000.0), (&b, 900_000.0), (&c, 3_500_000.0)] {
+            client.note_success(s, StorageCapability::Octet, micros);
+        }
+        let ranked = client.eligible_ranked(StorageCapability::Octet);
+        assert_eq!(ranked.iter().filter(|(t, _)| *t == 0).map(|(_, s)| s.clone()).collect::<Vec<_>>(), [a, b]);
+        assert_eq!(ranked.last().map(|(_, s)| s.clone()), Some(c), "still used when the fast ones fail");
     }
 
     #[test]
@@ -2036,13 +2212,44 @@ mod replica_tests {
     async fn server_side_copies_go_while_the_user_uploads() {
         let blob = b"{\"chunk\":1}".to_vec();
         let (target, seen) = store(Vec::new(), true).await;
-        let client = BlossomClient::with_servers(&[target.clone()]).listed_only();
+        let window = crate::link::isolated_upload_window();
+        let client = BlossomClient::with_servers(&[target.clone()]).listed_only().with_upload_window(window);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(replicate(rx));
-        let _sending = crate::link::upload_window().enter().await;
+        let _sending = window.enter().await;
         tx.send(job(&client, "http://127.0.0.1:9", &blob, &target)).unwrap_or_else(|_| panic!("worker gone"));
         assert!(wait_for(&seen, "PUT /mirror", Duration::from_secs(2)).await, "no server-side copy: {:?}", lines(&seen));
         assert_eq!(client.mirror_known(&target), Some(true));
+    }
+
+    #[tokio::test]
+    async fn copies_go_first_to_servers_that_copy_by_themselves() {
+        let (a, b, c) = ("https://a.example".to_string(), "https://b.example".to_string(), "https://c.example".to_string());
+        let client = BlossomClient::with_servers(&[a.clone(), b.clone(), c.clone()]).listed_only();
+        client.note_mirror(&b, StorageCapability::Octet, false);
+        client.note_mirror(&c, StorageCapability::Octet, true);
+        let signer = MediaSigner::generate();
+        let job = client
+            .replica_for(&[a.clone(), b.clone(), c.clone()], &[a.clone()], "https://a.example/x", &"0".repeat(64), "application/octet-stream", &signer)
+            .expect("a copy to make");
+        assert_eq!(job.targets, [c, b]);
+    }
+
+    #[tokio::test]
+    async fn a_deletion_a_server_could_not_answer_for_stays_due() {
+        let (answering, _) = store(Vec::new(), false).await;
+        let unreachable = "http://127.0.0.1:9".to_string();
+        let client = BlossomClient::with_servers(&[answering.clone(), unreachable.clone()]).listed_only();
+        let left = client.delete_everywhere(&"cd".repeat(32), &MediaSigner::generate()).await.unwrap();
+        assert_eq!(left, [unreachable], "only the server that never answered keeps the deletion due");
+    }
+
+    #[tokio::test]
+    async fn a_mirror_that_does_not_hold_the_blob_is_not_a_copy() {
+        let blob = b"{\"chunk\":3}".to_vec();
+        let (target, _) = store(Vec::new(), false).await;
+        let client = BlossomClient::with_servers(&[target.clone()]).listed_only();
+        assert!(!client.holds(&target, &compute_sha256_hex(&blob)).await);
     }
 
     #[tokio::test]
@@ -2050,10 +2257,12 @@ mod replica_tests {
         let blob = b"{\"chunk\":2}".to_vec();
         let (source, _) = store(vec![(compute_sha256_hex(&blob), blob.clone())], false).await;
         let (target, seen) = store(Vec::new(), false).await;
-        let client = BlossomClient::with_servers(&[source.clone(), target.clone()]).listed_only();
+        let window = crate::link::isolated_upload_window();
+        let client = BlossomClient::with_servers(&[source.clone(), target.clone()]).listed_only().with_upload_window(window);
+        crate::link::set_metered(false);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(replicate(rx));
-        let sending = crate::link::upload_window().enter().await;
+        let sending = window.enter().await;
         tx.send(job(&client, &source, &blob, &target)).unwrap_or_else(|_| panic!("worker gone"));
         assert!(wait_for(&seen, "PUT /mirror", Duration::from_secs(2)).await, "no /mirror attempt: {:?}", lines(&seen));
         tokio::time::sleep(REPLICA_QUIET + Duration::from_secs(1)).await;
@@ -2063,5 +2272,46 @@ mod replica_tests {
         let uploaded = seen.lock().unwrap().iter().find(|(l, _)| l == "PUT /upload").map(|(_, b)| b.clone());
         assert_eq!(uploaded, Some(blob));
         assert_eq!(client.mirror_known(&target), Some(false));
+    }
+
+    #[derive(Default)]
+    struct Ledger(std::sync::Mutex<Vec<(String, bool)>>);
+
+    impl CopyLedger for Ledger {
+        fn waiting(&self, copy: &WaitingCopy) {
+            self.0.lock().unwrap().push((copy.sha256.clone(), true));
+        }
+        fn settled(&self, sha256: &str, _target: &str) {
+            self.0.lock().unwrap().push((sha256.to_string(), false));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_copy_that_needs_the_phones_bytes_is_kept_until_made() {
+        let blob = b"{\"chunk\":4}".to_vec();
+        let sha = compute_sha256_hex(&blob);
+        let (source, _) = store(vec![(sha.clone(), blob.clone())], false).await;
+        let (target, seen) = store(Vec::new(), false).await;
+        let window = crate::link::isolated_upload_window();
+        let client = BlossomClient::with_servers(&[source.clone(), target.clone()]).listed_only().with_upload_window(window);
+        crate::link::set_metered(false);
+        let ledger = std::sync::Arc::new(Ledger::default());
+        set_copy_ledger(ledger.clone());
+        let mine = |l: &Ledger| l.0.lock().unwrap().iter().filter(|(s, _)| *s == sha).map(|(_, w)| *w).collect::<Vec<_>>();
+
+        // An earlier run recorded the copy; this one takes it up again, newly signed.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(replicate(rx));
+        let copy = WaitingCopy { sha256: sha.clone(), source: format!("{source}/{sha}"), content_type: "application/json".into(), target: target.clone(), tor: false };
+        for job in replicas_of(&client, &MediaSigner::generate(), vec![copy]) {
+            tx.send(job).unwrap_or_else(|_| panic!("worker gone"));
+        }
+
+        assert!(wait_for(&seen, "PUT /upload", Duration::from_secs(20)).await, "the recorded copy was not made: {:?}", lines(&seen));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while mine(&ledger).len() < 2 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(mine(&ledger), [true, false], "recorded while waiting, settled once made");
     }
 }

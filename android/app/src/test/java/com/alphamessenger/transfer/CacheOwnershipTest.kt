@@ -13,37 +13,35 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 
 /**
- * ── ВЛАДЕНИЕ БАЙТАМИ: кэш против источника и OUTBOX ──────────────────────────
+ * Byte ownership: cache versus source and OUTBOX.
  *
- * Три вида байтов и ровно один, который «Удалить из кэша» вправе трогать:
+ * Three kinds of bytes, and only one that "Delete from cache" may touch:
  *
- * * **ИСТОЧНИК** — оригинал пользователя, и OUTBOX набора `filesDir/outbox`.
- *   Не наше либо нужно отправке. Не трогаем.
- * * **КЭШ** — `cacheDir/media`, `cacheDir/stream_chunks`, а также собственная
- *   копия ЗАВЕРШЁННОЙ одиночной отправки `cacheDir/send_*`.
+ * * **Source**: the user's original and the set OUTBOX `filesDir/outbox`. Not ours,
+ *   or needed by the send. Never touched.
+ * * **Cache**: `cacheDir/media`, `cacheDir/stream_chunks`, and our own copy of a
+ *   FINISHED single send `cacheDir/send_*`.
  *
- * Про последнюю здесь и написано главное, потому что я на ней ошибся. У копии
- * ДВЕ фазы: пока отправка идёт — это источник докачки T4 и трогать его нельзя;
- * после завершения та же копия снова одноразовая и удаляться обязана. Я
- * запретил обе фазы и сломал вторую, то есть основной сценарий: «Удалить из
- * кэша» на документе перестало удалять что-либо и отвечало «В кэше нет файла».
+ * That copy has two phases: while the send runs it is the T4 resume source and must
+ * stay; once the send is done it is disposable again and must go. Forbidding both
+ * once broke the main case: "Delete from cache" on a document deleted nothing.
  *
- * Решение принимает вызывающий ([deleteLocalCopy]) — для него нужен запрос к
- * очереди, а он не имеет права идти с главного потока.
+ * The caller decides ([deleteLocalCopy]): it needs a queue lookup, which must not
+ * run on the main thread.
  */
 class CacheOwnershipTest {
 
     @get:Rule val tmp = TemporaryFolder()
 
-    // ── заглушка диска: повторяет РАЗДЕЛЕНИЕ владения, а не его реализацию ──
+    // ── disk stub: mirrors the ownership split, not its implementation ─────
 
     private class FakeRepo(private val root: File) : TransferRepository {
-        /** ref → путь кэша (одноразовые байты). */
+        /** ref → cache path (disposable bytes). */
         val cache = HashMap<String, File>()
-        /** ref → путь ИСТОЧНИКА либо OUTBOX (свои байты). */
+        /** ref → source or OUTBOX path (owned bytes). */
         val local = HashMap<String, File>()
         val evicted = HashSet<String>()
-        /** Что удалила последняя очистка кэша — для проверки, что лишнего нет. */
+        /** What the last cache clear deleted, to check nothing extra went. */
         val deleted = ArrayList<File>()
 
         override fun cacheEntry(ref: String) = CacheEntry.ABSENT
@@ -57,8 +55,8 @@ class CacheOwnershipTest {
         override suspend fun downloadTracked(ref: String, opId: String): String? = null
 
         /**
-         * Повторяет правило хранилища: одноразовый кэш — всегда, собственная
-         * копия — только внутри кэша И только когда отправка завершена.
+         * The store's rule: disposable cache always, our own copy only inside the
+         * cache and only once the send is done.
          */
         override fun deleteCache(ref: String, deleteLocalCopy: Boolean): Long {
             var freed = 0L
@@ -66,9 +64,9 @@ class CacheOwnershipTest {
                 freed += it.length(); it.delete(); deleted.add(it)
             }
             if (deleteLocalCopy) {
-                // Наши места ДВА — по числу конвейеров отправки: копия документа
-                // в кэше и готовый файл набора в `outbox/work`. Разделитель пути
-                // системозависим, поэтому сравниваем каталоги, а не подстроку.
+                // Two places are ours, one per send pipeline: the document copy in the
+                // cache and the set's output in `outbox/work`. Path separators differ by
+                // system, so directories are compared, not substrings.
                 local[ref]?.takeIf { it.exists() && ours(it) }?.let {
                     freed += it.length(); it.delete(); deleted.add(it)
                 }
@@ -76,7 +74,7 @@ class CacheOwnershipTest {
             return freed
         }
 
-        /** Копия сделана нами: кэш документа либо готовый файл набора. */
+        /** A copy we made: a document cache file or a set output. */
         private fun ours(f: File): Boolean =
             f.parentFile?.name == "cache" ||
                 generateSequence(f.parentFile) { it.parentFile }.any { it.name == "work" }
@@ -101,19 +99,18 @@ class CacheOwnershipTest {
     private fun file(name: String, bytes: Int = 1024): File =
         File(tmp.root, name).apply { parentFile?.mkdirs(); writeBytes(ByteArray(bytes)) }
 
-    /** Пузырь сообщает движку о вложении — иначе владелец не знает про свой файл. */
+    /** The bubble tells the engine about the attachment, or the owner never learns of its file. */
     private fun TransferEngine.present(ref: String, ownPath: String?, outgoing: Boolean) =
         consider(TransferKey.download(ref), "image", "f.jpg", 1024L, outgoing, ownPath, "op")
 
-    // ── завершённая отправка: копия одноразовая, где бы её ни сделали ───────
+    // ── a finished send: the copy is disposable wherever it was made ───────
 
     /**
-     * Своё фото ведёт себя как документ.
+     * An own photo behaves like a document.
      *
-     * Разница между ними была ничем не оправдана: копия документа лежит в
-     * `cacheDir/send_*`, копия фото — в `filesDir/outbox/work`, и условие знало
-     * только про первое место. Документ удалялся, фото — нет, а надпись на
-     * экране обещала одно и то же.
+     * The document copy lives in `cacheDir/send_*`, the photo copy in
+     * `filesDir/outbox/work`, and the rule once knew only the first place: the document
+     * was deleted, the photo was not, though the screen promised the same.
      */
     @Test
     fun OUTGOING_PHOTO_AFTER_SENT_IS_DISPOSABLE() {
@@ -124,16 +121,16 @@ class CacheOwnershipTest {
 
         e.present(ref, sent.absolutePath, outgoing = true)
         val key = TransferKey.download(ref)
-        assertTrue("до удаления фото доступно локально", e.snapshotOf(key).isReady)
+        assertTrue("before deleting, the photo is local", e.snapshotOf(key).isReady)
 
         val freed = e.deleteCacheOf(listOf(key), deleteLocalCopy = true)
 
-        assertEquals("удалены настоящие байты", 4096L, freed)
-        assertFalse("копия завершённой отправки удалена", sent.exists())
-        assertTrue("предлагается скачать заново", e.stateOf(key) is TransferState.CacheEvicted)
+        assertEquals("real bytes were deleted", 4096L, freed)
+        assertFalse("the finished send copy is deleted", sent.exists())
+        assertTrue("a new download is offered", e.stateOf(key) is TransferState.CacheEvicted)
     }
 
-    /** Набор — то же правило поэлементно; отдельной модели у альбома нет. */
+    /** A set follows the same rule per item; an album has no model of its own. */
     @Test
     fun OUTGOING_ALBUM_AFTER_SENT_IS_DISPOSABLE() {
         val e = engine()
@@ -146,10 +143,10 @@ class CacheOwnershipTest {
         val freed = e.deleteCacheOf(refs.map { TransferKey.download(it) }, deleteLocalCopy = true)
 
         assertEquals(3 * 2048L, freed)
-        files.forEach { assertFalse("копия участника удалена", it.exists()) }
+        files.forEach { assertFalse("the member copy is deleted", it.exists()) }
     }
 
-    /** Пока отправка идёт — источник докачки неприкосновенен. */
+    /** While the send runs, the resume source is kept. */
     @Test
     fun ACTIVE_ALBUM_SOURCE_NOT_DELETED() {
         val e = engine()
@@ -161,11 +158,11 @@ class CacheOwnershipTest {
         val freed = e.deleteCacheOf(listOf(TransferKey.download(ref)), deleteLocalCopy = false)
 
         assertEquals(0L, freed)
-        assertTrue("источник докачки уцелел", src.exists())
-        assertTrue("остаётся доступным", e.snapshotOf(TransferKey.download(ref)).isReady)
+        assertTrue("the resume source survived", src.exists())
+        assertTrue("stays available", e.snapshotOf(TransferKey.download(ref)).isReady)
     }
 
-    /** Оригинал пользователя не наш — не удаляем даже после отправки. */
+    /** The user's original is not ours: never deleted, even after the send. */
     @Test
     fun USER_SOURCE_NEVER_DELETED() {
         val e = engine()
@@ -177,14 +174,13 @@ class CacheOwnershipTest {
         val freed = e.deleteCacheOf(listOf(TransferKey.download(ref)), deleteLocalCopy = true)
 
         assertEquals(0L, freed)
-        assertTrue("оригинал в галерее на месте", gallery.exists())
-        assertTrue("и остаётся доступным", e.snapshotOf(TransferKey.download(ref)).isReady)
+        assertTrue("the gallery original is in place", gallery.exists())
+        assertTrue("and stays available", e.snapshotOf(TransferKey.download(ref)).isReady)
     }
 
     /**
-     * ЗАВЕРШЁННЫЙ документ снова одноразовый — это и есть поведение, которое
-     * работало до правок владения кэшем и которое я сломал, объявив копию в
-     * кэше неприкосновенной по месту хранения.
+     * A FINISHED document is disposable again: the behaviour from before the cache
+     * ownership work, once broken by treating any cache copy as untouchable.
      */
     @Test
     fun DOCUMENT_AFTER_SENT_IS_DISPOSABLE() {
@@ -194,17 +190,17 @@ class CacheOwnershipTest {
         repo.local[ref] = copy
         e.present(ref, copy.absolutePath, outgoing = true)
         val key = TransferKey.download(ref)
-        assertTrue("до удаления документ доступен локально", e.snapshotOf(key).isReady)
+        assertTrue("before deleting, the document is local", e.snapshotOf(key).isReady)
 
-        // Отправка завершена → решение вызывающего «копию можно».
+        // The send is done → the caller allows the copy.
         val freed = e.deleteCacheOf(listOf(key), deleteLocalCopy = true)
 
-        assertEquals("удалены настоящие байты", 8192L, freed)
-        assertFalse("копия завершённой отправки удалена", copy.exists())
-        assertTrue("предлагается скачать заново", e.stateOf(key) is TransferState.CacheEvicted)
+        assertEquals("real bytes were deleted", 8192L, freed)
+        assertFalse("the finished send copy is deleted", copy.exists())
+        assertTrue("a new download is offered", e.stateOf(key) is TransferState.CacheEvicted)
     }
 
-    /** АКТИВНАЯ отправка — источник докачки T4, трогать запрещено. */
+    /** An ACTIVE send is the T4 resume source: not to be touched. */
     @Test
     fun ACTIVE_SEND_SOURCE_NOT_DELETED() {
         val e = engine()
@@ -214,15 +210,15 @@ class CacheOwnershipTest {
         e.present(ref, copy.absolutePath, outgoing = true)
         val key = TransferKey.download(ref)
 
-        // Строка ещё в очереди → вызывающий передаёт «нельзя».
+        // The row is still queued → the caller forbids it.
         val freed = e.deleteCacheOf(listOf(key), deleteLocalCopy = false)
 
         assertEquals(0L, freed)
-        assertTrue("источник докачки уцелел", copy.exists())
-        assertTrue("документ остаётся доступным", e.snapshotOf(key).isReady)
+        assertTrue("the resume source survived", copy.exists())
+        assertTrue("the document stays available", e.snapshotOf(key).isReady)
     }
 
-    // ── входящее: кэш действительно исчезает ────────────────────────────────
+    // ── incoming: the cache really goes ────────────────────────────────────
 
     @Test
     fun INCOMING_SINGLE_CLEAR_CACHE_BECOMES_REMOTE() {
@@ -236,9 +232,9 @@ class CacheOwnershipTest {
 
         val freed = e.deleteCacheOf(listOf(key), deleteLocalCopy = true)
 
-        assertEquals("удалены настоящие байты", 4096L, freed)
+        assertEquals("real bytes were deleted", 4096L, freed)
         assertFalse(cached.exists())
-        assertTrue("предлагается скачать заново", e.stateOf(key) is TransferState.CacheEvicted)
+        assertTrue("a new download is offered", e.stateOf(key) is TransferState.CacheEvicted)
     }
 
     @Test
@@ -253,13 +249,13 @@ class CacheOwnershipTest {
         assertEquals(3 * 2048L, freed)
         refs.forEach {
             assertTrue(
-                "каждый участник предлагает загрузку",
+                "every member offers a download",
                 e.stateOf(TransferKey.download(it)) is TransferState.CacheEvicted,
             )
         }
     }
 
-    // ── правдивый результат ─────────────────────────────────────────────────
+    // ── an honest result ───────────────────────────────────────────────────
 
     @Test
     fun NO_FAKE_DELETE_SUCCESS() {
@@ -268,14 +264,14 @@ class CacheOwnershipTest {
         repo.local[ref] = file("DCIM/own.jpg")
         e.present(ref, repo.local[ref]!!.absolutePath, outgoing = true)
 
-        // Наличие оригинала НЕ является доказательством удаления.
+        // An original being there is NOT proof of a deletion.
         assertEquals(
-            "успехом считаются только удалённые байты кэша",
+            "only deleted cache bytes count as success",
             0L, e.deleteCacheOf(listOf(TransferKey.download(ref)), deleteLocalCopy = true),
         )
     }
 
-    // ── очистка не запускает загрузку сама ──────────────────────────────────
+    // ── a clear never starts a download by itself ──────────────────────────
 
     @Test
     fun NO_AUTO_REDOWNLOAD_AFTER_CLEAR() {
@@ -286,14 +282,14 @@ class CacheOwnershipTest {
         val key = TransferKey.download(ref)
 
         e.deleteCacheOf(listOf(key), deleteLocalCopy = true)
-        assertTrue("метка поставлена", repo.isCacheEvicted(ref))
+        assertTrue("the mark is set", repo.isCacheEvicted(ref))
 
-        // Политика снова смотрит на это вложение (прокрутка, смена сети,
-        // переключение настроек) — и обязана промолчать.
+        // The policy looks at this attachment again (scrolling, a network change, a
+        // settings switch) and must stay silent.
         e.present(ref, null, outgoing = false)
 
         assertTrue(
-            "удалённое не возвращается по сети само",
+            "a deleted file does not come back over the network by itself",
             e.stateOf(key) is TransferState.CacheEvicted,
         )
     }

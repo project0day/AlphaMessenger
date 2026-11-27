@@ -1,7 +1,7 @@
-//! ЭТАП 4 — Memory Benchmark: True Streaming Crypto.
-//! Сравнивает пиковую RSS старого пути (upload_streaming: весь файл + весь
-//! ciphertext в RAM) и нового (upload_streaming_file: O(chunk)).
-//! Сеть НЕ трогаем — меряем именно память/CPU на этапе read→encrypt→envelope.
+//! Memory benchmark for streaming crypto.
+//! Compares the peak RSS of the old path (upload_streaming: the whole file and
+//! its ciphertext in RAM) with the new one (upload_streaming_file: O(chunk)).
+//! No network: only memory and CPU of read → encrypt → envelope.
 //! Run: `cargo run --release -p alpha-media --example blossom_probe`.
 
 use alpha_media::blob_transport::{active_codec, BlobMetrics};
@@ -93,7 +93,7 @@ fn main() {
         make_file(&path, size_mb * 1_048_576);
         let base = rss_bytes();
 
-        println!("\n================ файл {size_mb} MB ================");
+        println!("\n================ file {size_mb} MB ================");
         println!("  baseline RSS         : {:>8.1} MB", mb(base));
 
         BlobMetrics::reset();
@@ -101,7 +101,7 @@ fn main() {
         let (peak_new, chunks_new) = new_path(&path);
         let ms_new = t.elapsed().as_millis();
         println!(
-            "  NEW streaming (O(chunk)) : peak {:>8.1} MB  (+{:>7.1} MB над baseline)  {chunks_new} chunks  {ms_new}ms",
+            "  NEW streaming (O(chunk)) : peak {:>8.1} MB  (+{:>7.1} MB over baseline)  {chunks_new} chunks  {ms_new}ms",
             mb(peak_new), mb(peak_new.saturating_sub(base)),
         );
 
@@ -109,7 +109,7 @@ fn main() {
         let (peak_old, chunks_old) = old_path(&path);
         let ms_old = t.elapsed().as_millis();
         println!(
-            "  OLD whole-file (O(file)) : peak {:>8.1} MB  (+{:>7.1} MB над baseline)  {chunks_old} chunks  {ms_old}ms",
+            "  OLD whole-file (O(file)) : peak {:>8.1} MB  (+{:>7.1} MB over baseline)  {chunks_old} chunks  {ms_old}ms",
             mb(peak_old), mb(peak_old.saturating_sub(base)),
         );
 

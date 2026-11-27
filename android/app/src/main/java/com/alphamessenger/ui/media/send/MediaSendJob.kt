@@ -57,6 +57,8 @@ enum class MediaSendFailure(@StringRes val messageRes: Int) {
 }
 
 enum class MediaSendState {
+    /** The set is still being composed: items go up as it settles, nothing is published. */
+    DRAFT,
     QUEUED,
     /** Preparing files: trim, rotate, compress. No network needed. */
     PROCESSING,
@@ -96,8 +98,14 @@ data class MediaSendItem(
      * whole album on every restart.
      */
     val uploadedRef: String? = null,
-    /** The key of a pre-upload made for this item while the set was composed; see [MediaPreUpload]. */
+    /** What shapes the file (draft, edits, quality): a composed item is sent only under the same key. */
     val preUploadKey: String? = null,
+    /**
+     * The core operation the item's bytes go up under, fixed for the item's whole life:
+     * a resume after a network switch or a restart finds the chunks already stored.
+     * Null in jobs saved before it, whose op was [MediaSendJob.opId].
+     */
+    val uploadOp: String? = null,
 ) {
     val isVideo: Boolean get() = draft.isVideo
     val mediaType: String get() = if (isVideo) "video" else "image"
@@ -164,6 +172,9 @@ data class MediaSendJob(
 
     /** Transfer key of one item — same as the album's: `<msgId>#<i>`. */
     fun opId(index: Int): String = "$messageId#$index"
+
+    /** The core operation [item]'s bytes go up under. */
+    fun uploadOpOf(item: MediaSendItem): String = item.uploadOp ?: opId(item.index)
 
     companion object {
         /**
@@ -281,6 +292,7 @@ internal object MediaSendJson {
         put("ready", item.ready)
         item.uploadedRef?.let { put("uploaded_ref", it) }
         item.preUploadKey?.let { put("pre_upload_key", it) }
+        item.uploadOp?.let { put("upload_op", it) }
         put("draft", draftToJson(item.draft))
     }
 
@@ -294,6 +306,7 @@ internal object MediaSendJson {
             ready = o.optBoolean("ready", false),
             uploadedRef = o.optString("uploaded_ref", "").takeIf { it.isNotEmpty() },
             preUploadKey = o.optString("pre_upload_key", "").takeIf { it.isNotEmpty() },
+            uploadOp = o.optString("upload_op", "").takeIf { it.isNotEmpty() },
         )
     }
 

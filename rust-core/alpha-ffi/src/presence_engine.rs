@@ -47,6 +47,8 @@ const STARTUP_DELAY_BASE_SECS: i64 = 2;
 const STARTUP_DELAY_JITTER_SECS: i64 = 4; // 2..5
 /// Bound per-user device state (multi-device is supported, but not unbounded).
 const MAX_DEVICES_PER_USER: usize = 8;
+/// Where activity seen in chats is kept, beside the user's real devices.
+const ACTIVITY_DEVICE: &str = "activity";
 /// Drop device state we haven't heard from in this long (housekeeping — keeps
 /// the in-memory map from growing with dead/rotated devices).
 const DEVICE_RETENTION_SECS: i64 = 24 * 60 * 60;
@@ -312,6 +314,27 @@ impl PresenceEngine {
         true
     }
 
+    /// The peer is visibly in the app now (typing or recording in a chat with us): as
+    /// good as a beat from their screen. Only for someone who shares presence with us at
+    /// all; a hidden presence sends no such signals either.
+    pub fn note_activity(&mut self, user_id: &str, now: i64) -> bool {
+        let Some(u) = self.users.get_mut(user_id) else { return false };
+        let d = u.devices.entry(ACTIVITY_DEVICE.to_string()).or_insert(DevicePresence {
+            last_seq: 0,
+            last_recv: 0,
+            last_ts: 0,
+            last_fg_recv: 0,
+            last_fg_ts: 0,
+            last_bg_recv: 0,
+            capabilities: Vec::new(),
+        });
+        d.last_recv = now;
+        d.last_ts = now;
+        d.last_fg_recv = now;
+        d.last_fg_ts = now;
+        true
+    }
+
     /// Computed presence aggregated across ALL of the user's devices.
     pub fn presence_state(&self, user_id: &str, now: i64) -> PresenceState {
         let u = match self.users.get(user_id) {
@@ -475,6 +498,20 @@ mod tests {
     }
 
     #[test]
+    fn typing_in_a_chat_counts_as_being_here_for_someone_sharing_presence() {
+        let mut e = PresenceEngine::new();
+        assert!(!e.note_activity("stranger", 1000), "no presence shared, nothing to learn");
+        assert_eq!(e.effective_status("stranger", 1000), EffectiveStatus::Offline);
+        // Their beats stopped getting through a day ago; they are typing to us now.
+        let now = 200_000;
+        assert!(!ok(&mut e, "a", "d1", 1, now - 86_000, now));
+        assert!(e.note_activity("a", now));
+        assert_eq!(e.effective_status("a", now + 10), EffectiveStatus::Online);
+        assert_eq!(e.last_seen("a"), now);
+        assert_eq!(e.effective_status("a", now + AWAY_WINDOW_SECS), EffectiveStatus::Offline, "then it ages like a beat");
+    }
+
+    #[test]
     fn a_background_beat_is_not_online() {
         let mut e = PresenceEngine::new();
         assert!(e.ingest_beat(V, "a", "d1", 1, 1000, false, None, None, vec!["voice".into()], false, 1000));
@@ -584,11 +621,11 @@ mod tests {
     #[test]
     fn custom_status_carries_and_persists() {
         let mut e = PresenceEngine::new();
-        e.ingest_update(V, "a", "d1", 1, 1000, false, Some("пью кофе ☕".into()), Some(0xFF8800FF), Vec::new(), 1000);
-        assert_eq!(e.custom_status("a").as_deref(), Some("пью кофе ☕"));
+        e.ingest_update(V, "a", "d1", 1, 1000, false, Some("having coffee ☕".into()), Some(0xFF8800FF), Vec::new(), 1000);
+        assert_eq!(e.custom_status("a").as_deref(), Some("having coffee ☕"));
         assert_eq!(e.status_color("a"), Some(0xFF8800FF));
-        e.ingest_update(V, "a", "d1", 2, 1030, false, Some("пью кофе ☕".into()), Some(0xFF8800FF), Vec::new(), 1030);
-        assert_eq!(e.custom_status("a").as_deref(), Some("пью кофе ☕"));
+        e.ingest_update(V, "a", "d1", 2, 1030, false, Some("having coffee ☕".into()), Some(0xFF8800FF), Vec::new(), 1030);
+        assert_eq!(e.custom_status("a").as_deref(), Some("having coffee ☕"));
         // Every heartbeat carries the full state: an absent status clears it.
         ok(&mut e, "a", "d1", 3, 1060, 1060);
         assert_eq!(e.custom_status("a"), None);

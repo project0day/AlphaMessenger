@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.draw.clip
@@ -113,7 +114,8 @@ fun MessageMenuPopup(
     val edge = Color.White.copy(alpha = if (dark) 0.10f else 0.35f)
     val cardShape = RoundedCornerShape(20.dp)
     val statusTop = WindowInsets.statusBars.getTop(density)
-    val navBottom = WindowInsets.navigationBars.getBottom(density)
+    // An open keyboard stays open: the menu keeps to the chat above it.
+    val navBottom = maxOf(WindowInsets.navigationBars.getBottom(density), WindowInsets.ime.getBottom(density))
 
     Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }) {
         Box(

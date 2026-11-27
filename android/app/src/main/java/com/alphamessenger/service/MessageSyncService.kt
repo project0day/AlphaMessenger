@@ -577,6 +577,10 @@ class MessageSyncService : Service() {
                         // the chat has no active card, this is a no-op.
                         runCatching { refreshEditedNotification(message.chatId) }
                     }
+                    // A message deleted for everyone takes its file off this phone too.
+                    if (message.msgType == uniffi.alphamessenger.MessageType.DELETE) {
+                        serviceScope.launch { runCatching { repository.cleanUpDeletedMedia() } }
+                    }
                 }
         }
     }
@@ -1018,6 +1022,9 @@ class MessageSyncService : Service() {
                     defaultNetwork = null
                     applyDefaultNetwork()
                 }
+            }
+            override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) {
+                repository.setNetworkMetered(!caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
             }
         }
         runCatching {

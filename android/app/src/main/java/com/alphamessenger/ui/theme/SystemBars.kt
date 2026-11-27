@@ -5,9 +5,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.view.WindowCompat
+
+/** A fullscreen layer over the app (a story, the camera, a viewer): black bars while it shows. */
+@androidx.compose.runtime.Composable
+fun BlackSystemBars() {
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val owner = Any()
+        SystemBars.requestOverlay(owner)
+        onDispose { SystemBars.releaseOverlay(owner) }
+    }
+}
 
 /**
  * The only place in the project that writes to the Window. Screens only
@@ -15,8 +24,9 @@ import androidx.core.view.WindowCompat
  */
 object SystemBars {
     /**
-     * Navigation-bar colour requests, newest on top. A screen adds its own and,
-     * when it leaves, removes ONLY its own — the one beneath applies again. (A
+     * What the app draws under the navigation buttons ([NavigationBarScrim]), newest
+     * request on top; transparent = the screen draws its own there. A screen adds its
+     * own and, when it leaves, removes ONLY its own — the one beneath applies again. (A
      * single shared value let a closing screen wipe the colour of the screen it
      * returned to: the chat's see-through bar turned solid after the camera.)
      */
@@ -36,10 +46,20 @@ object SystemBars {
     var lightIcons by mutableStateOf<Boolean?>(null)
 
     /**
-     * A fullscreen layer over the app: the bars go black. DISCRETELY, not
-     * per-frame — otherwise the window is repainted on every animation frame.
+     * Fullscreen layers over the app (a viewer, a story, the camera): while any is
+     * open the bars go black. DISCRETELY, not per-frame — otherwise the window is
+     * repainted on every animation frame.
      */
-    var fullscreenOverlay by mutableStateOf(false)
+    private val overlays = androidx.compose.runtime.mutableStateListOf<Any>()
+    val fullscreenOverlay: Boolean get() = overlays.isNotEmpty()
+
+    fun requestOverlay(owner: Any) {
+        if (overlays.none { it === owner }) overlays.add(owner)
+    }
+
+    fun releaseOverlay(owner: Any) {
+        overlays.removeAll { it === owner }
+    }
 
     private val windows = LinkedHashSet<Window>()
     private var lastNav: Int? = null
@@ -75,13 +95,17 @@ object SystemBars {
         navRequests.clear()
         statusColor = null
         lightIcons = null
-        fullscreenOverlay = false
+        overlays.clear()
     }
 
-    /** Called by the theme only; writes to windows only on a real change. */
-    fun apply(view: android.view.View, baseNav: Color, baseStatus: Color, baseLight: Boolean) {
+    /**
+     * Called by the theme only; writes to windows only on a real change. The
+     * navigation bar itself stays transparent: what lies under the buttons is drawn
+     * by the app, in each screen's colour, so no bar colour has to match a screen.
+     */
+    fun apply(view: android.view.View, baseStatus: Color, baseLight: Boolean) {
         val over = fullscreenOverlay
-        val nav = (if (over) Color.Black else (navColor ?: baseNav)).toArgb()
+        val nav = (if (over) Color.Black else Color.Transparent).toArgb()
         val status = (if (over) Color.Black else (statusColor ?: baseStatus)).toArgb()
         val light = if (over) false else (lightIcons ?: baseLight)
         if (nav == lastNav && status == lastStatus && light == lastLight) return

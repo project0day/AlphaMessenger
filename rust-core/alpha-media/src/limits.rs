@@ -48,10 +48,10 @@ fn deny(what: &str) -> MediaError {
 /// Validate declared chunk sizes BEFORE allocating memory.
 pub fn check_declared_sizes(original_size: u64, ciphertext_size: u64) -> MediaResult<()> {
     if original_size > CHUNK_SIZE {
-        return Err(deny(&format!("original_size {original_size} превышает размер куска")));
+        return Err(deny(&format!("original_size {original_size} exceeds the chunk size")));
     }
     if ciphertext_size > MAX_ENVELOPE_BYTES {
-        return Err(deny(&format!("ciphertext_size {ciphertext_size} превышает предел конверта")));
+        return Err(deny(&format!("ciphertext_size {ciphertext_size} exceeds the envelope limit")));
     }
     Ok(())
 }
@@ -69,22 +69,22 @@ pub struct ChunkContext {
 /// Cross-check an envelope against expectations. Mismatch — refuse before using the data.
 pub fn check_chunk_context(ctx: ChunkContext, envelope_index: u32, envelope_total: u32) -> MediaResult<()> {
     if ctx.expected_total == 0 {
-        return Err(deny("ожидаемое число кусков равно нулю"));
+        return Err(deny("the expected chunk count is zero"));
     }
     if ctx.expected_total > MAX_CHUNKS {
-        return Err(deny(&format!("число кусков {} превышает предел {MAX_CHUNKS}", ctx.expected_total)));
+        return Err(deny(&format!("chunk count {} exceeds the limit {MAX_CHUNKS}", ctx.expected_total)));
     }
     if ctx.expected_index >= ctx.expected_total {
-        return Err(deny("индекс куска вне диапазона"));
+        return Err(deny("chunk index out of range"));
     }
     if envelope_index != ctx.expected_index {
         return Err(deny(&format!(
-            "индекс конверта {envelope_index} не совпадает с ожидаемым {}", ctx.expected_index
+            "envelope index {envelope_index} does not match the expected {}", ctx.expected_index
         )));
     }
     if envelope_total != ctx.expected_total {
         return Err(deny(&format!(
-            "число кусков в конверте {envelope_total} не совпадает с ожидаемым {}", ctx.expected_total
+            "envelope chunk count {envelope_total} does not match the expected {}", ctx.expected_total
         )));
     }
     Ok(())
@@ -97,17 +97,17 @@ pub fn check_chunk_context(ctx: ChunkContext, envelope_index: u32, envelope_tota
 /// leaving it possible.
 pub fn check_sequence(indices: &[u32], expected_total: u32) -> MediaResult<()> {
     if expected_total == 0 || expected_total > MAX_CHUNKS {
-        return Err(deny("недопустимое число кусков"));
+        return Err(deny("invalid chunk count"));
     }
     if indices.len() != expected_total as usize {
         return Err(deny(&format!(
-            "кусков {} вместо {expected_total} (пропуск или дубликат)", indices.len()
+            "{} chunks instead of {expected_total} (gap or duplicate)", indices.len()
         )));
     }
     for (position, index) in indices.iter().enumerate() {
         if *index != position as u32 {
             return Err(deny(&format!(
-                "кусок на позиции {position} объявлен как {index} (перестановка или дубликат)"
+                "chunk at position {position} declared as {index} (reorder or duplicate)"
             )));
         }
     }
@@ -127,33 +127,33 @@ mod tests {
         assert!(check_chunk_context(ctx(2, 5), 2, 5).is_ok());
         assert!(check_chunk_context(ctx(2, 5), 2, 4).is_err(), "total -1");
         assert!(check_chunk_context(ctx(2, 5), 2, 6).is_err(), "total +1");
-        assert!(check_chunk_context(ctx(2, 5), 3, 5).is_err(), "чужой индекс");
-        assert!(check_chunk_context(ctx(0, 0), 0, 0).is_err(), "нулевой total");
-        assert!(check_chunk_context(ctx(5, 5), 5, 5).is_err(), "индекс вне диапазона");
-        assert!(check_chunk_context(ctx(0, u32::MAX), 0, u32::MAX).is_err(), "огромный total");
+        assert!(check_chunk_context(ctx(2, 5), 3, 5).is_err(), "foreign index");
+        assert!(check_chunk_context(ctx(0, 0), 0, 0).is_err(), "zero total");
+        assert!(check_chunk_context(ctx(5, 5), 5, 5).is_err(), "index out of range");
+        assert!(check_chunk_context(ctx(0, u32::MAX), 0, u32::MAX).is_err(), "huge total");
     }
 
     #[test]
     fn duplicate_omission_reorder_rejected() {
         assert!(check_sequence(&[0, 1, 2], 3).is_ok());
-        assert!(check_sequence(&[0, 0, 2], 3).is_err(), "дубликат");
-        assert!(check_sequence(&[0, 2], 3).is_err(), "пропуск");
-        assert!(check_sequence(&[0, 1, 2, 2], 3).is_err(), "лишний");
-        assert!(check_sequence(&[0, 2, 1], 3).is_err(), "перестановка");
-        assert!(check_sequence(&[0, 1], 3).is_err(), "нет последнего");
+        assert!(check_sequence(&[0, 0, 2], 3).is_err(), "duplicate");
+        assert!(check_sequence(&[0, 2], 3).is_err(), "gap");
+        assert!(check_sequence(&[0, 1, 2, 2], 3).is_err(), "extra");
+        assert!(check_sequence(&[0, 2, 1], 3).is_err(), "reorder");
+        assert!(check_sequence(&[0, 1], 3).is_err(), "last missing");
     }
 
     #[test]
     fn size_tamper_rejected() {
         assert!(check_declared_sizes(CHUNK_SIZE, CHUNK_SIZE + 64).is_ok());
-        assert!(check_declared_sizes(CHUNK_SIZE + 1, 100).is_err(), "кусок больше предела");
-        assert!(check_declared_sizes(u64::MAX, 100).is_err(), "огромный original_size");
-        assert!(check_declared_sizes(100, u64::MAX).is_err(), "огромный ciphertext_size");
+        assert!(check_declared_sizes(CHUNK_SIZE + 1, 100).is_err(), "chunk over the limit");
+        assert!(check_declared_sizes(u64::MAX, 100).is_err(), "huge original_size");
+        assert!(check_declared_sizes(100, u64::MAX).is_err(), "huge ciphertext_size");
     }
 
     #[test]
     fn limits_are_derived_not_invented() {
         assert_eq!(MAX_CHUNKS as u64, MAX_MEDIA_BYTES.div_ceil(CHUNK_SIZE));
-        assert!(MAX_ENVELOPE_BYTES > CHUNK_SIZE * 2, "конверт должен вмещать кусок с base64");
+        assert!(MAX_ENVELOPE_BYTES > CHUNK_SIZE * 2, "the envelope must fit a base64 chunk");
     }
 }

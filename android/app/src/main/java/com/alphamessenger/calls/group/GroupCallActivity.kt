@@ -104,7 +104,7 @@ class GroupCallActivity : androidx.appcompat.app.AppCompatActivity() {
         setContent {
             val variant by themeViewModel.themeVariant.collectAsState()
             val custom by themeViewModel.activeCustom.collectAsState()
-            AlphaTheme(variant = variant, custom = custom) { Screen(variant.isLight) }
+            AlphaTheme(variant = variant, custom = custom, navigationScrim = false) { Screen(variant.isLight) }
         }
     }
 

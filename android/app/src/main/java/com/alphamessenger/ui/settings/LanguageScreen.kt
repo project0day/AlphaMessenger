@@ -15,14 +15,7 @@ import com.alphamessenger.ui.components.OptionSection
 fun LanguageScreen(onBack: () -> Unit) {
     val current = androidx.appcompat.app.AppCompatDelegate.getApplicationLocales().toLanguageTags()
         .substringBefore(',').substringBefore('-')
-    // Native names: a person who can't read the current language still finds theirs.
-    val options = listOf(
-        "" to stringResource(R.string.language_system),
-        "en" to "English",
-        "ru" to "Русский",
-        "fr" to "Français",
-        "es" to "Español",
-    )
+    val options = listOf("" to stringResource(R.string.language_system)) + APP_LANGUAGES
     OptionScreen(title = stringResource(R.string.settings_language_title), onBack = onBack) {
         OptionSection(stringResource(R.string.language_section_app))
         OptionGroup {

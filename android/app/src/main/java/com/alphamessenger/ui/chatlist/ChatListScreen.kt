@@ -276,11 +276,7 @@ fun ChatListScreen(
             (uiState.chats + uiState.groups).firstOrNull { it.id == host }?.let { chat ->
                 val snap = uiState.peerByChat[chat.id]
                 com.alphamessenger.ui.chat.ChatOpenHandoff.offer(
-                    com.alphamessenger.ui.chat.ChatOpenHandoff.Preview(
-                        chatInfo = chat,
-                        peerDisplayName = snap?.displayName.orEmpty(),
-                        peerAvatarPath = snap?.avatarPath.orEmpty(),
-                    )
+                    com.alphamessenger.ui.chat.ChatOpenHandoff.preview(chat, snap)
                 )
             }
             onChatClick(host)
@@ -1685,11 +1681,7 @@ private fun ConversationList(
                 onClick = {
                     val snap = peerByChat[chat.id]
                     com.alphamessenger.ui.chat.ChatOpenHandoff.offer(
-                        com.alphamessenger.ui.chat.ChatOpenHandoff.Preview(
-                            chatInfo = chat,
-                            peerDisplayName = snap?.displayName.orEmpty(),
-                            peerAvatarPath = snap?.avatarPath.orEmpty(),
-                        )
+                        com.alphamessenger.ui.chat.ChatOpenHandoff.preview(chat, snap)
                     )
                     onClick(chat.id)
                 },

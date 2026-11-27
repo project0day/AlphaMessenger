@@ -38,6 +38,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import com.alphamessenger.ui.theme.BlackSystemBars
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -432,26 +433,3 @@ private fun rememberStoryPlayer(path: String): androidx.media3.exoplayer.ExoPlay
     return player
 }
 
-/** While a story screen is open the system bars are black like it (restored after). */
-@Composable
-internal fun BlackSystemBars() {
-    val ctx = LocalContext.current
-    DisposableEffect(Unit) {
-        val w = (ctx as? android.app.Activity)?.window
-        val oldNav = w?.navigationBarColor
-        val oldStatus = w?.statusBarColor
-        val ctl = w?.let { androidx.core.view.WindowCompat.getInsetsController(it, it.decorView) }
-        val oldLightNav = ctl?.isAppearanceLightNavigationBars
-        val oldLightStatus = ctl?.isAppearanceLightStatusBars
-        w?.navigationBarColor = android.graphics.Color.BLACK
-        w?.statusBarColor = android.graphics.Color.BLACK
-        ctl?.isAppearanceLightNavigationBars = false
-        ctl?.isAppearanceLightStatusBars = false
-        onDispose {
-            oldNav?.let { w.navigationBarColor = it }
-            oldStatus?.let { w.statusBarColor = it }
-            oldLightNav?.let { ctl.isAppearanceLightNavigationBars = it }
-            oldLightStatus?.let { ctl.isAppearanceLightStatusBars = it }
-        }
-    }
-}

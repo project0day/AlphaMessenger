@@ -10,12 +10,12 @@ import android.provider.OpenableColumns
 import java.io.File
 
 /**
- * Провайдер только для тестов. Настоящий FileProvider всегда отдаёт и имя, и
- * размер, поэтому им нельзя проверить поведение фабрики, когда провайдер их НЕ
- * называет, когда MIME общий и когда файл исчез.
+ * A provider for tests only. The real FileProvider always gives both name and size,
+ * so it cannot show how the factory behaves when a provider withholds them, when the
+ * MIME type is generic and when the file is gone.
  *
- * URI: content://com.alphamessenger.draft.test/<case>/<имя файла в cacheDir>
- * где case: full | noname | nosize | generic | gone
+ * URI: content://com.alphamessenger.draft.test/<case>/<file name in cacheDir>
+ * where case: full | noname | nosize | generic | gone
  */
 class DraftTestProvider : ContentProvider() {
 
@@ -60,7 +60,7 @@ class DraftTestProvider : ContentProvider() {
     }
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
-        if (caseOf(uri) == CASE_GONE) throw java.io.FileNotFoundException("нет такого URI: $uri")
+        if (caseOf(uri) == CASE_GONE) throw java.io.FileNotFoundException("no such URI: $uri")
         return ParcelFileDescriptor.open(fileOf(uri), ParcelFileDescriptor.MODE_READ_ONLY)
     }
 

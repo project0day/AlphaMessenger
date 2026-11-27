@@ -36,6 +36,10 @@ data class ChatPeerSnapshot(
     val avatarHash: String = "",
     /** A secret chat: no presence (it would tell when we are active), no calls. */
     val secret: Boolean = false,
+    /** A secret chat's ordinary chat, its state ("invited", "active"…) and its peer's own name. */
+    val secretOrigin: String = "",
+    val secretState: String = "",
+    val peerName: String = "",
 )
 
 data class ChatListState(
@@ -517,6 +521,9 @@ class ChatListViewModel @Inject constructor(
                 out[chat.id] = ChatPeerSnapshot(
                     strings.get(R.string.secret_name, prof?.displayName.orEmpty().ifBlank { strings.get(R.string.private_chat) }),
                     prof?.avatarPath.orEmpty(), "", prof?.avatarHash.orEmpty(), secret = true,
+                    secretOrigin = origin,
+                    secretState = repository.secretChatStatus(chat.id).first,
+                    peerName = prof?.displayName.orEmpty(),
                 )
                 continue
             }

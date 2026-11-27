@@ -495,25 +495,25 @@ mod tests {
             .unwrap();
         let json = {
             use nostr::util::JsonUtil;
-            wrapped.try_as_json().expect("наружное событие сериализуемо")
+            wrapped.try_as_json().expect("the outer event serializes")
         };
 
         // 1. The group id is absent outside, in any form.
         let gid_hex = hex::encode(&group_id);
         assert!(
             !json.to_lowercase().contains(&gid_hex),
-            "идентификатор группы просочился в наружное событие",
+            "the group id leaked into the outer event",
         );
 
         // 2. The sender's persistent key is absent outside.
         assert!(
             !json.contains(&sender.public_key().to_hex()),
-            "постоянный ключ отправителя виден снаружи",
+            "the sender's long-term key is visible outside",
         );
         assert_ne!(wrapped.pubkey, sender.public_key());
 
         // 3. The payload is not visible.
-        assert!(!json.contains("11223344"), "шифротекст MLS виден снаружи");
+        assert!(!json.contains("11223344"), "the MLS ciphertext is visible outside");
 
         // 4. The outer tags are recipient addressing only. Anything else
         //    would mean a new leak.
@@ -521,7 +521,7 @@ mod tests {
             let s = tag.as_slice();
             assert!(
                 s.first().map(|k| k == "p").unwrap_or(false),
-                "неожиданный наружный тег: {s:?}",
+                "unexpected outer tag: {s:?}",
             );
         }
 
@@ -529,7 +529,7 @@ mod tests {
         //    NIP-59, not our oversight. Pinned as known, accepted visibility.
         assert!(
             json.contains(&recipient.public_key().to_hex()),
-            "адресация получателя обязана присутствовать для доставки",
+            "the recipient address must be there for delivery",
         );
     }
 
@@ -554,12 +554,12 @@ mod tests {
         }
 
         // No timestamp may end up in the future.
-        assert!(stamps.iter().all(|t| *t <= now + 5), "метка времени в будущем: {stamps:?}");
+        assert!(stamps.iter().all(|t| *t <= now + 5), "a timestamp in the future: {stamps:?}");
         // And they must not all be identical — otherwise there is no randomization.
         let all_same = stamps.windows(2).all(|w| w[0] == w[1]);
         assert!(
             !all_same,
-            "время наружного события не рандомизируется: {stamps:?} — конверты одной отправки склеиваются по секунде",
+            "the outer event time is not randomized: {stamps:?}; envelopes of one send link by the second",
         );
     }
 }

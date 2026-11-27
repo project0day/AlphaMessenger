@@ -199,13 +199,8 @@ private fun Promise(icon: ImageVector, title: Int, note: Int) {
 private val LANGUAGES = listOf("" to 0, "en" to 1, "ru" to 2, "fr" to 3, "es" to 4)
 
 @Composable
-private fun languageName(tag: String): String = when (tag) {
-    "en" -> "English"
-    "ru" -> "Русский"
-    "fr" -> "Français"
-    "es" -> "Español"
-    else -> stringResource(R.string.language_system)
-}
+private fun languageName(tag: String): String =
+    com.alphamessenger.ui.settings.nativeLanguageName(tag) ?: stringResource(R.string.language_system)
 
 @Composable
 private fun currentLanguageLabel(): String {

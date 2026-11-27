@@ -1451,6 +1451,16 @@ internal open class UniffiVTableCallbackInterfaceAlphaMessengerCallback(
 
 
 
+
+
+
+
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1785,9 +1795,15 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_my_avatar_video(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_my_cover(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_next_message_expiry_ms(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_no_store_default(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_nostr_emoji_sets(`ptr`: Pointer,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_note_peer_activity(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,`senderId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_own_media_servers(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1851,6 +1867,8 @@ internal interface UniffiLib : Library {
     ): Int
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_publish_story(`ptr`: Pointer,`paramsJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_purge_deleted_media(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_read_receipts_enabled(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_refresh_leaf_binding(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1870,8 +1888,6 @@ internal interface UniffiLib : Library {
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_request_role_sync(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_reschedule_held(`ptr`: Pointer,`msgId`: RustBuffer.ByValue,`notBefore`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    fun uniffi_alpha_ffi_fn_method_alphamessengercore_reserve_relay_changed(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_resolve_media_ref(`ptr`: Pointer,`mediaRefJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1985,6 +2001,8 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_set_network_available(`ptr`: Pointer,`available`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_set_network_metered(`ptr`: Pointer,`metered`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_set_no_store_default(`ptr`: Pointer,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_set_own_media_servers(`ptr`: Pointer,`urls`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2043,6 +2061,8 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_take_armed_send(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    fun uniffi_alpha_ffi_fn_method_alphamessengercore_take_gone_media(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_thread_summaries_json(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_alpha_ffi_fn_method_alphamessengercore_transfer_ownership(`ptr`: Pointer,`chatId`: RustBuffer.ByValue,`npubOrHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2509,9 +2529,15 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_my_avatar_video(
     ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_my_cover(
+    ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_next_message_expiry_ms(
+    ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_no_store_default(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_nostr_emoji_sets(
+    ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_note_peer_activity(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_own_media_servers(
     ): Short
@@ -2575,6 +2601,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_publish_story(
     ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_purge_deleted_media(
+    ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_read_receipts_enabled(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_refresh_leaf_binding(
@@ -2594,8 +2622,6 @@ internal interface UniffiLib : Library {
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_request_role_sync(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_reschedule_held(
-    ): Short
-    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_reserve_relay_changed(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_resolve_media_ref(
     ): Short
@@ -2709,6 +2735,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_set_network_available(
     ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_set_network_metered(
+    ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_set_no_store_default(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_set_own_media_servers(
@@ -2766,6 +2794,8 @@ internal interface UniffiLib : Library {
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_sync_health_json(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_take_armed_send(
+    ): Short
+    fun uniffi_alpha_ffi_checksum_method_alphamessengercore_take_gone_media(
     ): Short
     fun uniffi_alpha_ffi_checksum_method_alphamessengercore_thread_summaries_json(
     ): Short
@@ -3322,10 +3352,19 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_my_avatar_video() != 42514.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_my_cover() != 11697.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_next_message_expiry_ms() != 30032.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_no_store_default() != 29383.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_nostr_emoji_sets() != 5578.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_note_peer_activity() != 1383.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_own_media_servers() != 34332.toShort()) {
@@ -3421,6 +3460,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_publish_story() != 59331.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_purge_deleted_media() != 25088.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_read_receipts_enabled() != 19842.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3449,9 +3491,6 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_reschedule_held() != 9074.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_reserve_relay_changed() != 23301.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_resolve_media_ref() != 39420.toShort()) {
@@ -3622,6 +3661,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_set_network_available() != 33591.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_set_network_metered() != 15064.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_set_no_store_default() != 51736.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3707,6 +3749,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_take_armed_send() != 39404.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_take_gone_media() != 3609.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_alpha_ffi_checksum_method_alphamessengercore_thread_summaries_json() != 15926.toShort()) {
@@ -4545,9 +4590,15 @@ public interface AlphaMessengerCoreInterface {
     
     fun `myAvatarVideo`(): kotlin.String
     
+    fun `myCover`(): kotlin.String
+    
+    fun `nextMessageExpiryMs`(): kotlin.Long
+    
     fun `noStoreDefault`(): kotlin.Boolean
     
     fun `nostrEmojiSets`(`input`: kotlin.String): kotlin.String
+    
+    fun `notePeerActivity`(`chatId`: kotlin.String, `senderId`: kotlin.String): kotlin.String
     
     fun `ownMediaServers`(): List<kotlin.String>
     
@@ -4617,6 +4668,8 @@ public interface AlphaMessengerCoreInterface {
     
     fun `publishStory`(`paramsJson`: kotlin.String): kotlin.String
     
+    fun `purgeDeletedMedia`()
+    
     fun `readReceiptsEnabled`(): kotlin.Boolean
     
     fun `refreshLeafBinding`(`chatId`: kotlin.String): kotlin.Boolean
@@ -4636,8 +4689,6 @@ public interface AlphaMessengerCoreInterface {
     fun `requestRoleSync`(`chatId`: kotlin.String)
     
     fun `rescheduleHeld`(`msgId`: kotlin.String, `notBefore`: kotlin.Long)
-    
-    fun `reserveRelayChanged`()
     
     fun `resolveMediaRef`(`mediaRefJson`: kotlin.String): kotlin.String
     
@@ -4754,6 +4805,8 @@ public interface AlphaMessengerCoreInterface {
     
     fun `setNetworkAvailable`(`available`: kotlin.Boolean)
     
+    fun `setNetworkMetered`(`metered`: kotlin.Boolean)
+    
     fun `setNoStoreDefault`(`enabled`: kotlin.Boolean)
     
     fun `setOwnMediaServers`(`urls`: List<kotlin.String>)
@@ -4811,6 +4864,8 @@ public interface AlphaMessengerCoreInterface {
     fun `syncHealthJson`(): kotlin.String
     
     fun `takeArmedSend`(`chatId`: kotlin.String): kotlin.Long
+    
+    fun `takeGoneMedia`(): List<kotlin.String>
     
     fun `threadSummariesJson`(`chatId`: kotlin.String): kotlin.String
     
@@ -6826,6 +6881,30 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     }
     
 
+    override fun `myCover`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_my_cover(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `nextMessageExpiryMs`(): kotlin.Long {
+            return FfiConverterLong.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_next_message_expiry_ms(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
     override fun `noStoreDefault`(): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithPointer {
@@ -6845,6 +6924,18 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     uniffiRustCallWithError(MessengerException) { _status ->
     UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_nostr_emoji_sets(
         it, FfiConverterString.lower(`input`),_status)
+}
+    }
+    )
+    }
+    
+
+    override fun `notePeerActivity`(`chatId`: kotlin.String, `senderId`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_note_peer_activity(
+        it, FfiConverterString.lower(`chatId`),FfiConverterString.lower(`senderId`),_status)
 }
     }
     )
@@ -7234,6 +7325,17 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     }
     
 
+    override fun `purgeDeletedMedia`()
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_purge_deleted_media(
+        it, _status)
+}
+    }
+    
+    
+
     override fun `readReceiptsEnabled`(): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithPointer {
@@ -7351,17 +7453,6 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     uniffiRustCallWithError(MessengerException) { _status ->
     UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_reschedule_held(
         it, FfiConverterString.lower(`msgId`),FfiConverterLong.lower(`notBefore`),_status)
-}
-    }
-    
-    
-
-    override fun `reserveRelayChanged`()
-        = 
-    callWithPointer {
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_reserve_relay_changed(
-        it, _status)
 }
     }
     
@@ -8059,6 +8150,17 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     
     
 
+    override fun `setNetworkMetered`(`metered`: kotlin.Boolean)
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_set_network_metered(
+        it, FfiConverterBoolean.lower(`metered`),_status)
+}
+    }
+    
+    
+
     
     @Throws(MessengerException::class)override fun `setNoStoreDefault`(`enabled`: kotlin.Boolean)
         = 
@@ -8404,6 +8506,18 @@ open class AlphaMessengerCore: Disposable, AutoCloseable, AlphaMessengerCoreInte
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_take_armed_send(
         it, FfiConverterString.lower(`chatId`),_status)
+}
+    }
+    )
+    }
+    
+
+    override fun `takeGoneMedia`(): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_alpha_ffi_fn_method_alphamessengercore_take_gone_media(
+        it, _status)
 }
     }
     )
@@ -9508,6 +9622,18 @@ sealed class MessengerException: kotlin.Exception() {
             get() = "description=${ `description` }"
     }
     
+    class InviteInvalid(
+        ) : MessengerException() {
+        override val message
+            get() = ""
+    }
+    
+    class AlreadyMember(
+        ) : MessengerException() {
+        override val message
+            get() = ""
+    }
+    
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<MessengerException> {
         override fun lift(error_buf: RustBuffer.ByValue): MessengerException = FfiConverterTypeMessengerError.lift(error_buf)
@@ -9547,6 +9673,8 @@ public object FfiConverterTypeMessengerError : FfiConverterRustBuffer<MessengerE
             9 -> MessengerException.MediaRefused(
                 FfiConverterString.read(buf),
                 )
+            10 -> MessengerException.InviteInvalid()
+            11 -> MessengerException.AlreadyMember()
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -9596,6 +9724,14 @@ public object FfiConverterTypeMessengerError : FfiConverterRustBuffer<MessengerE
                 4UL
                 + FfiConverterString.allocationSize(value.`description`)
             )
+            is MessengerException.InviteInvalid -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is MessengerException.AlreadyMember -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
         }
     }
 
@@ -9642,6 +9778,14 @@ public object FfiConverterTypeMessengerError : FfiConverterRustBuffer<MessengerE
             is MessengerException.MediaRefused -> {
                 buf.putInt(9)
                 FfiConverterString.write(value.`description`, buf)
+                Unit
+            }
+            is MessengerException.InviteInvalid -> {
+                buf.putInt(10)
+                Unit
+            }
+            is MessengerException.AlreadyMember -> {
+                buf.putInt(11)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

@@ -574,6 +574,9 @@ const PARKING_TICK: Duration = Duration::from_secs(5);
 /// The project's own relay: joined only while the user has no relay that works,
 /// so a phone never loses contact because every public relay is gone or deleted.
 pub const RESERVE_RELAY: &str = "wss://rs-nostr-relay.rs-nostr-relay.workers.dev";
+/// The project's own servers (this relay, the channel's media archive) take part only
+/// while this is on: a switch for when they fail, so nothing reaches them.
+pub const PROJECT_SERVERS_ON: bool = true;
 /// At most this many group relays read beside our own.
 const MAX_LISTEN_EXTRA: usize = 4;
 /// How long none of the user's relays may be down before the reserve joins.
@@ -976,6 +979,14 @@ impl NostrRelayClient {
     /// offline); some on but none reachable for [RESERVE_AFTER] → join; leave
     /// once one has stayed up for [RESERVE_HOLD]. Returns the new state on a change.
     pub async fn reserve_tick(&self) -> Option<bool> {
+        if !PROJECT_SERVERS_ON {
+            if !reserve_active() {
+                return None;
+            }
+            RESERVE_ON.store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = self.remove_relay(RESERVE_RELAY).await;
+            return Some(false);
+        }
         if !self.network_available() {
             return None;
         }
@@ -1173,7 +1184,16 @@ impl NostrRelayClient {
     /// airplane-mode window). Caller must re-subscribe afterwards.
     pub async fn force_reconnect(&self) -> Result<()> {
         tracing::info!(target: "TRANSPORT", "force_reconnect: disconnecting all relays");
+        let mut nothing_up = true;
+        for c in self.connections() {
+            if self.any_connected(&c).await { nothing_up = false; break; }
+        }
         self.restart_connections().await;
+        if nothing_up && self.network_available() {
+            // Every relay is parked: the scout looks for the way out right now.
+            if let Ok(mut p) = self.parking.lock() { p.wake_scout(std::time::Instant::now()); }
+            self.parking_tick().await;
+        }
         // Wait for real connectivity before returning so the caller's resubscribe
         // doesn't fail with "not connected to relay".
         self.wait_until_connected(std::time::Duration::from_secs(8)).await;
@@ -1264,14 +1284,14 @@ impl NostrRelayClient {
                 let stats = relay.stats();
                 let connected = relay.status() == nostr_sdk::RelayStatus::Connected;
                 let verdict = match self.parking.lock() {
-                    Ok(mut p) => p.observe(conn.id, &key, connected, stats.attempts(), stats.success(), now),
+                    Ok(mut p) => p.observe(conn.id, &key, connected, stats.attempts(), stats.success(), now, nothing_up),
                     Err(_) => continue,
                 };
                 match verdict {
                     Verdict::Leave => {}
                     Verdict::Park => {
                         relay.disconnect();
-                        let wait = self.parking.lock().map(|mut p| p.park(conn.id, &key, any_up, now)).unwrap_or_default();
+                        let wait = self.parking.lock().map(|mut p| p.park(conn.id, &key, now)).unwrap_or_default();
                         tracing::warn!(target: "TRANSPORT", "RELAY_PARKED {key} (lane {}): not reachable, next try in {}s", conn.id, wait.as_secs());
                     }
                     Verdict::Probe => {
@@ -1280,20 +1300,21 @@ impl NostrRelayClient {
                         let me = self.clone();
                         tokio::spawn(async move {
                             let ok = relay.try_connect(PROBE_TIMEOUT).await.is_ok();
-                            if ok && nothing_up && lane == identity_lane {
-                                // The way back is there: the silent lanes dial again now.
+                            if ok && nothing_up {
+                                // The scout found the way back: every relay on every lane dials now.
+                                if let Ok(mut p) = parking.lock() { p.clear(); }
+                                tracing::warn!(target: "TRANSPORT", "RELAY_BACK {key} (lane {lane}): the way out is open, dialling all");
                                 for c in me.connections() {
-                                    if c.id == identity_lane { continue; }
-                                    if let Ok(mut p) = parking.lock() { p.clear_lane(c.id); }
                                     me.connect_lane(&c).await;
                                 }
+                                return;
                             }
                             if let Ok(mut p) = parking.lock() {
                                 if ok {
                                     p.probe_ok(lane, &key);
                                     tracing::warn!(target: "TRANSPORT", "RELAY_BACK {key} (lane {lane})");
                                 } else {
-                                    let wait = p.probe_failed(lane, &key, any_up, std::time::Instant::now());
+                                    let wait = p.probe_failed(lane, &key, std::time::Instant::now());
                                     tracing::info!(target: "TRANSPORT", "RELAY_PARKED {key} (lane {lane}): still down, next try in {}s", wait.as_secs());
                                 }
                             }

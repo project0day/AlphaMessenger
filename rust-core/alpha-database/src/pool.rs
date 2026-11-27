@@ -219,7 +219,7 @@ impl DatabasePool {
             [],
         ).unwrap_or(0);
         if freed > 0 {
-            info!("CLAIM_RECOVER освобождено захватов от прежнего запуска: {freed}");
+            info!("CLAIM_RECOVER claims of the previous run released: {freed}");
         }
 
         info!("Database opened successfully at {}", path.display());

@@ -8,6 +8,7 @@ import com.alphamessenger.transfer.TransferEngine
 import com.alphamessenger.transfer.TransferKey
 import com.alphamessenger.ui.chat.AlbumItemMetadata
 import com.alphamessenger.ui.media.draft.MediaDraftItem
+import com.alphamessenger.ui.media.export.MediaQuality
 import com.alphamessenger.ui.media.export.MediaTrace
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -20,6 +21,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
@@ -75,7 +78,6 @@ class MediaSendQueue @Inject constructor(
     private val repository: AlphaCoreRepository,
     private val transfers: TransferEngine,
     private val network: com.alphamessenger.data.NetworkMonitor,
-    private val preUploads: MediaPreUpload,
 ) {
 
     private val store = MediaSendStore(context)
@@ -195,32 +197,51 @@ class MediaSendQueue @Inject constructor(
         glanceSecs: Int? = null,
     ): String? {
         if (chatId.isBlank() || drafts.isEmpty()) return null
-        val sendId = java.util.UUID.randomUUID().toString()
-        MediaTrace.event(sendId, null, MediaTrace.SEND_TAP, "items" to drafts.size)
-        // Keyed on the drafts as composed: claiming may move their files.
-        val preKeys = drafts.map { preUploads.keyOf(it, photoMaxEdge, photoQuality, hd, videoEdge) }
-        val items = claimSources(sendId, drafts, photoMaxEdge, photoQuality, preKeys)
-        if (items.isEmpty()) return null
-
-        var job = MediaSendJob(
-            sendId = sendId,
-            chatId = chatId,
-            thread = thread,
-            replyTo = replyTo,
-            messageId = "",
-            caption = caption,
-            ttlSecs = ttlSecs,
-            glanceSecs = glanceSecs?.takeIf { drafts.size == 1 },
-            photoMaxEdge = photoMaxEdge,
-            photoQuality = photoQuality,
-            hd = hd,
-            videoEdge = videoEdge,
-            alsoTo = alsoTo.filter { it.isNotBlank() && it != chatId }.distinct(),
-            state = MediaSendState.QUEUED,
-            items = items,
-            echoJson = "",
-        )
-        persist(job)
+        // The composed set becomes the send: the same job, files and upload ops. What
+        // the send does not take leaves the servers.
+        var job = composeLock.withLock {
+            val (queued, unused) = writeLock.withLock {
+                val composed = draftJobOf(chatId)
+                val sendId = composed?.sendId ?: java.util.UUID.randomUUID().toString()
+                MediaTrace.event(sendId, null, MediaTrace.SEND_TAP, "items" to drafts.size)
+                // Keyed on the drafts as composed: claiming may move their files.
+                val keys = drafts.map { keyOf(it, photoMaxEdge, photoQuality, hd, videoEdge) }
+                val slots = composed?.items.orEmpty()
+                val (reused, left) = ComposedSet.take(keys, slots.map { it.slot() })
+                val byOp = slots.associateBy { it.uploadOp }
+                val items = claimSources(sendId, drafts, photoMaxEdge, photoQuality, keys, reused.map { s -> s?.let { byOp[it.op] } })
+                val leftOps = left.map { it.op }.toSet()
+                val unused = slots.filter { it.uploadOp in leftOps }
+                if (items.isEmpty()) return@withLock null to unused
+                val job = MediaSendJob(
+                    sendId = sendId,
+                    chatId = chatId,
+                    thread = thread,
+                    replyTo = replyTo,
+                    messageId = "",
+                    caption = caption,
+                    ttlSecs = ttlSecs,
+                    glanceSecs = glanceSecs?.takeIf { drafts.size == 1 },
+                    photoMaxEdge = photoMaxEdge,
+                    photoQuality = photoQuality,
+                    hd = hd,
+                    videoEdge = videoEdge,
+                    alsoTo = alsoTo.filter { it.isNotBlank() && it != chatId }.distinct(),
+                    state = MediaSendState.QUEUED,
+                    items = items,
+                    echoJson = "",
+                )
+                persist(job)
+                job to unused
+            }
+            unused.forEach { dropComposed(chatId, it) }
+            reserved.removeAll(drafts.map { it.id }.toSet())
+            // An upload waiting for the network is not going: the send takes the wait over.
+            if (!hasNetwork()) queued?.items?.forEach { item -> item.uploadOp?.let { composedUploads[it]?.cancel() } }
+            queued
+        } ?: return null
+        val sendId = job.sendId
+        val items = job.items
 
         job = createMessage(job) ?: run {
             store.delete(job)
@@ -237,15 +258,212 @@ class MediaSendQueue @Inject constructor(
         return job.messageId
     }
 
+    // --- The set being composed ---
+    //
+    // A set goes up while it is composed, as a DRAFT job of this same queue: one owner,
+    // one op per item for the item's whole life, so Send only publishes and a network
+    // switch or a restart after Send resumes from the chunks already stored. Drafts a
+    // previous process left are dropped at start, their bytes deleted from the servers.
+
+    /** Composer changes of one set, applied in order. */
+    private val composeLock = Mutex()
+
+    /** DRAFT jobs this process composed; any other DRAFT on disk is abandoned. */
+    private val composedHere = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    /** Draft items handed to Send: no composer change may drop them any more. */
+    private val reserved = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    /** The upload running for a composed item, by upload op: one per set at a time. */
+    private val composedUploads = ConcurrentHashMap<String, Job>()
+
+    /** Each composed set's upload lane, by send id. */
+    private val composeLanes = ConcurrentHashMap<String, Job>()
+
+    /** The composer's latest order of each set's drafts, by send id: the lane follows it. */
+    private val composeOrder = ConcurrentHashMap<String, List<String>>()
+
+    /** The set in [chatId] as it now stands: new items start, edited ones restart, removed ones go. */
+    fun compose(chatId: String, drafts: List<MediaDraftItem>) {
+        if (chatId.isBlank()) return
+        scope.launch {
+            composeLock.withLock {
+                MediaQuality.load(context)
+                val hd = MediaQuality.hd
+                val maxEdge = photoEdge(hd)
+                val quality = photoQuality(hd)
+                val videoEdge = MediaQuality.videoEdge
+                val wanted = drafts.filter { (it.isImage || it.isVideo) && !it.isDocument }
+                    .associateBy { keyOf(it, maxEdge, quality, hd, videoEdge) }
+                val current = draftJobOf(chatId)
+                val slots = current?.items.orEmpty()
+                val change = ComposedSet.change(slots.map { it.slot() }, wanted.keys, reserved.toSet())
+                val keepOps = change.keep.map { it.op }.toSet()
+                val keep = slots.filter { it.uploadOp in keepOps }
+                slots.filter { it.uploadOp !in keepOps }.forEach { dropComposed(chatId, it) }
+                val sendId = current?.sendId ?: java.util.UUID.randomUUID().toString()
+                var next = (keep.maxOfOrNull { it.index } ?: -1) + 1
+                val added = change.add.map { key ->
+                    val draft = wanted.getValue(key)
+                    val revision = MediaSendJob.revisionOf(draft, maxEdge, quality)
+                    MediaSendItem(
+                        index = next,
+                        draft = draft,
+                        outputPath = File(store.workDir(sendId), "${next++}.r$revision.${if (draft.isVideo) "mp4" else "jpg"}").absolutePath,
+                        editRevision = revision,
+                        preUploadKey = key,
+                        uploadOp = newUploadOp(),
+                    )
+                }
+                val job = writeLock.withLock {
+                    // Re-read: an upload may have landed its ref since [current] was taken.
+                    val now = current?.let { fresh(it) }
+                    val items = now?.items.orEmpty().filter { it.uploadOp in keepOps } + added
+                    if (items.isEmpty()) {
+                        now?.let { store.delete(it) }
+                        return@withLock null
+                    }
+                    (now ?: MediaSendJob(
+                        sendId = sendId, chatId = chatId, messageId = "", caption = null, ttlSecs = 0,
+                        photoMaxEdge = maxEdge, photoQuality = quality, hd = hd, videoEdge = videoEdge,
+                        alsoTo = emptyList(), state = MediaSendState.DRAFT, items = emptyList(), echoJson = "",
+                    )).copy(items = items).also {
+                        composedHere.add(sendId)
+                        persist(it)
+                    }
+                } ?: return@withLock
+                composeOrder[job.sendId] = drafts.map { it.id }
+                runComposedLane(job.sendId)
+            }
+        }
+    }
+
+    /** The set goes to Send: its items are the send's now, whatever the composer reports. */
+    fun reserve(drafts: List<MediaDraftItem>) {
+        reserved.addAll(drafts.map { it.id })
+    }
+
+    /** The set was dropped without sending: its uploads stop and leave the servers. */
+    fun discardComposed(drafts: List<MediaDraftItem>) {
+        val ids = drafts.map { it.id }.toSet()
+        if (ids.isEmpty()) return
+        scope.launch {
+            composeLock.withLock {
+                store.all().filter { it.state == MediaSendState.DRAFT }.forEach { job ->
+                    val gone = job.items.filter { it.draft.id in ids && it.draft.id !in reserved }
+                    if (gone.isEmpty()) return@forEach
+                    gone.forEach { dropComposed(job.chatId, it) }
+                    val goneOps = gone.map { it.uploadOp }.toSet()
+                    writeLock.withLock {
+                        val now = fresh(job)
+                        val left = now.items.filter { it.uploadOp !in goneOps }
+                        if (left.isEmpty()) store.delete(now) else persist(now.copy(items = left))
+                    }
+                }
+            }
+        }
+    }
+
+    private fun draftJobOf(chatId: String): MediaSendJob? =
+        store.all().firstOrNull { it.state == MediaSendState.DRAFT && it.chatId == chatId && it.sendId in composedHere }
+
+    /**
+     * The set's one upload lane: its items go up one at a time, in the set's order, each
+     * with every chunk the link carries. The first item is done soonest and the tiles
+     * finish in order. A send takes the lane over: it stops before the next item.
+     */
+    private fun runComposedLane(sendId: String) {
+        if (composeLanes[sendId]?.isActive == true) return
+        composeLanes[sendId] = scope.launch {
+            val skipped = mutableSetOf<String>()
+            while (isActive) {
+                val job = store.all().firstOrNull { it.sendId == sendId && it.state == MediaSendState.DRAFT } ?: return@launch
+                val order = composeOrder[sendId].orEmpty()
+                val item = job.items
+                    .sortedWith(compareBy({ order.indexOf(it.draft.id).let { p -> if (p < 0) Int.MAX_VALUE else p } }, { it.index }))
+                    .firstOrNull { it.uploadedRef == null && it.uploadOp != null && it.uploadOp !in skipped } ?: return@launch
+                val op = job.uploadOpOf(item)
+                val upload = scope.launch { uploadComposed(job, item, op) }
+                composedUploads[op] = upload
+                upload.join()
+                composedUploads.remove(op, upload)
+                if (fresh(job).items.firstOrNull { it.uploadOp == op }?.uploadedRef == null) skipped.add(op)
+            }
+        }
+    }
+
+    private suspend fun uploadComposed(job: MediaSendJob, item: MediaSendItem, op: String) {
+        val policy = if (item.isVideo) MediaQuality.videoPolicy(job.videoEdge) else MediaQuality.policy(job.hd)
+        // A video that would be re-encoded waits for Send: the encoder is the phone's
+        // heaviest work, and the set may still change.
+        if (File(item.outputPath).length() <= 0L) {
+            if (MediaOutputFactory.reencodes(context, item, job.photoMaxEdge, job.photoQuality, policy)) return
+            val produced = MediaOutputFactory.produce(context, item, job.photoMaxEdge, job.photoQuality, job.sendId, policy = policy)
+            if (produced == null || produced.length() <= 0L) return
+            rememberByOp(job.sendId, op, null)
+        }
+        var pause = COMPOSED_RETRY_FIRST_MS
+        while (kotlinx.coroutines.currentCoroutineContext().isActive) {
+            // Only a draft waits here; a sent job waits for the network by its own, durable state.
+            if (!network.isOnline && fresh(job).state != MediaSendState.DRAFT) return
+            network.online.first { it }
+            val attempt = repository.uploadMedia(job.chatId, op, item.outputPath, item.mediaType)
+            attempt.getOrNull()?.let { ref ->
+                // Dropped while it went up: nothing will use it, so it leaves the servers.
+                if (!rememberByOp(job.sendId, op, mergeMeta(ref, measured(item)))) {
+                    repository.discardPreUpload(job.chatId, op, item.outputPath, ref)
+                }
+                return
+            }
+            if (attempt.exceptionOrNull() is uniffi.alphamessenger.MessengerException.MediaRefused) return
+            // Sent meanwhile: the send retries by its own rules from here.
+            if (fresh(job).state != MediaSendState.DRAFT) return
+            delay(pause)
+            pause = (pause * 2).coerceAtMost(COMPOSED_RETRY_MAX_MS)
+        }
+    }
+
+    /** Stop a composed item and delete what of it reached the servers, once it has stopped. */
+    private suspend fun dropComposed(chatId: String, item: MediaSendItem) {
+        val op = item.uploadOp ?: return
+        repository.discardPreUpload(chatId, op, item.outputPath, "")
+        composedUploads.remove(op)?.let { it.cancel(); it.join() }
+        val ref = store.all().firstNotNullOfOrNull { j -> j.items.firstOrNull { it.uploadOp == op }?.uploadedRef }
+            ?: item.uploadedRef
+        repository.discardPreUpload(chatId, op, item.outputPath, ref.orEmpty())
+        File(item.outputPath).delete()
+    }
+
+    /** Abandoned drafts of a previous process: their uploads leave the servers, their files the disk. */
+    private suspend fun dropAbandonedDrafts() {
+        composeLock.withLock {
+            store.all().filter { it.state == MediaSendState.DRAFT && it.sendId !in composedHere }.forEach { job ->
+                job.items.forEach { dropComposed(job.chatId, it) }
+                store.delete(job)
+            }
+            // Pre-uploads an earlier version kept apart, each with its chat and ref beside the file.
+            File(context.cacheDir, "preupload").listFiles()?.forEach { dir ->
+                val file = dir.listFiles()?.firstOrNull { it.name.startsWith("0.r") && !it.name.endsWith(".part") }
+                if (file != null) {
+                    val ref = File(dir, "ref.json").takeIf { it.exists() }?.readText().orEmpty()
+                    val chat = File(dir, "chat").takeIf { it.exists() }?.readText().orEmpty()
+                    repository.discardPreUpload(chat, dir.name, file.path, ref)
+                }
+                dir.deleteRecursively()
+            }
+        }
+    }
+
     /** Do we own work for this message (otherwise cancel/retry goes the legacy path). */
     fun owns(messageId: String): Boolean =
-        messageId.isNotBlank() && states.containsKey(messageId)
+        messageId.isNotBlank() && states[messageId].let { it != null && it != MediaSendState.SENT }
 
     /** App start: finish whatever survived the previous process life. */
     fun resume() {
         scope.launch {
             runCatching { store.sweep() }
-            val all = store.all().filter { it.state != MediaSendState.SENT }
+            runCatching { dropAbandonedDrafts() }
+            val all = store.all().filter { it.state != MediaSendState.SENT && it.state != MediaSendState.DRAFT }
             // The state map is restored FIRST: what the UI offers on the
             // bubble — cancel, retry or the plain menu — depends on it.
             all.forEach { if (it.messageId.isNotBlank()) states[it.messageId] = it.state }
@@ -262,7 +480,7 @@ class MediaSendQueue @Inject constructor(
                 transfers.onUploadFailed(job.messageId, job.failure?.let { context.getString(it.messageRes) }.orEmpty())
                 job.items.forEach { transfers.onUploadFailed(job.opId(it.index)) }
                 android.util.Log.i(
-                    TAG, "${job.sendId}: отказ восстановлен (${job.failure ?: "причина не записана"})",
+                    TAG, "${job.sendId}: failure restored (${job.failure ?: "no reason recorded"})",
                 )
             }
 
@@ -272,14 +490,14 @@ class MediaSendQueue @Inject constructor(
                     it.state == MediaSendState.UPLOADING
             }
             if (left.isEmpty()) return@launch
-            android.util.Log.i(TAG, "возобновляем ${left.size} незаконченных отправок")
+            android.util.Log.i(TAG, "resuming ${left.size} unfinished sends")
             for (job in left) {
                 // A job without a message: the crash happened between writing
                 // the intent and creating the message. Create it now — or find
                 // the already-created one by its file path; no duplicate.
                 val ready = if (job.messageId.isBlank()) createMessage(job) else job
                 if (ready == null) {
-                    android.util.Log.w(TAG, "${job.sendId}: сообщение создать не удалось, задание оставлено")
+                    android.util.Log.w(TAG, "${job.sendId}: could not create the message, job kept")
                     continue
                 }
                 // The spinner must appear on the bubble at once, not after the first byte.
@@ -295,7 +513,7 @@ class MediaSendQueue @Inject constructor(
      */
     fun cancel(messageId: String) {
         val job = store.find(messageId) ?: return
-        android.util.Log.i(TAG, "отмена ${job.sendId} (${job.messageId})")
+        android.util.Log.i(TAG, "cancel ${job.sendId} (${job.messageId})")
         canceled.add(job.sendId)
         retries.remove(job.sendId)
         lastFailure.remove(job.sendId)
@@ -309,7 +527,17 @@ class MediaSendQueue @Inject constructor(
             // Files are deleted ONLY after the work has actually stopped.
             // Otherwise a transcode that finished in time would drop its
             // output into an already-deleted directory, forever dangling.
+            // The core stops each item's upload between chunks; what of it reached the
+            // servers leaves them once it stopped: a cancelled send is never used.
+            job.items.forEach { runCatching { repository.discardPreUpload(job.chatId, job.uploadOpOf(it), it.outputPath, "") } }
+            job.items.forEach { item -> composedUploads.remove(job.uploadOpOf(item))?.cancel() }
             runCatching { work?.join() }
+            val landed = fresh(job)
+            landed.items.forEach { item ->
+                val op = job.uploadOpOf(item)
+                transfers.stopFollowing(op)
+                runCatching { repository.discardPreUpload(job.chatId, op, item.outputPath, item.uploadedRef.orEmpty()) }
+            }
             runCatching { repository.deletePendingMedia(messageId) }
             runCatching { repository.deleteMessageLocal(messageId) }
             // A cancelled send must clean up its transfer group too:
@@ -337,7 +565,7 @@ class MediaSendQueue @Inject constructor(
             )
             return
         }
-        android.util.Log.i(TAG, "повтор ${job.sendId} (${job.messageId})")
+        android.util.Log.i(TAG, "retry ${job.sendId} (${job.messageId})")
         canceled.remove(job.sendId)
         retries.remove(job.sendId)
         lastFailure.remove(job.sendId)
@@ -378,7 +606,7 @@ class MediaSendQueue @Inject constructor(
     private suspend fun createMessage(job: MediaSendJob): MediaSendJob? {
         val echo = job.echoJson.takeIf { it.isNotBlank() } ?: echoManifest(context, job.items)
         existingMessageFor(job)?.let { found ->
-            android.util.Log.i(TAG, "${job.sendId}: сообщение $found уже создано — второе не создаём")
+            android.util.Log.i(TAG, "${job.sendId}: message $found already exists, no second one")
             markReply(job, found)
             markGlance(job, found)
             return job.copy(messageId = found, echoJson = echo).also { persist(it) }
@@ -454,7 +682,7 @@ class MediaSendQueue @Inject constructor(
                     messageSlots.withPermit {
                         // Re-encoding, upload and publish: the CPU must not sleep through it.
                         repository.keepAwake.during { runCatching { execute(job) } }
-                            .onFailure { android.util.Log.e(TAG, "работа ${job.sendId} сорвалась", it) }
+                            .onFailure { android.util.Log.e(TAG, "job ${job.sendId} failed", it) }
                     }
                 }
                 running[job.sendId] = work
@@ -465,7 +693,7 @@ class MediaSendQueue @Inject constructor(
 
     private suspend fun execute(initial: MediaSendJob): Outcome {
         var job = initial
-        android.util.Log.i(TAG, "старт ${job.sendId}: ${job.items.size} элем., состояние ${job.state}")
+        android.util.Log.i(TAG, "start ${job.sendId}: ${job.items.size} items, state ${job.state}")
 
         // --- PROCESSING + UPLOADING: one pipeline per item ---
         // Items are encoded one at a time (encoder slot) and each goes up as soon as
@@ -563,7 +791,7 @@ class MediaSendQueue @Inject constructor(
         }
         if (!ok) {
             if (!hasNetwork()) {
-                android.util.Log.i(TAG, "${job.sendId}: публикация не прошла, сети нет — ждём подключения")
+                android.util.Log.i(TAG, "${job.sendId}: publish failed with no network, waiting for it")
                 return Outcome.WAIT_NETWORK
             }
             if (young(job)) {
@@ -571,12 +799,15 @@ class MediaSendQueue @Inject constructor(
                 retryLater(job)
                 return Outcome.WAIT_NETWORK
             }
-            android.util.Log.e(TAG, "${job.sendId}: публикация не удалась")
+            android.util.Log.e(TAG, "${job.sendId}: publish failed")
             fail(job, MediaSendFailure.PUBLISH_FAILED)
             return Outcome.FAILED
         }
         runCatching { repository.deletePendingMedia(job.messageId) }
-        job.items.forEach { transfers.onUploadSent(job.opId(it.index)) }
+        job.items.forEach {
+            transfers.stopFollowing(job.uploadOpOf(it))
+            transfers.onUploadSent(job.opId(it.index))
+        }
         // Publish confirmed — the work is over, and the transfer group must
         // disappear with it. HERE, not after the last byte: until confirmed,
         // publish can still fail and the retry needs the group.
@@ -588,28 +819,35 @@ class MediaSendQueue @Inject constructor(
         // There is ONE end for all senders — see the primitive's docs.
         transfers.onOutgoingTransferPublished(job.messageId)
         persist(job.withState(MediaSendState.SENT))
-        _changed.tryEmit(job.chatId)
         MediaTrace.event(job.sendId, null, MediaTrace.MESSAGE_PUBLISH, "refs" to okRefs.size)
         MediaTrace.finish(job.sendId)
-        android.util.Log.i(TAG, "${job.sendId}: доставлено")
+        android.util.Log.i(TAG, "${job.sendId}: delivered")
 
         // Other Share recipients: same blobs, no second upload.
         fanOut(job, refsJson)
 
-        // The files are no longer needed as "work", but the sender's bubble
-        // renders from them — so only the job record is removed, not the dir.
         store.deleteRecord(job)
-        // They also become cache entries: the sweep a day later leaves the sender
-        // with their own attachment on the phone, not a download from storage.
+        // A sent file has one home from now on: the cache, keyed by its blob, shared by
+        // every message that carries it. The outbox copy goes once the cache holds it.
         scope.launch {
+            var allAdopted = true
             results.forEach { (index, ref) ->
                 val item = job.items.firstOrNull { it.index == index } ?: return@forEach
-                if (ref != null) repository.adoptSentFile(item.outputPath, ref)
+                if (ref != null && repository.adoptSentFile(item.outputPath, ref)) {
+                    File(item.outputPath).delete()
+                    transfers.onSentFileAdopted(ref)
+                } else {
+                    allAdopted = false
+                }
             }
+            if (allAdopted) store.workDir(job.sendId).deleteRecursively()
         }
         forget(job.messageId)
         retries.remove(job.sendId)
         lastFailure.remove(job.sendId)
+        // Told only now that the queue let go of the message: the chat's reload then
+        // treats it as a published album (its download group, its cache states).
+        _changed.tryEmit(job.chatId)
         return Outcome.DONE
     }
 
@@ -630,34 +868,27 @@ class MediaSendQueue @Inject constructor(
         val uploaded = kotlinx.coroutines.CompletableDeferred<Unit>()
     }
 
-    private suspend fun sendItemInOrder(job: MediaSendJob, item: MediaSendItem, own: ItemGates, prev: ItemGates?): Pair<Int, String?> {
+    private suspend fun sendItemInOrder(job: MediaSendJob, initial: MediaSendItem, own: ItemGates, prev: ItemGates?): Pair<Int, String?> {
+        val opId = job.opId(initial.index)
+        val uploadOp = job.uploadOpOf(initial)
+        // Went up, or is going up, while the set was composed: that same upload is the
+        // send's, under the same op; its ref lands in the job.
+        composedUploads[uploadOp]?.let {
+            transfers.onUploadEncrypting(opId)
+            it.join()
+        }
+        val item = fresh(job).items.firstOrNull { it.index == initial.index } ?: initial
         // Already-uploaded items are not uploaded again — the double-send protection after a restart.
-        item.uploadedRef?.let { return item.index to it }
-        val opId = job.opId(item.index)
-        // Went up while the set was composed: only the publish is left. If it is still
-        // going up, the bubble shows its bytes meanwhile.
-        item.preUploadKey?.let { key ->
-            val running = preUploads.opIdOf(item.draft.id, key)
-            if (running != null) {
-                transfers.onUploadEncrypting(opId)
-                transfers.followProgress(running, opId)
-            }
-            try {
-                preUploads.adopt(item.draft.id, key, item.outputPath)
-            } finally {
-                running?.let(transfers::stopFollowing)
-            }
-        }?.let { ref ->
+        // It still finishes in its turn, so the album's tiles complete in order.
+        item.uploadedRef?.let {
             own.encoded.complete(Unit)
-            val merged = mergeMeta(ref, measured(item))
-            rememberRef(job.sendId, item.index, merged)
+            prev?.uploaded?.await()
             transfers.onUploadPublishing(opId)
-            MediaTrace.event(job.sendId, item.index, "PRE_UPLOADED")
-            return item.index to merged
+            return item.index to it
         }
         if (File(item.outputPath).length() <= 0L) {
             prev?.encoded?.await()
-            prepare(job, item, opId)
+            prepare(job, item, uploadOp, opId)
         }
         own.encoded.complete(Unit)
         // Its early upload ran while it was encoded; the rest goes after the previous item's.
@@ -682,7 +913,7 @@ class MediaSendQueue @Inject constructor(
                     android.util.Log.w(TAG, "${job.sendId}#${item.index}: no network, retry deferred (attempt ${attempt + 1})")
                     break
                 }
-                ref = repository.uploadBlobRef(item.outputPath, item.mediaType, null, opId)
+                ref = repository.uploadMedia(job.chatId, uploadOp, item.outputPath, item.mediaType)
                     .onFailure { lastFailure[job.sendId] = it }.getOrNull()
                 if (ref == null) { attempt++; delay(400L * attempt) }
             }
@@ -697,16 +928,16 @@ class MediaSendQueue @Inject constructor(
         }
     }
 
-    /** Produce the item's file. A re-encoded video starts going up while it is written. */
-    private suspend fun prepare(job: MediaSendJob, item: MediaSendItem, opId: String) {
+    /** Produce the item's file. A re-encoded video starts going up (under [uploadOp]) while it is written. */
+    private suspend fun prepare(job: MediaSendJob, item: MediaSendItem, uploadOp: String, opId: String) {
         // Checks BEFORE the work: each says in words why there is no point starting —
         // free space or resend the file are different answers.
         if (!sourceReadable(item)) {
-            android.util.Log.e(TAG, "${job.sendId} элемент ${item.index}: исходник недоступен")
+            android.util.Log.e(TAG, "${job.sendId} item ${item.index}: source unavailable")
             throw ItemStop(MediaSendFailure.SOURCE_UNAVAILABLE)
         }
         if (!enoughDiskFor(item)) {
-            android.util.Log.e(TAG, "${job.sendId} элемент ${item.index}: мало места на диске")
+            android.util.Log.e(TAG, "${job.sendId} item ${item.index}: low disk space")
             throw ItemStop(MediaSendFailure.NO_DISK_SPACE)
         }
         val target = File(item.outputPath)
@@ -727,21 +958,21 @@ class MediaSendQueue @Inject constructor(
                         if (hasNetwork()) {
                             transfers.onUploadEncrypting(opId)
                             early = launch(Dispatchers.IO) {
-                                repository.preuploadGrowing(opId, "${target.path}.part", target.path, est)
+                                repository.preuploadGrowing(uploadOp, "${target.path}.part", target.path, est)
                             }
                         }
                     },
                 ) { percent ->
-                    if (percent % 20 == 0) android.util.Log.i(TAG, "${job.sendId} элемент ${item.index}: подготовка $percent%")
+                    if (percent % 20 == 0) android.util.Log.i(TAG, "${job.sendId} item ${item.index}: preparing $percent%")
                 }
-            } } finally { repository.endPreupload(opId) }
+            } } finally { repository.endPreupload(uploadOp) }
             early?.join()
             file
         }
         if (produced == null) {
             // A cancel during preparation looks like a failure — but work interrupted on request is not one.
             if (job.sendId in canceled) throw ItemStop(null)
-            android.util.Log.e(TAG, "${job.sendId} элемент ${item.index}: файл не получен")
+            android.util.Log.e(TAG, "${job.sendId} item ${item.index}: no file produced")
             // The source may have vanished mid-work — then "retry" is pointless.
             throw ItemStop(if (!sourceReadable(item)) MediaSendFailure.SOURCE_UNAVAILABLE else MediaSendFailure.ENCODE_FAILED)
         }
@@ -754,6 +985,17 @@ class MediaSendQueue @Inject constructor(
             persist(fresh.withItem(index) { it.copy(ready = true) })
         }
     }
+
+    /**
+     * As [rememberRef] and [markReady], for the item that goes up under [op]: Send may
+     * have moved it. False when no job holds the item any more.
+     */
+    private suspend fun rememberByOp(sendId: String, op: String, ref: String?): Boolean =
+        writeLock.withLock {
+            val fresh = store.all().firstOrNull { it.sendId == sendId } ?: return@withLock false
+            val item = fresh.items.firstOrNull { it.uploadOp == op } ?: return@withLock false
+            persist(fresh.withItem(item.index) { it.copy(uploadedRef = ref ?: it.uploadedRef, ready = true) })
+        }
 
     /** Write a ref into the job. Under a lock: uploads run in parallel. */
     private suspend fun rememberRef(sendId: String, index: Int, ref: String) {
@@ -768,12 +1010,12 @@ class MediaSendQueue @Inject constructor(
         val extras = job.alsoTo.filter { it.isNotBlank() && it != job.chatId }.distinct()
         if (extras.isEmpty()) return
         scope.launch {
-            android.util.Log.i(TAG, "рассылка ${job.sendId}: ${extras.size} получателей")
+            android.util.Log.i(TAG, "fan-out ${job.sendId}: ${extras.size} recipients")
             for (target in extras) {
                 val id = runCatching {
                     publishAlbumRefs(target, refsJson, job.echoJson, job.caption, job.ttl)
                 }.getOrNull()
-                android.util.Log.i(TAG, "рассылка → $target: ${id ?: "не удалось"}")
+                android.util.Log.i(TAG, "fan-out → $target: ${id ?: "failed"}")
             }
         }
     }
@@ -831,7 +1073,7 @@ class MediaSendQueue @Inject constructor(
             var wasOnline = network.isOnline
             network.online.collect { online ->
                 if (online && !wasOnline) {
-                    android.util.Log.i(TAG, "сеть появилась — продолжаем отправки")
+                    android.util.Log.i(TAG, "network back, resuming sends")
                     pump()
                 }
                 wasOnline = online
@@ -912,7 +1154,7 @@ class MediaSendQueue @Inject constructor(
         if (need <= 0L) return true
         val free = File(item.outputPath).parentFile?.usableSpace ?: return true
         (free > need).also {
-            if (!it) android.util.Log.e(TAG, "нужно $need Б, свободно $free Б")
+            if (!it) android.util.Log.e(TAG, "need $need B, free $free B")
         }
     }.getOrDefault(true)
 
@@ -934,7 +1176,12 @@ class MediaSendQueue @Inject constructor(
         // have one: a partial sum would be a third number in the same spot.
         val measured = job.items.map { runCatching { File(it.outputPath).length() }.getOrDefault(0L) }
         val allReady = measured.all { it > 0L }
-        job.items.forEach { transfers.onUploadEncrypting(job.opId(it.index)) }
+        job.items.forEach {
+            // An item's bytes go up under its own op (from the composer on); the bubble reads them as the message's.
+            val op = job.uploadOpOf(it)
+            if (op != job.opId(it.index)) transfers.followProgress(op, job.opId(it.index))
+            transfers.onUploadEncrypting(job.opId(it.index))
+        }
         transfers.registerGroup(
             job.messageId,
             job.items.map { TransferKey.upload(job.opId(it.index)) },
@@ -987,11 +1234,14 @@ class MediaSendQueue @Inject constructor(
         drafts: List<MediaDraftItem>,
         photoMaxEdge: Int,
         photoQuality: Int,
-        preKeys: List<String>,
+        keys: List<String>,
+        /** Per draft, the composed item it reuses (see [ComposedSet.take]). */
+        composed: List<MediaSendItem?>,
     ): List<MediaSendItem> {
         val dir = store.workDir(sendId)
         val cacheRoot = context.cacheDir.absolutePath
         return drafts.mapIndexed { i, draft ->
+            // Composed under the same key: its file and upload are this item's.
             val owned = draft.takeIf { it.deleteAfterUse }
                 ?.uri?.takeIf { it.scheme == "file" }
                 ?.path?.let(::File)
@@ -1003,6 +1253,8 @@ class MediaSendQueue @Inject constructor(
                         .getOrDefault(false)
                 if (moved) draft.copy(uri = android.net.Uri.fromFile(target)) else draft
             }
+            // Composed under the same key: its file and upload are this item's.
+            composed[i]?.let { return@mapIndexed it.copy(index = i, draft = claimed) }
             val revision = MediaSendJob.revisionOf(claimed, photoMaxEdge, photoQuality)
             val ext = if (claimed.isVideo) "mp4" else "jpg"
             MediaSendItem(
@@ -1010,13 +1262,30 @@ class MediaSendQueue @Inject constructor(
                 draft = claimed,
                 outputPath = File(dir, "$i.r$revision.$ext").absolutePath,
                 editRevision = revision,
-                preUploadKey = preKeys.getOrNull(i),
+                preUploadKey = keys[i],
+                uploadOp = newUploadOp(),
             )
         }
     }
 
+    /** What shapes an item's file under the given settings: a composed item serves a send only under the same key. */
+    private fun keyOf(draft: MediaDraftItem, photoMaxEdge: Int, photoQuality: Int, hd: Boolean, videoEdge: Int): String {
+        val revision = MediaSendJob.revisionOf(draft, photoMaxEdge, photoQuality)
+        return "${draft.id}|$revision|" + if (draft.isVideo) "v$videoEdge" else "p$hd"
+    }
+
+    /** The photo settings a chat's send uses (see [com.alphamessenger.ui.chat.ChatViewModel.sendDraftMedia]). */
+    private fun photoEdge(hd: Boolean) = maxOf(DEFAULT_PHOTO_EDGE, MediaQuality.photoEdge(hd))
+    private fun photoQuality(hd: Boolean) = maxOf(DEFAULT_PHOTO_QUALITY, MediaQuality.photoQuality(hd))
+
+    private fun newUploadOp() = "up-" + java.util.UUID.randomUUID()
+
     companion object {
         private const val TAG = "AlphaSendQueue"
+        private const val DEFAULT_PHOTO_EDGE = 1600
+        private const val DEFAULT_PHOTO_QUALITY = 80
+        private const val COMPOSED_RETRY_FIRST_MS = 1_000L
+        private const val COMPOSED_RETRY_MAX_MS = 30_000L
         private const val RETRY_FIRST_MS = 5_000L
         private const val RETRY_MAX_MS = 60_000L
         private const val RETRY_LIFESPAN_MS = 24 * 60 * 60 * 1000L

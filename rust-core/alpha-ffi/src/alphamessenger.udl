@@ -23,12 +23,12 @@ namespace alphamessenger {
 // NOTE: field is named "description" not "message" to avoid
 // conflict with Kotlin's Throwable.message property.
 
-// ── T3: репликация транспортного объекта ────────────────────────────────
+// ── T3: transport object replication ────────────────────────────────────
 //
-// Kotlin оркеструет, ядро выполняет. Наружу НЕ выходят: ключ, шифротекст,
-// конверт, путь в файловой системе и адрес хранилища. Снаружи приходит только
-// идентичность отправки и идентификатор хранилища из настроенной топологии —
-// произвольный путь или URL передать нельзя по устройству API.
+// Kotlin orchestrates, the core executes. Never crossing the boundary: the key,
+// ciphertext, envelope, file path and storage address. Only the send identity
+// and a storage id from the configured topology come in, so no arbitrary path
+// or URL can be passed by construction.
 enum ReplicationOutcome {
     "Confirmed",
     "IdentityMismatch",
@@ -60,6 +60,8 @@ interface MessengerError {
     MediaGone();
     MediaUnknownServer();
     MediaRefused(string description);
+    InviteInvalid();
+    AlreadyMember();
 };
 
 // Callback interface for receiving events from Rust
@@ -177,7 +179,7 @@ dictionary ChatInfo {
     string? name;
     u64 epoch;
     string created_at;
-    // Chat-list extras (Этап 8.4)
+    // Chat-list extras
     string last_message_preview;
     string last_message_at;
     string last_message_kind;
@@ -487,6 +489,7 @@ interface AlphaMessengerCore {
     string whispers_json(string chat_id);
     [Throws=MessengerError]
     u64 sweep_expired_messages();
+    i64 next_message_expiry_ms();
 
     // Media
     [Throws=MessengerError]
@@ -545,7 +548,7 @@ interface AlphaMessengerCore {
     u32 flush_pending_sends();
     sequence<string> pending_send_ids();
 
-    // Offline media queue (Этап 7.10)
+    // Offline media queue
     [Throws=MessengerError]
     void enqueue_pending_media_single(string chat_id, string msg_id, string file_path, string media_type, string? caption, string? poster_b64, boolean streaming, u32 ttl_secs, string? meta_json);
     [Throws=MessengerError]
@@ -564,12 +567,11 @@ interface AlphaMessengerCore {
 
     boolean retry_pending_media(string msg_id);
 
-    // T3 — ключи шифрования медиа для незавершённой отправки.
+    // T3: media encryption keys of an unfinished send.
     //
-    // API УЗКИЙ намеренно: это не хранилище секретов общего назначения.
-    // Идентификатор собирается внутри ядра из send_id/item_index/revision,
-    // поэтому произвольную строку сюда передать нельзя, а значит нельзя и
-    // прочитать или затереть чужую запись. Ключ не логируется.
+    // Narrow on purpose, not a general secret store: the id is built inside the
+    // core from send_id/item_index/revision, so no caller can read or overwrite
+    // another record. The key is never logged.
     [Throws=MessengerError]
     void store_media_send_key(string send_id, u32 item_index, u64 revision, sequence<u8> key_material);
     sequence<u8>? load_media_send_key(string send_id, u32 item_index, u64 revision);
@@ -586,10 +588,15 @@ interface AlphaMessengerCore {
     string sync_health_json();
     [Throws=MessengerError]
     void force_reconnect();
-    void reserve_relay_changed();
     // The device's network as the OS reports it (gained / switched / lost).
     [Throws=MessengerError]
     void set_network_available(boolean available);
+    // Whether the device's network is metered (cellular): copies that cost the phone's bytes wait for one that is not.
+    void set_network_metered(boolean metered);
+    // Media refs of messages deleted since the last call: their files leave the phone.
+    sequence<string> take_gone_media();
+    // Our deleted-for-everyone media leaves the servers (network; call off the UI thread).
+    void purge_deleted_media();
     [Throws=MessengerError]
     u64 catch_up();
 
@@ -621,7 +628,7 @@ interface AlphaMessengerCore {
     [Throws=MessengerError]
     string list_group_members(string chat_id);
 
-    // Saved Messages / Избранное (local-only notes-to-self).
+    // Saved Messages (local-only notes-to-self).
     [Throws=MessengerError]
     ChatInfo ensure_saved_messages_chat();
     [Throws=MessengerError]
@@ -681,6 +688,8 @@ interface AlphaMessengerCore {
     string secret_chat_check(string chat_id);
     [Throws=MessengerError]
     void set_my_cover(string cover_path);
+    // Our cover's file ("" = none).
+    string my_cover();
     [Throws=MessengerError]
     string get_peer_cover_path(string sender_id);
     [Throws=MessengerError]
@@ -690,7 +699,7 @@ interface AlphaMessengerCore {
     [Throws=MessengerError]
     sequence<PeerProfile> list_peer_profiles();
 
-    // Chat-list mutations (Этап 8.4)
+    // Chat-list mutations
     [Throws=MessengerError]
     void pin_chat(string chat_id, boolean pinned);
     [Throws=MessengerError]
@@ -713,6 +722,7 @@ interface AlphaMessengerCore {
     u32 presence_color(string user_id);
     sequence<string> presence_capabilities(string user_id);
     string presence_tick();
+    string note_peer_activity(string chat_id, string sender_id);
     [Throws=MessengerError]
     void mark_chat_read(string chat_id);
     [Throws=MessengerError]
@@ -754,7 +764,7 @@ interface AlphaMessengerCore {
     // G-10: temporarily close the chat until until_ts (unix secs; 0 = reopen).
     [Throws=MessengerError]
     void set_group_closed(string chat_id, i64 until_ts);
-    // G-9: audit log (Недавние действия)
+    // G-9: audit log (recent actions)
     [Throws=MessengerError]
     string group_audit_log(string chat_id);
     [Throws=MessengerError]

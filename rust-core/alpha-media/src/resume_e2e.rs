@@ -120,7 +120,7 @@ fn temp_file(chunks: usize) -> std::path::PathBuf {
 fn manifest(r: &UploadResult) -> Vec<(u64, u64, String, String)> {
     r.stream_chunks
         .as_ref()
-        .expect("потоковая отправка обязана дать список кусков")
+        .expect("a streaming send must give the chunk list")
         .iter()
         .map(|c| {
             (
@@ -134,7 +134,7 @@ fn manifest(r: &UploadResult) -> Vec<(u64, u64, String, String)> {
 }
 
 #[tokio::test]
-async fn возобновлённая_отправка_даёт_ту_же_ссылку_и_не_шлёт_принятое() {
+async fn a_resumed_send_gives_the_same_ref_and_skips_the_accepted() {
     // The file is deliberately longer than one wave of in-flight chunks: on
     // a fast disconnect, chunks that were in flight are cancelled with the
     // stream, and at six chunks nothing would have time to confirm — the
@@ -151,7 +151,7 @@ async fn возобновлённая_отправка_даёт_ту_же_ссы
     let normal = pipe_a
         .upload_streaming_file(&file, "f.bin", MediaType::File, &signer, key, &noop, &|| false, None)
         .await
-        .expect("непрерывная отправка обязана пройти");
+        .expect("an uninterrupted send must pass");
     assert_eq!(store_a.puts.load(Ordering::Relaxed), CHUNKS);
 
     // 2. Disconnect mid-way. Confirmations of accepted chunks must survive
@@ -172,10 +172,10 @@ async fn возобновлённая_отправка_даёт_ту_же_ссы
             Some(&ckpt),
         )
         .await;
-    assert!(interrupted.is_err(), "обрыв обязан завершиться ошибкой, а не тихим успехом");
+    assert!(interrupted.is_err(), "a cut must end in an error, not a silent success");
     let confirmed = ckpt.load().len();
-    assert!(confirmed > 0, "часть кусков обязана быть подтверждена до обрыва");
-    assert!(confirmed < CHUNKS, "обрыв обязан оставить незавершённые куски");
+    assert!(confirmed > 0, "some chunks must be confirmed before the cut");
+    assert!(confirmed < CHUNKS, "the cut must leave chunks unfinished");
     let sent_before = store_b.puts.swap(0, Ordering::Relaxed);
 
     // 3. Resume on the same storage.
@@ -184,28 +184,28 @@ async fn возобновлённая_отправка_даёт_ту_же_ссы
             &file, "f.bin", MediaType::File, &signer, key, &noop, &|| false, Some(&ckpt),
         )
         .await
-        .expect("возобновление обязано пройти");
+        .expect("the resume must pass");
     let sent_after = store_b.puts.load(Ordering::Relaxed);
 
     // What is confirmed does not go to the network again.
     assert_eq!(
         sent_after,
         CHUNKS - confirmed,
-        "заново ушло {sent_after} кусков при {confirmed} подтверждённых из {CHUNKS}",
+        "{sent_after} chunks sent again with {confirmed} of {CHUNKS} confirmed",
     );
     assert!(
         sent_before + sent_after < CHUNKS * 2,
-        "возобновление обязано стоить дешевле полной повторной отправки",
+        "a resume must cost less than a full resend",
     );
 
     // And the key point: the ref is indistinguishable from the uninterrupted one.
-    assert_eq!(manifest(&resumed), manifest(&normal), "манифест кусков разошёлся");
-    assert_eq!(resumed.media_hash, normal.media_hash, "хэш файла разошёлся");
+    assert_eq!(manifest(&resumed), manifest(&normal), "the chunk manifest differs");
+    assert_eq!(resumed.media_hash, normal.media_hash, "the file hash differs");
     assert_eq!(resumed.original_size, normal.original_size);
     assert_eq!(resumed.stream_chunks.as_ref().unwrap().len(), CHUNKS);
     assert!(
         resumed.stream_chunks.as_ref().unwrap().iter().all(|c| !c.locations.is_empty()),
-        "у пропущенных кусков обязаны остаться адреса — иначе получатель не соберёт файл",
+        "skipped chunks must keep their addresses, or the recipient cannot assemble the file",
     );
 
     let _ = std::fs::remove_file(&file);
@@ -217,7 +217,7 @@ async fn возобновлённая_отправка_даёт_ту_же_ссы
 /// The guard is not that we compared revision numbers but that bytes must be
 /// compared: even a foreign record slipped in gives no skip.
 #[tokio::test]
-async fn чужая_контрольная_точка_не_подменяет_куски() {
+async fn a_foreign_checkpoint_does_not_replace_chunks() {
     let file = temp_file(3);
     let signer = crate::blossom::MediaSigner::generate();
     let noop = |_: u64, _: u64| {};
@@ -239,12 +239,12 @@ async fn чужая_контрольная_точка_не_подменяет_к
             &file, "f.bin", MediaType::File, &signer, [2u8; 32], &noop, &|| false, Some(&alien),
         )
         .await
-        .expect("отправка обязана пройти, не поверив чужим записям");
+        .expect("the send must pass without trusting foreign records");
 
     assert_eq!(
         store.puts.load(Ordering::Relaxed),
         3,
-        "ни один кусок не имел права быть пропущенным по чужой записи",
+        "no chunk may be skipped on a foreign record",
     );
     assert_eq!(mine.stream_chunks.as_ref().unwrap().len(), 3);
     let _ = std::fs::remove_file(&file);
@@ -325,7 +325,7 @@ async fn spawn_failing_store(ok_puts: usize) -> UploadStore {
 /// rest of the file; send permits are returned in full, otherwise the next
 /// attempt would hang on an empty semaphore.
 #[tokio::test]
-async fn одна_неудача_куска_обрывает_попытку_не_дочитывая_файл() {
+async fn one_chunk_failure_ends_the_attempt_without_reading_the_rest() {
     const CHUNKS: usize = 40;
     const OK: usize = 6;
     let file = temp_file(CHUNKS);
@@ -344,7 +344,7 @@ async fn одна_неудача_куска_обрывает_попытку_не
         .await;
     let elapsed = t0.elapsed();
 
-    assert!(res.is_err(), "неудача куска обязана дать ошибку, а не тихий успех");
+    assert!(res.is_err(), "a chunk failure must give an error, not a silent success");
 
     // Reading a doomed attempt to the end would cost four attempts per each
     // of the remaining 34 chunks. The threshold separates "aborted at
@@ -352,14 +352,14 @@ async fn одна_неудача_куска_обрывает_попытку_не
     let puts = store.puts.load(Ordering::Relaxed);
     assert!(
         puts < OK + 4 * crate::pipeline::GLOBAL_UPLOAD_SLOTS * 2,
-        "попытка продолжала слать куски после окончательной неудачи: запросов {puts}",
+        "the attempt kept sending after a final failure: {puts} requests",
     );
 
-    assert!(elapsed.as_secs() < 60, "обрыв обязан быть быстрым, а не по сроку ожидания: {elapsed:?}");
+    assert!(elapsed.as_secs() < 60, "the cut must be quick, not a timeout: {elapsed:?}");
 
     // What was accepted before the break must survive the error — otherwise
     // resume has nothing to skip and the whole gain is lost on the key case.
-    assert!(!ckpt.load().is_empty(), "подтверждения принятых кусков обязаны сохраниться");
+    assert!(!ckpt.load().is_empty(), "confirmations of accepted chunks must be kept");
 
     // In-flight chunks are cancelled with the stream; their permits must be
     // returned, otherwise a second send in the same process hangs forever.
@@ -375,8 +375,8 @@ async fn одна_неудача_куска_обрывает_попытку_не
         crate::pipeline::upload_slots().acquire_many(all),
     )
     .await
-    .expect("разрешения на отправку не вернулись после обрыва")
-    .expect("семафор отправки закрыт");
+    .expect("the upload permits did not come back after the cut")
+    .expect("the upload semaphore is closed");
 
     let _ = std::fs::remove_file(&file);
 }

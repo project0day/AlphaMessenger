@@ -12,13 +12,17 @@ import android.view.LayoutInflater
 import android.view.Menu
 import android.view.MenuItem
 import android.view.MotionEvent
+import android.view.ViewTreeObserver
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
@@ -64,9 +68,13 @@ class ComposerEditText(context: Context, attrs: AttributeSet?) : EditText(contex
         if (keyboardHeld) { keyboardHeld = false; endBatchEdit() }
     }
 
+    /** Told whenever the field gains or loses focus. */
+    internal var onFocus: ((Boolean) -> Unit)? = null
+
     override fun onFocusChanged(focused: Boolean, direction: Int, previouslyFocusedRect: android.graphics.Rect?) {
         if (!focused) releaseKeyboardUpdates()
         super.onFocusChanged(focused, direction, previouslyFocusedRect)
+        onFocus?.invoke(focused)
     }
 
     override fun onDetachedFromWindow() {
@@ -283,9 +291,53 @@ internal fun ComposerField(
 }
 
 /** Cursor into the field and the keyboard up. */
-internal fun EditText.focusAndShowKeyboard() {
+internal fun EditText.focusAndShowKeyboard(onRequested: (() -> Unit)? = null) {
     requestFocus()
-    post { context.getSystemService(InputMethodManager::class.java)?.showSoftInput(this, 0) }
+    // A window without focus (still behind the lock screen, still coming back) has its
+    // keyboard request dropped by the system, so the request waits for the focus.
+    if (hasWindowFocus()) showKeyboardNow(onRequested)
+    else viewTreeObserver.addOnWindowFocusChangeListener(object : ViewTreeObserver.OnWindowFocusChangeListener {
+        override fun onWindowFocusChanged(hasFocus: Boolean) {
+            if (!hasFocus) return
+            viewTreeObserver.removeOnWindowFocusChangeListener(this)
+            showKeyboardNow(onRequested)
+        }
+    })
+}
+
+private fun EditText.showKeyboardNow(onRequested: (() -> Unit)?) {
+    post {
+        val imm = context.getSystemService(InputMethodManager::class.java)
+        if (isFocused && imm != null && !imm.showSoftInput(this, 0)) {
+            // A refused request is cleared by cycling the focus once.
+            clearFocus()
+            requestFocus()
+            imm.showSoftInput(this, 0)
+        }
+        onRequested?.invoke()
+    }
+}
+
+/**
+ * For a screen drawn over the chat in the chat's own window. On entry the field underneath
+ * gives up the keyboard, or whatever is typed next lands in it unseen. On exit the screen's
+ * own keyboard goes with it: its field leaves, but the window keeps the keyboard up.
+ */
+@Composable
+internal fun TakeKeyboardFromBelow() {
+    val view = LocalView.current
+    val focusManager = LocalFocusManager.current
+    DisposableEffect(view) {
+        // Through the composition's own focus: a field blurred behind its back is the
+        // one it hands focus back to on the next tap, wherever that tap lands.
+        (view.rootView.findFocus() as? EditText)?.let { field ->
+            field.hideKeyboard()
+            focusManager.clearFocus(force = true)
+        }
+        onDispose {
+            view.context.getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(view.windowToken, 0)
+        }
+    }
 }
 
 /** Keyboard down and the cursor out of the field. */

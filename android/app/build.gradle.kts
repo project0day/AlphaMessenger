@@ -24,8 +24,7 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
-        // Инструментальные тесты: ContentResolver, EXIF и права на URI живут
-        // только на устройстве, JVM-тестами их не покрыть.
+        // Instrumented tests: ContentResolver, EXIF and URI grants exist only on a device.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         resourceConfigurations += listOf("en", "ru", "fr", "es")
     }
@@ -69,10 +68,8 @@ android {
 
     testOptions {
         unitTests {
-            // `android.util.Log` в юнит-тестах — заглушка, которая БРОСАЕТ
-            // исключение. Из-за этого ветка отказа умирала до записи состояния,
-            // и тест видел старое значение вместо нового: дефект был не в
-            // логике, а в том, что до неё не доходило управление.
+            // `android.util.Log` is a throwing stub in unit tests: a failure branch died
+            // before it recorded its state, and the test saw the old value.
             isReturnDefaultValues = true
         }
     }
@@ -179,8 +176,7 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.5.1")
     implementation("androidx.media3:media3-ui:1.5.1")
     implementation("androidx.media3:media3-common:1.5.1")
-    // Подготовка видео к отправке: обрезка, звук, приведение HDR к обычному
-    // диапазону. Официальная библиотека вместо ручного переноса дорожек.
+    // Preparing video for sending: trim, sound, HDR to standard range.
     implementation("androidx.media3:media3-transformer:1.5.1")
     implementation("androidx.media3:media3-muxer:1.5.1")
     implementation("androidx.media3:media3-session:1.5.1")
@@ -246,14 +242,13 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     // ─────────────────────────────────────────────────────────
-    // Tests (instrumented — URI/ContentResolver/EXIF нужны настоящие)
+    // Tests (instrumented — URI/ContentResolver/EXIF need real ones)
     // ─────────────────────────────────────────────────────────
     androidTestImplementation("androidx.test:core:1.5.0")
     androidTestImplementation("androidx.test:runner:1.5.2")
     testImplementation("junit:junit:4.13.2")
-    // Настоящий org.json для тестов: в юнит-тестах Android его классы —
-    // заглушки, и любая сериализация падает. Проверять сохранение состояния
-    // на заглушке нельзя, а именно оно и переживает смерть процесса.
+    // The real org.json for tests: Android's classes are stubs in unit tests, and the
+    // saved state that outlives the process cannot be checked on a stub.
     testImplementation("org.json:json:20231013")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")

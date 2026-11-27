@@ -187,6 +187,14 @@ private suspend fun <T> withTimeoutSafe(timeoutMs: Long, block: suspend () -> T)
         null
     }
 
+/** Our own photo, stored under its content name (see [com.alphamessenger.data.OwnPictureFiles]). */
+internal fun saveOwnPhoto(ctx: Context, uri: Uri): String? {
+    val files = com.alphamessenger.data.OwnPictureFiles
+    val scratch = files.scratch(ctx, files.PHOTO)
+    val written = saveAvatarToInternal(ctx, uri, "${scratch.parentFile!!.name}/${scratch.name}") ?: return null
+    return files.adopt(ctx, java.io.File(written), files.PHOTO)
+}
+
 /**
  * Copy the user-picked photo to internal storage at a stable path AND
  * downscale + recompress it so the broadcast payload fits the 200 KB cap
@@ -204,11 +212,8 @@ private suspend fun <T> withTimeoutSafe(timeoutMs: Long, block: suspend () -> T)
 internal fun saveAvatarToInternal(
     ctx: Context,
     uri: Uri,
-    // Distinct filename per use-case so a group avatar crop doesn't
-    // overwrite the user's own profile photo (both used to land in
-    // my_avatar.jpg, which is why changing a group picture also changed
-    // the user's own).
-    fileName: String = "my_avatar.jpg",
+    /** Relative to filesDir; each use has its own, so a group photo never replaces ours. */
+    fileName: String,
     /** Byte budget: a group/channel photo travels inside the group's metadata (≤ 200 KB). */
     maxBytes: Int = Int.MAX_VALUE,
 ): String? {

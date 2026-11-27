@@ -67,6 +67,11 @@
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.location.gps" android:required="false" />
 
+    <!-- Whether the phone runs the vendor system that stops background apps (BackgroundDelivery). -->
+    <queries>
+        <package android:name="com.miui.securitycenter" />
+    </queries>
+
     <application
         android:name=".AlphaMessengerApp"
         android:allowBackup="false"
@@ -114,15 +119,12 @@
                 tools:node="remove" />
         </provider>
 
-        <!-- singleTask: Share обязан приходить в ЕДИНСТВЕННЫЙ живой экземпляр
-             (onNewIntent). Замерено: со стандартным режимом каждый шаринг заводил
-             новый экземпляр и новую ЗАДАЧУ — в dumpsys три ActivityRecord
-             MainActivity в задачах t1489/t1490, в «Недавних» три карточки
-             приложения. singleTop этого не лечит: он совпадает только внутри
-             одной задачи. Отсюда шли и «работает через раз» (payload забирал
-             невидимый экземпляр), и потерянный цвет панели навигации у нового
-             окна. Приложение одноэкранное, поэтому «очистка задачи», которой
-             singleTask отличается от singleTop, здесь ничего не сносит. -->
+        <!-- singleTask: a share must reach the ONE live instance (onNewIntent). With the
+             standard mode every share started a new instance and a new task (three
+             MainActivity records in dumpsys, three cards in Recents), which made shares
+             work every other time and lost the navigation bar colour. singleTop matches
+             only within one task. The app has one screen, so clearing the task removes
+             nothing. -->
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
@@ -143,11 +145,10 @@
                 <data android:scheme="alpha" android:host="channel" />
             </intent-filter>
 
-            <!-- Системный Sharesheet. Приходит в ЭТУ же Activity (onCreate /
-                 onNewIntent) — второго entry point нет. Конкретные типы нужны
-                 приложениям, которые спрашивают именно их; */* добирает
-                 остальное, а реальный тип каждого URI всё равно определяется
-                 через ContentResolver в ShareIntentHandler. -->
+            <!-- The system Sharesheet comes to this same Activity (onCreate / onNewIntent),
+                 there is no second entry point. Specific types serve apps that ask for
+                 them; */* takes the rest, and each URI's real type is read through
+                 ContentResolver in ShareIntentHandler. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />

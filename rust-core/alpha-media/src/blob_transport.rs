@@ -652,8 +652,8 @@ mod tests {
         let c = ct(64 * 1024);
         let a = active_codec().encode_chunk(17, 600, &c).unwrap();
         let b = active_codec().encode_chunk(17, 600, &c).unwrap();
-        assert_eq!(a, b, "повторная сериализация дала другие байты");
-        assert_eq!(sha256_hex(&a), sha256_hex(&b), "content-id нестабилен");
+        assert_eq!(a, b, "serializing again gave other bytes");
+        assert_eq!(sha256_hex(&a), sha256_hex(&b), "content-id is unstable");
     }
 
     /// The content-id MUST depend on the chunk's CONTEXT, not just the ciphertext.
@@ -666,8 +666,8 @@ mod tests {
         let at17 = sha256_hex(&active_codec().encode_chunk(17, 600, &c).unwrap());
         let at18 = sha256_hex(&active_codec().encode_chunk(18, 600, &c).unwrap());
         let other_total = sha256_hex(&active_codec().encode_chunk(17, 601, &c).unwrap());
-        assert_ne!(at17, at18, "индекс чанка не входит в идентичность объекта");
-        assert_ne!(at17, other_total, "общее число чанков не входит в идентичность");
+        assert_ne!(at17, at18, "the chunk index is not part of the object identity");
+        assert_ne!(at17, other_total, "the chunk total is not part of the identity");
     }
 
     /// Different content — a different object. A degenerate-codec check.
@@ -686,7 +686,7 @@ mod tests {
     #[test]
     fn t1_codec_identity_is_pinned() {
         let blob = active_codec().encode_chunk(3, 9, &ct(1024)).unwrap();
-        assert_eq!(blob[0], b'{', "конверт перестал быть текстовым");
+        assert_eq!(blob[0], b'{', "the envelope is no longer text");
         assert_eq!(active_codec().content_type(), "application/json");
         assert_eq!(BLOB_ENVELOPE_VERSION, 1);
         let env = active_codec().decode(&blob).unwrap();
@@ -701,10 +701,10 @@ mod tests {
     fn t1_fixture_envelope_stays_decodable() {
         let ciphertext = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
         let blob = active_codec().encode_chunk(2, 5, &ciphertext).unwrap();
-        let text = String::from_utf8(blob.clone()).expect("конверт обязан быть UTF-8");
+        let text = String::from_utf8(blob.clone()).expect("the envelope must be UTF-8");
         // The field set is part of the contract: the object is self-describing.
         for field in ["\"v\"", "\"chunk\"", "\"total\"", "\"alg\"", "\"crc\""] {
-            assert!(text.contains(field), "в конверте нет поля {field}: {text}");
+            assert!(text.contains(field), "the envelope lacks field {field}: {text}");
         }
         let back = active_codec().decode(&blob).unwrap();
         assert_eq!(back.ciphertext, ciphertext);
@@ -725,7 +725,7 @@ mod tests {
             "T1 overhead: payload={} B, envelope={} B, ratio={:.4}",
             plaintext_like.len(), blob.len(), ratio,
         );
-        assert!(ratio > 1.30 && ratio < 1.40, "коэффициент вышел за ожидание: {ratio}");
+        assert!(ratio > 1.30 && ratio < 1.40, "ratio out of the expected range: {ratio}");
     }
 }
 
@@ -766,7 +766,7 @@ mod t1_golden {
         assert_eq!(
             String::from_utf8(produced).expect("UTF-8"),
             GOLDEN_ENVELOPE,
-            "проводной формат изменился без подъёма версии конверта",
+            "the wire format changed without an envelope version bump",
         );
     }
 
@@ -779,7 +779,7 @@ mod t1_golden {
             .expect("encode");
         let mut h = Sha256::new();
         h.update(&produced);
-        assert_eq!(hex::encode(h.finalize()), GOLDEN_SHA256, "content-id уехал");
+        assert_eq!(hex::encode(h.finalize()), GOLDEN_SHA256, "content-id drifted");
     }
 
     /// The frozen bytes MUST be readable by the current decoder.
@@ -790,7 +790,7 @@ mod t1_golden {
     fn t1_frozen_golden_still_decodes() {
         let env = active_codec()
             .decode(GOLDEN_ENVELOPE.as_bytes())
-            .expect("замороженный конверт перестал декодироваться");
+            .expect("the frozen envelope no longer decodes");
         assert_eq!(env.v, 1);
         assert_eq!(env.chunk, 2);
         assert_eq!(env.total, 5);

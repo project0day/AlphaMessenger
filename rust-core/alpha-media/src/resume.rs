@@ -140,10 +140,10 @@ impl<'a> ConfirmationBatcher<'a> {
         }
         let n = batch.len();
         match sink.commit(&batch) {
-            Ok(()) => tracing::debug!(target: "alpha_media", "checkpoint: записано кусков {n}"),
+            Ok(()) => tracing::debug!(target: "alpha_media", "checkpoint: {n} chunks stored"),
             Err(e) => tracing::warn!(
                 target: "alpha_media",
-                "checkpoint: пачка из {n} кусков не записана ({e}) — уйдут заново при обрыве"
+                "checkpoint: batch of {n} chunks not stored ({e}), they go again after a cut"
             ),
         }
     }
@@ -180,16 +180,16 @@ pub fn plan_chunk(
         return ChunkPlan::Upload("");
     };
     if c.locations.is_empty() {
-        return ChunkPlan::Upload("нет адресов");
+        return ChunkPlan::Upload("no addresses");
     }
     if &c.transport_object_id != actual_id {
-        return ChunkPlan::Upload("идентичность не совпала");
+        return ChunkPlan::Upload("identity mismatch");
     }
     if c.plaintext_bytes != actual_plaintext_bytes {
-        return ChunkPlan::Upload("размер не совпал");
+        return ChunkPlan::Upload("size mismatch");
     }
     if c.chunk_hash != actual_hash_hex {
-        return ChunkPlan::Upload("хэш не совпал");
+        return ChunkPlan::Upload("hash mismatch");
     }
     ChunkPlan::Skip(c.to_upload_info())
 }
@@ -232,7 +232,7 @@ mod tests {
         }
         fn commit(&self, batch: &[ConfirmedChunk]) -> Result<(), String> {
             if *self.broken.lock().unwrap() {
-                return Err("диск недоступен".into());
+                return Err("disk unavailable".into());
             }
             *self.commits.lock().unwrap() += 1;
             self.rows.lock().unwrap().extend_from_slice(batch);
@@ -243,14 +243,14 @@ mod tests {
     // --- skip decision ---
 
     #[test]
-    fn пропуск_только_при_полном_совпадении() {
+    fn skipped_only_on_a_full_match() {
         let c = confirmed(0, 1);
         let plan = plan_chunk(Some(&c), &oid(1), 1000, &"aa".repeat(32));
-        assert!(matches!(plan, ChunkPlan::Skip(_)), "совпало всё — слать нечего");
+        assert!(matches!(plan, ChunkPlan::Skip(_)), "everything matches, nothing to send");
     }
 
     #[test]
-    fn чужая_идентичность_не_даёт_пропуска() {
+    fn a_foreign_identity_gives_no_skip() {
         let c = confirmed(0, 1);
         let plan = plan_chunk(Some(&c), &oid(2), 1000, &"aa".repeat(32));
         assert!(matches!(plan, ChunkPlan::Upload(_)));
@@ -262,69 +262,69 @@ mod tests {
     /// new file's bytes yield a different identity. Even if an old record made
     /// it into the selection, it gets no skip.
     #[test]
-    fn запись_от_другой_ревизии_не_применяется() {
+    fn a_record_of_another_revision_does_not_apply() {
         let old = confirmed(0, 9);
         let plan = plan_chunk(Some(&old), &oid(10), 1000, &"aa".repeat(32));
-        assert!(matches!(plan, ChunkPlan::Upload("идентичность не совпала")));
+        assert!(matches!(plan, ChunkPlan::Upload("identity mismatch")));
     }
 
     #[test]
-    fn запись_без_адресов_бесполезна() {
+    fn a_record_without_addresses_is_useless() {
         let mut c = confirmed(0, 1);
         c.locations.clear();
         let plan = plan_chunk(Some(&c), &oid(1), 1000, &"aa".repeat(32));
-        assert!(matches!(plan, ChunkPlan::Upload("нет адресов")));
+        assert!(matches!(plan, ChunkPlan::Upload("no addresses")));
     }
 
     #[test]
-    fn испорченные_размер_или_хэш_отменяют_пропуск() {
+    fn a_corrupt_size_or_hash_cancels_the_skip() {
         let c = confirmed(0, 1);
         assert!(matches!(
             plan_chunk(Some(&c), &oid(1), 999, &"aa".repeat(32)),
-            ChunkPlan::Upload("размер не совпал")
+            ChunkPlan::Upload("size mismatch")
         ));
         assert!(matches!(
             plan_chunk(Some(&c), &oid(1), 1000, &"bb".repeat(32)),
-            ChunkPlan::Upload("хэш не совпал")
+            ChunkPlan::Upload("hash mismatch")
         ));
     }
 
     #[test]
-    fn без_контрольной_точки_отправляем_всё() {
+    fn without_a_checkpoint_everything_is_sent() {
         assert!(matches!(plan_chunk(None, &oid(1), 1000, "x"), ChunkPlan::Upload("")));
     }
 
     // --- when confirmations reach the disk ---
 
     #[test]
-    fn пачка_пишется_по_числу_кусков() {
+    fn a_batch_is_stored_by_chunk_count() {
         let disk = Arc::new(Disk::default());
         let b = ConfirmationBatcher::new(Some(disk.as_ref()));
         for i in 0..MAX_BATCH_CHUNKS as u32 {
             b.add(confirmed(i, i as u8));
         }
-        assert_eq!(*disk.commits.lock().unwrap(), 1, "порог по числу обязан сработать");
+        assert_eq!(*disk.commits.lock().unwrap(), 1, "the count threshold must fire");
         assert_eq!(disk.load().len(), MAX_BATCH_CHUNKS);
     }
 
     /// The time threshold. Without it, on a slow network a confirmation would
     /// sit in memory until the next chunk — i.e. vanish on disconnect.
     #[test]
-    fn пачка_пишется_по_времени_не_дожидаясь_числа() {
+    fn a_batch_is_stored_by_time_without_waiting_for_the_count() {
         let disk = Arc::new(Disk::default());
         let b = ConfirmationBatcher::new(Some(disk.as_ref()));
         b.add(confirmed(0, 0));
-        assert_eq!(*disk.commits.lock().unwrap(), 0, "одиночный кусок ждёт");
+        assert_eq!(*disk.commits.lock().unwrap(), 0, "a single chunk waits");
 
         std::thread::sleep(std::time::Duration::from_millis(MAX_BATCH_MILLIS + 50));
         b.flush_if_stale();
-        assert_eq!(*disk.commits.lock().unwrap(), 1, "залежавшаяся пачка обязана уйти на диск");
+        assert_eq!(*disk.commits.lock().unwrap(), 1, "a stale batch must go to disk");
         assert_eq!(disk.load().len(), 1);
     }
 
     /// Failure BEFORE the write: no confirmation, the chunk goes out again. Safe.
     #[test]
-    fn падение_до_записи_теряет_только_незаписанное() {
+    fn a_crash_before_storing_loses_only_the_unstored() {
         let disk = Arc::new(Disk::default());
         {
             let b = ConfirmationBatcher::new(Some(disk.as_ref()));
@@ -339,13 +339,13 @@ mod tests {
             std::mem::forget(b);
         }
         let durable = disk.load();
-        assert_eq!(durable.len(), MAX_BATCH_CHUNKS, "на диске только записанная пачка");
-        assert!(durable.iter().all(|c| c.index < 100), "незаписанное не должно уцелеть");
+        assert_eq!(durable.len(), MAX_BATCH_CHUNKS, "only the stored batch is on disk");
+        assert!(durable.iter().all(|c| c.index < 100), "the unstored must not survive");
     }
 
     /// Failure AFTER the write: the chunk never goes to the network again.
     #[test]
-    fn падение_после_записи_отменяет_повторную_отправку() {
+    fn a_crash_after_storing_cancels_the_resend() {
         let disk = Arc::new(Disk::default());
         {
             let b = ConfirmationBatcher::new(Some(disk.as_ref()));
@@ -353,7 +353,7 @@ mod tests {
             b.flush();
         }
         let durable = disk.load();
-        let c = durable.iter().find(|c| c.index == 5).expect("подтверждение обязано пережить падение");
+        let c = durable.iter().find(|c| c.index == 5).expect("the confirmation must survive the crash");
         assert!(matches!(
             plan_chunk(Some(c), &oid(5), 1000, &"aa".repeat(32)),
             ChunkPlan::Skip(_)
@@ -362,7 +362,7 @@ mod tests {
 
     /// The disk does not write — the send must continue, just without the speedup.
     #[test]
-    fn отказ_записи_не_ломает_отправку() {
+    fn a_failed_store_does_not_break_the_send() {
         let disk = Arc::new(Disk::default());
         *disk.broken.lock().unwrap() = true;
         let b = ConfirmationBatcher::new(Some(disk.as_ref()));
@@ -378,7 +378,7 @@ mod tests {
     /// The record of a skipped chunk is indistinguishable from a freshly
     /// sent one: same fields, same meaning.
     #[test]
-    fn пропущенный_кусок_даёт_полную_запись_для_ссылки() {
+    fn a_skipped_chunk_gives_a_full_record_for_the_ref() {
         let c = confirmed(3, 3);
         let info = c.to_upload_info();
         assert!(!info.locations.is_empty());

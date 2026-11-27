@@ -130,6 +130,7 @@ fun MediaPreviewScreen(
     galleryStart: Int = 0,
     onGalleryToggle: ((com.alphamessenger.ui.chat.GalleryItem) -> Unit)? = null,
 ) {
+    com.alphamessenger.ui.chat.v2.TakeKeyboardFromBelow()
     val items = store.items
     val browse = !gallery.isNullOrEmpty() && onGalleryToggle != null
     // Last item removed — nothing to show (browsing, the gallery is still there).

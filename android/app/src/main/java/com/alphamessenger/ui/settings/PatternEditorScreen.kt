@@ -142,7 +142,7 @@ fun PatternEditorScreen(start: PatternSpec?, startRecipe: Int, onBack: () -> Uni
                             Modifier.size(64.dp).clip(RoundedCornerShape(14.dp))
                                 .border(if (recipe == i) 2.dp else 1.dp, if (recipe == i) cs.accent else cs.alphaBorder, RoundedCornerShape(14.dp)),
                         ) { PatternWallpaper(r.thumb, Modifier.fillMaxSize(), dark = dark) }
-                        Text(r.name, color = if (recipe == i) cs.accent else cs.textSecondary, fontSize = 11.5.sp, modifier = Modifier.padding(top = 4.dp))
+                        Text(stringResource(r.title), color = if (recipe == i) cs.accent else cs.textSecondary, fontSize = 11.5.sp, modifier = Modifier.padding(top = 4.dp))
                     }
                 }
             }

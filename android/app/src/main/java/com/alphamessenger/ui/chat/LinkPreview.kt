@@ -23,8 +23,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -97,27 +95,6 @@ fun parseInvite(link: String): InviteInfo = runCatching {
         InviteInfo(b[1].toInt() and 1 != 0, name, "", b[1].toInt() and 2 != 0)
     }
 }.getOrDefault(InviteInfo(link.startsWith("alpha://channel/"), "", ""))
-
-@Deprecated(
-    "Заменено единым TextRenderer: com.alphamessenger.ui.chat.text.MessageText",
-    ReplaceWith("MessageText(text, ...)", "com.alphamessenger.ui.chat.text.MessageText"),
-)
-fun linkify(text: String): androidx.compose.ui.text.AnnotatedString =
-    buildAnnotatedString {
-        val regex = Regex("""(https?://|www\.|alpha://(?:group/invite|group|channel)/)[^\s<>"']+""", RegexOption.IGNORE_CASE)
-        var last = 0
-        for (m in regex.findAll(text)) {
-            if (m.range.first > last) append(text.substring(last, m.range.first))
-            withStyle(
-                style = androidx.compose.ui.text.SpanStyle(
-                    color = LinkBlue,
-                    textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline,
-                ),
-            ) { append(m.value) }
-            last = m.range.last + 1
-        }
-        if (last < text.length) append(text.substring(last))
-    }
 
 /** Parse the link payload stored in a media message's media_ref JSON. */
 fun parseLinkPreview(refJson: String?): LinkPreviewData? {

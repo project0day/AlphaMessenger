@@ -60,9 +60,9 @@ private enum class PanelContentV2 { EMPTY, EMOJI }
  *
  * ## Content persistence (no blank flashes)
  * The shown content is NOT naively `panelMode`:
- *  - emoji→keyboard swap: mode is already KEYBOARD but the slot is still tall
- *    (hold) while the IME rises — the emoji grid STAYS VISIBLE underneath the
- * rising keyboard, no blank panel;
+ *  - emoji→keyboard swap: mode is already KEYBOARD but the slot is still held
+ *    while the keyboard rises — the emoji grid stays visible under the rising
+ *    keyboard, no blank panel;
  *  - close animation: mode is already NONE but the slot is still sliding down
  *    — the last content stays visible during the slide;
  *  - only when the slot is fully covered by the IME (or fully closed) does the
@@ -94,7 +94,7 @@ fun BottomPanelV2(
     var exprTab by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
     if (mode == PanelMode.EMOJI && lastContent != PanelContentV2.EMOJI) lastContent = PanelContentV2.EMOJI
 
-    val slotVisibleAboveIme = height > state.imeContentDp + 4.dp
+    val slotVisibleAboveIme = height > state.ownKeyboardDp + 4.dp
     val shown = when {
         mode == PanelMode.EMOJI -> lastContent
         slotVisibleAboveIme -> lastContent
@@ -114,7 +114,7 @@ fun BottomPanelV2(
             when (content) {
                 PanelContentV2.EMPTY -> Box(Modifier.fillMaxSize())
                 PanelContentV2.EMOJI -> Column(Modifier.fillMaxSize()) {
-                    PanelGrabber(state, colors, onDismiss = { state.dismiss() })
+                    PanelGrabber(state, colors, onDismiss = { state.closeEmoji() })
                     Row(Modifier.padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         listOf(0 to R.string.panel_tab_emoji, 1 to R.string.panel_tab_stickers, 2 to R.string.panel_tab_gif).forEach { (tab, label) ->
                             val on = exprTab == tab

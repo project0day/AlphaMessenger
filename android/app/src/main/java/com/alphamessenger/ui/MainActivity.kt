@@ -28,6 +28,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.rememberNavController
 import com.alphamessenger.R
+import com.alphamessenger.data.AlphaCoreRepository.JoinOutcome
 import com.alphamessenger.ui.chat.ChatViewModel
 import com.alphamessenger.ui.navigation.AlphaNavHost
 import com.alphamessenger.ui.theme.AlphaTheme
@@ -104,13 +105,14 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
     private fun joinConfirmed(link: String) {
         run {
             lifecycleScope.launch {
-                val err = coreRepository.sendJoinRequest(link)
-                Toast.makeText(
-                    this@MainActivity,
-                    err?.let { this@MainActivity.getString(R.string.error_join_failed, it) } ?: this@MainActivity.getString(
-                        if (com.alphamessenger.ui.chat.parseInvite(link).byRequest) R.string.join_request_sent_owner else R.string.join_joining),
-                    Toast.LENGTH_LONG,
-                ).show()
+                val text = when (val outcome = coreRepository.sendJoinRequest(link)) {
+                    JoinOutcome.Sent -> getString(
+                        if (com.alphamessenger.ui.chat.parseInvite(link).byRequest) R.string.join_request_sent_owner else R.string.join_joining)
+                    JoinOutcome.LinkInvalid -> getString(R.string.join_expired_text)
+                    JoinOutcome.AlreadyMember -> getString(R.string.join_already_text)
+                    is JoinOutcome.Failed -> getString(R.string.error_join_failed, outcome.reason)
+                }
+                Toast.makeText(this@MainActivity, text, Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -184,7 +186,7 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
         com.alphamessenger.ui.emoji.AnimatedEmoji.repo = coreRepository
         WindowCompat.setDecorFitsSystemWindows(window, false)
         // No system scrim under the navigation buttons: its hard edge showed as a band.
-        // The screens fade into the bar themselves (the dock's haze, the chat's).
+        // What lies under the buttons is drawn by the app (NavigationBarScrim, the dock, the chat).
         if (android.os.Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
         @Suppress("DEPRECATION") window.navigationBarColor = android.graphics.Color.TRANSPARENT
         com.alphamessenger.ui.components.ScreenSecurity.load(this)
@@ -271,7 +273,10 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
                         pendingInviteIntent?.let { handleInviteIntent(it); pendingInviteIntent = null }
                         // One-time prompt to exempt the app from Doze battery
                         // optimization so background delivery stays prompt (no FCM).
-                        com.alphamessenger.util.BatteryOptimization.maybePrompt(this@MainActivity)
+                        // A phone that stops background apps gets the full guide instead (BackgroundDeliveryOnce).
+                        if (!com.alphamessenger.ui.background.BackgroundDelivery.stopsBackgroundApps(this@MainActivity)) {
+                            com.alphamessenger.util.BatteryOptimization.maybePrompt(this@MainActivity)
+                        }
                     }
                 }
                 if (!dbUnlocked) {
@@ -436,6 +441,7 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
                             modifier = Modifier.fillMaxSize()
                         )
                         com.alphamessenger.ui.chat.round.FloatingRound()
+                        if (goMain) com.alphamessenger.ui.background.BackgroundDeliveryOnce()
                         com.alphamessenger.ui.theme.ThemeReveal.Overlay()
                         }
                         com.alphamessenger.ui.browser.FoldedBrowserBar()

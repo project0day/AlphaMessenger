@@ -130,7 +130,7 @@ object MediaExportPlanner {
 
         // 1. A document goes byte for byte. Size, colour, codec are not ours.
         if (spec.sendAsFile && !policy.convertDocuments) {
-            return reuse(spec, trimEnd, "отправка файлом — содержимое не изменяется")
+            return reuse(spec, trimEnd, "sent as a file, content unchanged")
         }
 
         // A photo is always rebuilt in V1: compression by the send profile
@@ -139,7 +139,7 @@ object MediaExportPlanner {
         if (source.kind == SourceMetadata.Kind.IMAGE) {
             return ExportPlan(
                 route = ExportRoute.TRANSCODE,
-                reason = "фотография пересобирается по профилю отправки " +
+                reason = "photo rebuilt to the send profile " +
                     "(${spec.photoMaxEdge}px q${spec.photoQuality})",
                 trimStartMs = 0L, trimEndMs = 0L,
                 removeAudio = false, toneMapHdrToSdr = false,
@@ -157,7 +157,7 @@ object MediaExportPlanner {
         if (spec.changesPixels) {
             return transcode(
                 source, spec, policy, trimEnd, mute, needsToneMap,
-                reason = "изменена геометрия кадра (обрезка/поворот) — требуется перерисовка",
+                reason = "frame geometry changed (crop/rotate), redraw needed",
                 geometry = true,
             )
         }
@@ -166,8 +166,8 @@ object MediaExportPlanner {
         if (needsToneMap) {
             return transcode(
                 source, spec, policy, trimEnd, mute, true,
-                reason = "исходник HDR (transfer=${source.transfer}, ${source.videoMime}), " +
-                    "политика ${policy.hdr} требует приведения к SDR",
+                reason = "HDR source (transfer=${source.transfer}, ${source.videoMime}), " +
+                    "policy ${policy.hdr} requires SDR",
             )
         }
 
@@ -182,8 +182,8 @@ object MediaExportPlanner {
             if (bigFrame || heavy) {
                 return transcode(
                     source, spec, policy, trimEnd, mute, needsToneMap,
-                    reason = "качество ${profile.maxLongEdge}px: ${source.width}x${source.height}, ${source.videoBitrate / 1000} кбит/с → " +
-                        "до ${profile.maxVideoBitrate / 1000} кбит/с",
+                    reason = "quality ${profile.maxLongEdge}px: ${source.width}x${source.height}, ${source.videoBitrate / 1000} kbit/s → " +
+                        "up to ${profile.maxVideoBitrate / 1000} kbit/s",
                 )
             }
         }
@@ -193,11 +193,11 @@ object MediaExportPlanner {
             return ExportPlan(
                 route = ExportRoute.REMUX,
                 reason = buildString {
-                    append("перенос потока: ")
-                    append(if (hasTrim) "обрезка по времени" else "")
-                    if (hasTrim && mute) append(" и ")
-                    append(if (mute) "выключение звука" else "")
-                    append(" — пиксели не изменяются")
+                    append("stream copy: ")
+                    append(if (hasTrim) "time trim" else "")
+                    if (hasTrim && mute) append(" and ")
+                    append(if (mute) "mute" else "")
+                    append(", pixels unchanged")
                 },
                 trimStartMs = spec.trimStartMs,
                 trimEndMs = trimEnd,
@@ -207,7 +207,7 @@ object MediaExportPlanner {
         }
 
         // 5. No edits.
-        return reuse(spec, trimEnd, "правок нет — файл уходит как есть")
+        return reuse(spec, trimEnd, "no edits, the file goes as is")
     }
 
     private fun reuse(spec: MediaEditSpec, trimEnd: Long, reason: String) = ExportPlan(

@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.alphamessenger.AlphaMessengerCore
@@ -94,23 +95,6 @@ class AlphaCoreRepository @Inject constructor(
     /** (chat id, message JSON) of every media message as it arrives. */
     val incomingMedia: SharedFlow<Pair<String, String>> get() = callbackBridge.incomingMedia
 
-    // The core joined or left the reserve relay: our KeyPackage goes there and
-    // contacts learn where we listen now.
-    init {
-        scope.launch {
-            var wasReserve: Boolean? = null
-            callbackBridge.syncState.collect { s ->
-                if (s == null) return@collect
-                val reserve = s.link == "reserve"
-                if (wasReserve != null && reserve != wasReserve) {
-                    runCatching { core.`reserveRelayChanged`() }
-                    announceRelaysSoon()
-                }
-                wasReserve = reserve
-            }
-        }
-    }
-
     private val _chatCreated = MutableSharedFlow<ChatInfo>(extraBufferCapacity = 16)
     val chatCreated: SharedFlow<ChatInfo> = _chatCreated.asSharedFlow()
 
@@ -124,6 +108,35 @@ class AlphaCoreRepository @Inject constructor(
     private val _messagesExpired = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST)
     /** Some disappearing messages were removed — by any sweep, in or out of the chat. */
     val messagesExpired: SharedFlow<Unit> = _messagesExpired.asSharedFlow()
+
+    // Timed messages go when they are due: one wait for the next due one, aimed again
+    // whenever a countdown may have started or ended (a read, a send, a message in).
+    private var expiryWait: kotlinx.coroutines.Job? = null
+
+    private fun aimExpiry() {
+        expiryWait?.cancel()
+        expiryWait = scope.launch {
+            while (true) {
+                val due = runCatching { core.`nextMessageExpiryMs`() }.getOrDefault(0L)
+                if (due <= 0L) return@launch
+                val wait = due - System.currentTimeMillis()
+                if (wait > 0) kotlinx.coroutines.delay(wait)
+                val swept = runCatching { sweepExpiredMessages() }.getOrDefault(0uL)
+                if (wait <= 0 && swept == 0uL) kotlinx.coroutines.delay(1_000)
+            }
+        }
+    }
+
+    init {
+        scope.launch {
+            kotlinx.coroutines.flow.merge(
+                chatListDirty,
+                callbackBridge.messageReceived.map { },
+                callbackBridge.deliveryUpdate.map { },
+                callbackBridge.syncComplete.map { },
+            ).collect { aimExpiry() }
+        }
+    }
 
     /** Profile (display_name / bio / avatar_path) just changed. Listeners
      *  re-read via `getMyProfile()` so the new avatar shows up in TopBar,
@@ -429,6 +442,8 @@ class AlphaCoreRepository @Inject constructor(
                         else put(key, ChatPresence(chatId, senderId, state, System.currentTimeMillis(), signal.sentMs))
                     }
                 } else {
+                    // Someone typing or recording in a dialog is in the app right now.
+                    if (state != "paused") emitPresence(runCatching { core.`notePeerActivity`(chatId, senderId) }.getOrDefault("[]"))
                     _chatPresence.value = _chatPresence.value.toMutableMap().apply {
                         if (state == "paused") {
                             remove(chatId)
@@ -1228,14 +1243,30 @@ class AlphaCoreRepository @Inject constructor(
 
     /** G-7: join a group via an invite link (sends a request to the inviter).
      *  Returns null on success, or an error message. */
-    suspend fun sendJoinRequest(link: String): String? =
+    /** What came of an invite link. */
+    sealed interface JoinOutcome {
+        data object Sent : JoinOutcome
+        data object LinkInvalid : JoinOutcome
+        data object AlreadyMember : JoinOutcome
+        data class Failed(val reason: String) : JoinOutcome
+    }
+
+    suspend fun sendJoinRequest(link: String): JoinOutcome =
         withContext(Dispatchers.IO) {
             // Our photo, small, for the owner to see who asks (the core sends it
             // only if our privacy shows the photo to everyone).
             val avatar = runCatching { core.`getMyProfile`().avatarPath }.getOrNull()
                 ?.takeIf { it.isNotBlank() }?.let { smallAvatarB64(it) }.orEmpty()
-            runCatching { core.`sendJoinRequest`(link, avatar) }
-                .fold(onSuccess = { null }, onFailure = { it.message ?: strings.get(R.string.error_generic) })
+            runCatching { core.`sendJoinRequest`(link, avatar) }.fold(
+                onSuccess = { JoinOutcome.Sent },
+                onFailure = {
+                    when (it) {
+                        is uniffi.alphamessenger.MessengerException.InviteInvalid -> JoinOutcome.LinkInvalid
+                        is uniffi.alphamessenger.MessengerException.AlreadyMember -> JoinOutcome.AlreadyMember
+                        else -> JoinOutcome.Failed(it.message ?: strings.get(R.string.error_generic))
+                    }
+                },
+            )
         }
 
     /** A photo as a small square JPEG (base64) — what a join request carries. */
@@ -1719,6 +1750,53 @@ class AlphaCoreRepository @Inject constructor(
     suspend fun myAvatarVideo(): String =
         withContext(Dispatchers.IO) { runCatching { core.`myAvatarVideo`() }.getOrDefault("") }
 
+    /** Our pictures as the core holds them ("" = none). */
+    data class OwnPictures(val photo: String, val video: String, val cover: String)
+
+    suspend fun myPictures(): OwnPictures = withContext(Dispatchers.IO) {
+        OwnPictures(
+            photo = runCatching { core.`getMyProfile`().avatarPath }.getOrDefault(""),
+            video = runCatching { core.`myAvatarVideo`() }.getOrDefault(""),
+            cover = runCatching { core.`myCover`() }.getOrDefault(""),
+        )
+    }
+
+    /** A new photo (a file from [OwnPictureFiles.adopt]) replaces the photo and any video avatar. */
+    fun setMyPhoto(path: String) = pictureChange {
+        if (myAvatarVideo().isNotBlank()) setMyAvatarVideo("")
+        setMyProfile(avatarPath = path)
+    }
+
+    /** A video avatar with the still shown wherever video does not play. */
+    fun setMyVideoAvatar(video: String, still: String) = pictureChange {
+        setMyProfile(avatarPath = still)
+        setMyAvatarVideo(video)
+    }
+
+    /** No avatar at all: the photo and the video go. */
+    fun removeMyAvatar() = pictureChange {
+        if (myAvatarVideo().isNotBlank()) setMyAvatarVideo("")
+        setMyProfile(avatarPath = "")
+    }
+
+    /** Only the video goes; its still stays as the photo. */
+    fun removeMyVideoAvatar() = pictureChange { setMyAvatarVideo("") }
+
+    /** A new cover (a file from [OwnPictureFiles.adopt]), or "" for none. */
+    fun setMyCoverPicture(path: String) = pictureChange { setMyCover(path) }
+
+    private val pictureLock = Mutex()
+
+    // Run in the app's scope, one at a time: leaving the screen that made a change must
+    // not leave the core half-updated, and the files it replaced go once the core moved on.
+    private fun pictureChange(change: suspend () -> Unit) = scope.launch {
+        pictureLock.withLock {
+            runCatching { change() }
+            val p = myPictures()
+            OwnPictureFiles.prune(context, listOf(p.photo, p.video, p.cover))
+        }
+    }
+
     /** A peer's video avatar local path ("" = none), keyed by MLS sender_id. */
     suspend fun peerAvatarVideo(senderId: String): String =
         withContext(Dispatchers.IO) { runCatching { core.`peerAvatarVideo`(senderId) }.getOrDefault("") }
@@ -2047,7 +2125,11 @@ class AlphaCoreRepository @Inject constructor(
     /** Run ONE presence tick (publish our heartbeat if due + pull peers) and
      *  emit the changed (userHex → status) map. Best-effort; never throws. */
     suspend fun presenceTick() = withContext(Dispatchers.IO) {
-        val json = runCatching { core.`presenceTick`() }.getOrDefault("[]")
+        emitPresence(runCatching { core.`presenceTick`() }.getOrDefault("[]"))
+    }
+
+    /** Presence changes as the core reports them: [{"user", "status"}]. */
+    private fun emitPresence(json: String) {
         val changes = runCatching {
             val arr = org.json.JSONArray(json)
             (0 until arr.length()).associate {
@@ -2175,6 +2257,20 @@ class AlphaCoreRepository @Inject constructor(
     /** Local-only delete ("for me") — bubble disappears, peers unaffected. */
     suspend fun deleteMessageLocal(messageId: String) =
         withContext(Dispatchers.IO) { core.`deleteMessageLocal`(messageId) }
+
+    /**
+     * Deleted messages leave nothing behind: their files leave the phone (cache and
+     * our own copies), and our own deleted-for-everyone media the servers. Durable on
+     * the core side, so what an interrupted run left is taken up by the next one.
+     */
+    suspend fun cleanUpDeletedMedia() = withContext(Dispatchers.IO) {
+        runCatching { core.`takeGoneMedia`() }.getOrDefault(emptyList()).forEach { ref ->
+            runCatching { deleteMediaCacheBytes(ref, deleteLocalCopy = true) }
+            com.alphamessenger.ui.chat.MediaPathCache.remove(ref)
+        }
+        runCatching { core.`purgeDeletedMedia`() }
+        Unit
+    }
 
     suspend fun sendEphemeralText(
         chatId: String,
@@ -2610,10 +2706,13 @@ class AlphaCoreRepository @Inject constructor(
         keepAwake.during { runCatching { core.`uploadBlobRefOnly`(plainForSend(filePath), mediaType, posterB64, opId, metaJson) } }
     }
 
-    /** Upload a file of a set still being composed, over the chat's route; null if it failed. */
-    suspend fun preUploadMedia(chatId: String, opId: String, filePath: String, mediaType: String): String? =
+    /**
+     * Upload an item of a send over its chat's route (Tor for a secret chat). A failed
+     * upload resumes on the next call with the same [opId] and file.
+     */
+    suspend fun uploadMedia(chatId: String, opId: String, filePath: String, mediaType: String): Result<String> =
         withContext(Dispatchers.IO) {
-            keepAwake.during { runCatching { core.`preUploadMedia`(chatId, opId, filePath, mediaType) }.getOrNull() }
+            keepAwake.during { runCatching { core.`preUploadMedia`(chatId, opId, plainForSend(filePath), mediaType) } }
         }
 
     /** Stop a pre-upload no message used and delete what of it reached the servers. */
@@ -2749,21 +2848,26 @@ class AlphaCoreRepository @Inject constructor(
      * send's own files are swept a day later, and the sender must not then fetch
      * their own photo or video back from storage.
      */
-    suspend fun adoptSentFile(path: String, mediaRefJson: String) = withContext(Dispatchers.IO) {
+    /**
+     * A finished send's file becomes the blob's one copy in the cache. True once the
+     * cache holds it: the caller then drops its outbox copy, so "delete from cache"
+     * removes the only bytes there are, whichever message carries the blob.
+     */
+    suspend fun adoptSentFile(path: String, mediaRefJson: String): Boolean = withContext(Dispatchers.IO) {
         runCatching {
-            val src = java.io.File(path)
-            if (!src.exists() || src.length() <= 0L) return@runCatching
             val dir = java.io.File(context.cacheDir, "media").apply { mkdirs() }
             val dst = java.io.File(dir, blobHashOf(mediaRefJson))
-            if (dst.exists() && dst.length() > 0L) return@runCatching
+            // A "deleted by the user" mark from before would keep it hidden.
+            java.io.File(dir, dst.name + ".evicted").delete()
+            if (dst.exists() && dst.length() > 0L) return@runCatching true
+            val src = java.io.File(path)
+            if (!src.exists() || src.length() <= 0L) return@runCatching false
             val tmp = java.io.File(dir, dst.name + ".adopt.tmp")
             com.alphamessenger.data.MediaVault.open(src).use { input ->
                 com.alphamessenger.data.MediaVault.sealedOutput(tmp).use { input.copyTo(it, 256 * 1024) }
             }
-            if (!tmp.renameTo(dst)) tmp.delete()
-            // A "deleted by the user" mark from before would keep it hidden.
-            java.io.File(dir, dst.name + ".evicted").delete()
-        }.onFailure { android.util.Log.w("AlphaCache", "adopt failed: ${it.message}") }
+            tmp.renameTo(dst) || run { tmp.delete(); false }
+        }.onFailure { android.util.Log.w("AlphaCache", "adopt failed: ${it.message}") }.getOrDefault(false)
     }
 
     fun cachedMediaPathIfPresent(mediaRefJson: String?): String? {
@@ -2920,21 +3024,20 @@ class AlphaCoreRepository @Inject constructor(
             //
             // The user's original (gallery, `content://`) matches neither location
             // and stays untouched.
-            if (deleteLocalCopy) {
-                lite?.local_path?.takeIf { it.isNotBlank() }?.let { p ->
-                    val f = java.io.File(p)
-                    val ours = f.absolutePath.startsWith(context.cacheDir.absolutePath) ||
-                        f.absolutePath.startsWith(
-                            java.io.File(java.io.File(context.filesDir, "outbox"), "work").absolutePath,
-                        )
-                    if (f.exists() && ours) {
-                        val n = f.length()
-                        if (f.delete()) freed += n
-                    }
-                }
-            }
+            if (deleteLocalCopy) freed += deleteOwnCopy(lite?.local_path)
         }
         return freed
+    }
+
+    /** Delete [path] if it is a copy we made (cache or outbox), never the user's file; bytes freed. */
+    fun deleteOwnCopy(path: String?): Long {
+        if (path.isNullOrBlank()) return 0L
+        val f = java.io.File(path)
+        val ours = f.absolutePath.startsWith(context.cacheDir.absolutePath) ||
+            f.absolutePath.startsWith(java.io.File(java.io.File(context.filesDir, "outbox"), "work").absolutePath)
+        if (!ours || !f.exists()) return 0L
+        val n = f.length()
+        return if (f.delete()) n else 0L
     }
 
     // --- Single unified media commit (materializeMedia) ---
@@ -3132,6 +3235,11 @@ class AlphaCoreRepository @Inject constructor(
      *  a relay is up again (a few seconds at most) when [available]. */
     suspend fun setNetworkAvailable(available: Boolean) = withContext(Dispatchers.IO) {
         core.`setNetworkAvailable`(available)
+    }
+
+    /** Whether the default network is metered: media copies that cost the phone's bytes wait for one that is not. */
+    fun setNetworkMetered(metered: Boolean) {
+        runCatching { core.`setNetworkMetered`(metered) }
     }
 
     suspend fun catchUp(): ULong = withContext(Dispatchers.IO) {

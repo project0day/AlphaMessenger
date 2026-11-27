@@ -640,7 +640,7 @@ fun ThemeSelectorScreen(
                             Box(Modifier.size(64.dp, 54.dp).clip(RoundedCornerShape(12.dp)).border(1.dp, colors.alphaBorder, RoundedCornerShape(12.dp))) {
                                 com.alphamessenger.ui.theme.PatternWallpaper(r.thumb, Modifier.fillMaxSize())
                             }
-                            Text(r.name, color = colors.textSecondary, fontSize = 10.sp, maxLines = 1, modifier = Modifier.padding(top = 3.dp))
+                            Text(stringResource(r.title), color = colors.textSecondary, fontSize = 10.sp, maxLines = 1, modifier = Modifier.padding(top = 3.dp))
                         }
                     }
                 }

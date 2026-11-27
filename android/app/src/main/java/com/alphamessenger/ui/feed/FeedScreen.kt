@@ -380,6 +380,13 @@ private fun NewsCard(p: FeedPost, colors: AlphaColorScheme, repo: AlphaCoreRepos
                 text = p.body, color = colors.textPrimary, fontSize = 14.sp, lineHeight = 20.sp,
                 modifier = Modifier.padding(top = 4.dp),
             )
+            // The build this post brings, while it is newer than the one installed: installed from here.
+            if (p.kind == FeedKind.UPDATE) {
+                val ctx = LocalContext.current
+                if (com.alphamessenger.ui.update.AppUpdate.available(ctx)?.versionCode == p.versionCode) {
+                    com.alphamessenger.ui.update.UpdateCard(colors, repo, Modifier.padding(top = 10.dp), expanded = true, notes = false)
+                }
+            }
         }
     }
 }

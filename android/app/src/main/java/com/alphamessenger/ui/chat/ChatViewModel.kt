@@ -541,11 +541,20 @@ class ChatViewModel @Inject constructor(
         // preview so the first frame is correct — no "Direct chat" fallback.
         savedStateHandle.get<String>("chatId")?.let { seedId ->
             ChatOpenHandoff.take(seedId)?.let { p ->
+                val secret = p.secretOrigin.isNotEmpty()
                 _uiState.value = _uiState.value.copy(
                     chatInfo = p.chatInfo,
                     isGroup = p.chatInfo.chatType == "group",
                     peerDisplayName = p.peerDisplayName,
                     peerAvatarPath = p.peerAvatarPath,
+                    // A secret chat opens as one: its header, its composer and no calls
+                    // from the first frame, as loadMessages will confirm.
+                    secretOrigin = p.secretOrigin,
+                    secretState = if (secret) p.secretState else _uiState.value.secretState,
+                    secretWaiting = secret && p.secretState != "active",
+                    groupProtect = secret || _uiState.value.groupProtect,
+                    peerCanCall = !secret && _uiState.value.peerCanCall,
+                    peerCanVideo = !secret && _uiState.value.peerCanVideo,
                 )
             }
  // standard: paint the LAST DISPLAYED history INSTANTLY from
@@ -1793,24 +1802,25 @@ class ChatViewModel @Inject constructor(
     /** Join a group via an invite link tapped in chat. */
     fun joinViaLink(link: String, onResult: (String) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
-            val err = repository.sendJoinRequest(link)
+            val outcome = repository.sendJoinRequest(link)
             val byRequest = com.alphamessenger.ui.chat.parseInvite(link).byRequest
             kotlinx.coroutines.withContext(Dispatchers.Main) {
-                when {
-                    err == null -> onResult(strings.get(if (byRequest) R.string.join_request_sent_owner else R.string.join_joining))
-                    // Used / expired one-time link → in-app dialog (not a toast).
-                    err.contains("недействительна", ignoreCase = true) ->
+                when (outcome) {
+                    AlphaCoreRepository.JoinOutcome.Sent ->
+                        onResult(strings.get(if (byRequest) R.string.join_request_sent_owner else R.string.join_joining))
+                    AlphaCoreRepository.JoinOutcome.LinkInvalid ->
                         _uiState.value = _uiState.value.copy(
                             joinDialog = strings.get(R.string.join_expired_title) to
                                 strings.get(R.string.join_expired_text),
                         )
-                    // Already a member (e.g. the owner tapping their own link).
-                    err.contains("уже участник", ignoreCase = true) ->
+                    // E.g. the owner tapping their own link.
+                    AlphaCoreRepository.JoinOutcome.AlreadyMember ->
                         _uiState.value = _uiState.value.copy(
                             joinDialog = strings.get(R.string.join_already_title) to
                                 strings.get(R.string.join_already_text),
                         )
-                    else -> onResult(strings.get(R.string.error_failed_reason, err))
+                    is AlphaCoreRepository.JoinOutcome.Failed ->
+                        onResult(strings.get(R.string.error_failed_reason, outcome.reason))
                 }
             }
         }
@@ -1829,12 +1839,7 @@ class ChatViewModel @Inject constructor(
     }
 
     /** Bulk delete selected messages. */
-    fun deleteMessages(messageIds: List<String>) {
-        viewModelScope.launch(Dispatchers.IO) {
-            for (id in messageIds) runCatching { repository.sendDelete(currentChatId, id) }
-            reloadMessages()
-        }
-    }
+    fun deleteMessages(messageIds: List<String>) = deleteForEveryone(messageIds)
 
     private var reloadJob: Job? = null
     private fun reloadMessages(coalesce: Boolean = true) {
@@ -2398,7 +2403,7 @@ class ChatViewModel @Inject constructor(
                     android.util.Log.d(
                         "AlphaMediaRef",
                         "post-send msgId=$msgId type=$sendType pending=${j.optBoolean("pending", false)} " +
-                            "hash=${hashPrefix ?: "<НЕТ>"}… urls=$urlCount hasKey=${j.has("key")}",
+                            "hash=${hashPrefix ?: "<none>"}… urls=$urlCount hasKey=${j.has("key")}",
                     )
                 }.onFailure { }
                 // Step 2: publish the MLS message (suspend, cancellable, SEPARATE).
@@ -3541,10 +3546,20 @@ class ChatViewModel @Inject constructor(
      *  on both sides. */
     fun deleteForEveryone(messageIds: List<String>) {
         viewModelScope.launch(Dispatchers.IO) {
-            for (id in messageIds) runCatching { repository.sendDelete(currentChatId, id) }
-            // Also drop locally so it vanishes immediately for the sender.
-            for (id in messageIds) runCatching { repository.deleteMessageLocal(id) }
+            for (id in messageIds) {
+                // Still going up: the send itself is cancelled, so it is never published.
+                if (sendQueue.owns(id)) {
+                    sendQueue.cancel(id)
+                    continue
+                }
+                // A media send of another path stops before it can publish.
+                runCatching { repository.cancelMediaUpload(id) }
+                runCatching { repository.sendDelete(currentChatId, id) }
+                // Also drop locally so it vanishes immediately for the sender.
+                runCatching { repository.deleteMessageLocal(id) }
+            }
             reloadMessages()
+            repository.cleanUpDeletedMedia()
         }
     }
 
@@ -3553,6 +3568,7 @@ class ChatViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO) {
             for (id in messageIds) runCatching { repository.deleteMessageLocal(id) }
             reloadMessages()
+            repository.cleanUpDeletedMedia()
         }
     }
 
@@ -4354,53 +4370,15 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    // --- Expiry sweep — periodic cleanup of expired ephemeral messages ---
+    // --- Disappearing messages ---
 
     private var sweepJob: Job? = null
 
+    /** Timed messages are removed on time by the repository (with their files); the
+     *  open chat only drops them from the screen. */
     fun startExpirySweep() {
         if (sweepJob?.isActive == true) return
-        // The background sweep may take an expired message first: whoever
-        // removes it, the screen drops it too.
-        viewModelScope.launch { repository.messagesExpired.collect { reloadMessages() } }
-        sweepJob = viewModelScope.launch {
-            while (isActive) {
-                delay(4_000) // Every ~4s so disappearance is visible live in the open chat
-                try {
-                    // Snapshot media before the sweep so we can purge the blobs
-                    // (file + thumbnails/chunks) of whatever disappears — leaving
-                    // them on disk would defeat the feature.
-                    val beforeMedia = _uiState.value.messages.flatMap { collectMediaForCleanup(it) }
-                    val swept = repository.sweepExpiredMessages()
-                    if (swept > 0u) {
-                        val survivingIds = runCatching {
-                            fetchWindow(currentChatId, 200u).map { it.id }.toSet()
-                        }.getOrDefault(emptySet())
-                        for ((msgId, localPath, ref) in beforeMedia) {
-                            if (msgId !in survivingIds) {
-                                ref?.let { repository.deleteMediaCacheFiles(it) }
-                                localPath?.let { p ->
-                                    val f = java.io.File(p)
-                                    if (f.exists() && f.absolutePath.startsWith(appContext.cacheDir.absolutePath)) f.delete()
-                                }
-                            }
-                        }
-                        reloadMessages()
-                    }
-                } catch (_: Exception) {
-                    // Best effort
-                }
-            }
-        }
-    }
-
-    /** (msgId, localMediaPath, mediaRefJson) tuples to purge if a message
-     *  disappears — covers the bubble's own media and any album children. */
-    private fun collectMediaForCleanup(m: MessageUi): List<Triple<String, String?, String?>> {
-        val out = ArrayList<Triple<String, String?, String?>>()
-        if (m.isMedia) out.add(Triple(m.id, m.localMediaPath, m.mediaRefJson))
-        m.albumItems?.forEach { out.add(Triple(m.id, it.localMediaPath, it.mediaRefJson)) }
-        return out
+        sweepJob = viewModelScope.launch { repository.messagesExpired.collect { reloadMessages() } }
     }
 
     fun stopExpirySweep() {

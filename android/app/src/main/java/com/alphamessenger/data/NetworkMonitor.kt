@@ -39,7 +39,7 @@ class NetworkMonitor @Inject constructor(
             val cm = context.getSystemService(ConnectivityManager::class.java) ?: return@runCatching
             cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    set(currentlyOnline(), "сеть подключена")
+                    set(currentlyOnline(), "network connected")
                 }
 
                 override fun onLost(network: Network) {
@@ -51,7 +51,7 @@ class NetworkMonitor @Inject constructor(
                     // uploads over a dead network. The loss event is unambiguous: the
                     // network we were using is gone, and until a new one arrives there is no
                     // connection.
-                    set(false, "сеть потеряна")
+                    set(false, "network lost")
                 }
 
                 override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
@@ -61,17 +61,17 @@ class NetworkMonitor @Inject constructor(
                     // network in question, with no re-poll.
                     val ok = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
                         caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-                    set(ok, if (ok) "интернет подтверждён" else "интернет не подтверждён")
+                    set(ok, if (ok) "internet validated" else "internet not validated")
                 }
             })
-        }.onFailure { android.util.Log.w(TAG, "не удалось подписаться на сеть: ${it.message}") }
+        }.onFailure { android.util.Log.w(TAG, "could not watch the network: ${it.message}") }
     }
 
     /** State change with a reason: without it, outages are undebuggable from logs. */
     private fun set(value: Boolean, why: String) {
         if (_online.value == value) return
         _online.value = value
-        android.util.Log.i(TAG, "связь: ${if (value) "ЕСТЬ" else "НЕТ"} — $why")
+        android.util.Log.i(TAG, "online: ${if (value) "yes" else "no"} ($why)")
     }
 
     private fun currentlyOnline(): Boolean = runCatching {

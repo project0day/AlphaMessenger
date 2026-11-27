@@ -7,15 +7,186 @@ use crate::error::{MediaError, MediaResult};
 use crate::media_ref::{UploadResult, StreamChunkUploadInfo, ChunkLocation};
 use crate::thumbnail::{MediaType, ThumbnailGenerator};
 
+/// How often an upload's progress moves between confirmations.
+const SHOW_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// What the user sees of an upload: confirmed bytes, plus what the link has carried since
+/// the last confirmation at the rate this upload has measured (bytes confirmed over the time
+/// spent), never more than nine tenths of what is in flight. The window keeps several
+/// seconds of chunks in flight and they share the link, so confirmations alone come in
+/// bursts; crediting each chunk by its own elapsed time counted a whole wave as nearly done
+/// when its first chunk landed. The estimate stops when nothing has landed for a chunk's
+/// time or the network changed; the shown value never goes back, and the end is shown only
+/// after the last confirmation.
+struct SendProgress {
+    total: u64,
+    confirmed: std::sync::atomic::AtomicU64,
+    shown: std::sync::atomic::AtomicU64,
+    chunk_ms: std::sync::atomic::AtomicU64,
+    origin: std::time::Instant,
+    /// Since `origin`, when a chunk last landed or set out.
+    active_ms: std::sync::atomic::AtomicU64,
+    /// Bytes confirmed by this run (not the resumed ones), the first departure and the last
+    /// landing since `origin`: the measured rate.
+    landed: std::sync::atomic::AtomicU64,
+    first_ms: std::sync::atomic::AtomicU64,
+    last_land_ms: std::sync::atomic::AtomicU64,
+    flying: std::sync::Mutex<std::collections::HashMap<u32, (std::time::Instant, u64, u64)>>,
+}
+
+/// A chunk on its way; leaves the estimate when dropped, whether it landed or failed.
+struct Flight<'a> {
+    of: &'a SendProgress,
+    idx: u32,
+    started: std::time::Instant,
+    bytes: u64,
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        self.of.flying.lock().unwrap_or_else(|p| p.into_inner()).remove(&self.idx);
+    }
+}
+
+impl SendProgress {
+    fn new(total: u64, confirmed: u64) -> Self {
+        Self {
+            total,
+            confirmed: confirmed.min(total).into(),
+            shown: 0.into(),
+            chunk_ms: 0.into(),
+            origin: std::time::Instant::now(),
+            active_ms: 0.into(),
+            landed: 0.into(),
+            first_ms: u64::MAX.into(),
+            last_land_ms: 0.into(),
+            flying: Default::default(),
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.origin.elapsed().as_millis() as u64
+    }
+
+    fn mark_active(&self) {
+        self.active_ms.store(self.now_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn fly(&self, idx: u32, bytes: u64) -> Flight<'_> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let started = std::time::Instant::now();
+        let epoch = crate::link::network_epoch();
+        self.flying.lock().unwrap_or_else(|p| p.into_inner()).insert(idx, (started, bytes, epoch));
+        let _ = self.first_ms.compare_exchange(u64::MAX, self.now_ms(), Relaxed, Relaxed);
+        self.mark_active();
+        Flight { of: self, idx, started, bytes }
+    }
+
+    fn land(&self, flight: Flight<'_>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (bytes, ms) = (flight.bytes, flight.started.elapsed().as_millis().max(1) as u64);
+        drop(flight);
+        self.confirmed.fetch_add(bytes, Relaxed);
+        self.landed.fetch_add(bytes, Relaxed);
+        self.last_land_ms.store(self.now_ms(), Relaxed);
+        self.mark_active();
+        let _ = self.chunk_ms.fetch_update(Relaxed, Relaxed, |old| Some(if old == 0 { ms } else { (old * 3 + ms) / 4 }));
+    }
+
+    fn estimate(&self) -> u64 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let confirmed = self.confirmed.load(Relaxed).min(self.total);
+        let (landed, first, last) = (self.landed.load(Relaxed), self.first_ms.load(Relaxed), self.last_land_ms.load(Relaxed));
+        let pace = self.chunk_ms.load(Relaxed);
+        if landed == 0 || pace == 0 || last <= first {
+            return confirmed;
+        }
+        // Time counts only up to a chunk's pace past the last activity: a link that stopped
+        // landing anything stops the estimate with it.
+        let now = self.now_ms().min(self.active_ms.load(Relaxed) + pace);
+        let carried = (landed as u128 * now.saturating_sub(last) as u128 / (last - first) as u128) as u64;
+        let epoch = crate::link::network_epoch();
+        // Nine tenths at most: the rest of a chunk is the server's answer, not the link's.
+        let flying: u64 = self.flying.lock().unwrap_or_else(|p| p.into_inner()).values()
+            .filter(|(_, _, e)| *e == epoch)
+            .map(|(_, b, _)| b * 9 / 10)
+            .sum();
+        (confirmed + carried.min(flying)).min(self.total.saturating_sub(1)).max(confirmed)
+    }
+
+    fn show(&self, on_progress: &(dyn Fn(u64, u64) + Sync)) {
+        let now = self.estimate();
+        if self.shown.fetch_max(now, std::sync::atomic::Ordering::Relaxed) < now {
+            on_progress(now, self.total);
+        }
+    }
+}
+
+#[cfg(test)]
+mod send_progress_tests {
+    use super::SendProgress;
+    use std::time::Duration;
+
+    #[test]
+    fn moves_between_confirmations_and_never_back() {
+        let p = SendProgress::new(1_000, 0);
+        let seen = std::sync::Mutex::new(Vec::new());
+        let report = |d: u64, _t: u64| seen.lock().unwrap().push(d);
+        let first = p.fly(0, 100);
+        std::thread::sleep(Duration::from_millis(20));
+        p.land(first);
+        p.show(&report);
+        let flying = p.fly(1, 100);
+        std::thread::sleep(Duration::from_millis(15));
+        p.show(&report);
+        drop(flying);
+        p.show(&report);
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen[0], 100);
+        assert!(seen.len() == 2 && seen[1] > 100 && seen[1] < 200, "in-flight share shows: {seen:?}");
+    }
+
+    #[test]
+    fn the_estimate_stops_when_nothing_lands() {
+        let p = SendProgress::new(10_000, 0);
+        let first = p.fly(0, 100);
+        std::thread::sleep(Duration::from_millis(20));
+        p.land(first);
+        let _stuck = p.fly(1, 1_000);
+        std::thread::sleep(Duration::from_millis(80));
+        let a = p.estimate();
+        std::thread::sleep(Duration::from_millis(80));
+        assert_eq!(p.estimate(), a, "a link that lands nothing shows no movement");
+    }
+
+    #[test]
+    fn a_wave_in_flight_is_not_counted_done_when_its_first_chunk_lands() {
+        let p = SendProgress::new(100_000, 0);
+        let mut wave: Vec<_> = (0..20).map(|i| p.fly(i, 1_000)).collect();
+        std::thread::sleep(Duration::from_millis(50));
+        p.land(wave.remove(0));
+        let shown = p.estimate();
+        assert!(shown < 3_000, "19 chunks still in flight count as moving at the measured rate, not as done: {shown}");
+    }
+
+    #[test]
+    fn the_end_waits_for_the_last_confirmation() {
+        let p = SendProgress::new(200, 100);
+        let first = p.fly(0, 10);
+        p.land(first);
+        let _last = p.fly(1, 90);
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(p.estimate() < 200);
+    }
+}
+
 /// Thumbnail maximum dimension in pixels for generated thumbnails.
 const THUMBNAIL_MAX_SIZE: u32 = 320;
 
 /// Number of chunks uploaded concurrently.
 /// Balances throughput against relay rate-limits and mobile memory.
-pub(crate) const UPLOAD_CONCURRENCY: usize = 8;
+pub(crate) const UPLOAD_CONCURRENCY: usize = 24;
 
-/// A chunk upload slower than this is logged (CHUNK_SLOW).
-const SLOW_CHUNK: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// PER-FILE cap on chunks in flight. A single file may hold at most this many of
 /// the GLOBAL chunk slots, so one 300 MB file can never starve small photos/videos.
@@ -51,7 +222,10 @@ fn chunk_slots() -> &'static tokio::sync::Semaphore {
 /// ceiling that cannot multiply with it (4 files × 4 chunks stays 4 in flight,
 /// not 16). A freed slot goes to whichever chunk has waited longest, so an
 /// 8-item album cannot monopolise the network.
-pub(crate) const GLOBAL_UPLOAD_SLOTS: usize = 8;
+/// Each chunk's socket sits idle while the server stores it, so a saturated cellular
+/// uplink (16 in flight, ~3.5 s each) still wanted ~22; the link window keeps a slower
+/// link to fewer.
+pub(crate) const GLOBAL_UPLOAD_SLOTS: usize = 24;
 
 pub(crate) fn upload_slots() -> &'static tokio::sync::Semaphore {
     static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
@@ -133,26 +307,13 @@ async fn upload_blob_mirrored(
     loop {
         // Same rule as the single-server path: the slot is held for the network
         // step only, never across the backoff.
-        let queued = std::time::Instant::now();
-        let (result, waited) = {
+        let result = {
             let _permit = upload_slots()
                 .acquire()
                 .await
                 .map_err(|_| MediaError::UploadFailed("upload slots closed".into()))?;
-            let waited = queued.elapsed();
-            (blossom.upload_mirrored(data, signer, content_type, policy).await, waited)
+            blossom.upload_mirrored(data, signer, content_type, policy).await
         };
-        // A send that goes in fits and starts: this line says whether a chunk sat
-        // waiting for a slot or on one slow server, without per-chunk noise.
-        let took = queued.elapsed();
-        if took >= SLOW_CHUNK {
-            let server = result.as_ref().ok().and_then(|l| l.first()).map(|l| l.relay.as_str()).unwrap_or("-");
-            tracing::warn!(
-                target: "alpha_ffi",
-                "CHUNK_SLOW kb={} slot_ms={} put_ms={} server={server}",
-                data.len() / 1024, waited.as_millis(), (took - waited).as_millis(),
-            );
-        }
         match result {
             Ok(locs) => return Ok(locs),
             Err(e @ MediaError::Refused(_)) => return Err(e),
@@ -207,6 +368,8 @@ async fn download_blob_locations(
     let mut skipped_unknown = false;
     let mut sources: Vec<Source> = (0..listed)
         .map(|k| &locations[(start_at + k) % listed])
+        // The project's servers, switched off, are not asked even where a ref names them.
+        .filter(|l| crate::blossom::PROJECT_SERVERS_ON || !crate::blossom::project_server(&l.url))
         .filter(|l| {
             let ok = anonymous || blossom.is_known(&l.url);
             if !ok { skipped_unknown = true; }
@@ -262,33 +425,34 @@ async fn download_blob_locations(
     if sources.is_empty() {
         return Err(if skipped_unknown { MediaError::UnknownServer } else { MediaError::NoChunkUrls });
     }
-    let discovered = sources.len() - n;
+    // A server resting after failures in a row is not asked until its rest is over.
+    let before_rest = sources.len();
+    sources.retain(|s| !host_resting(&s.url));
+    let resting = before_rest - sources.len();
+    if sources.is_empty() {
+        return Err(MediaError::DownloadFailed("every server that may hold it is resting after failures".into()));
+    }
     sources.sort_by_key(|s| expected_answer_ms(&s.url, s.discovered.is_some()));
-    // Launch plan: every source once, then every source again (each repeat is a
-    // FRESH connection after a pause): a copy of a just-published file may land on
-    // a server that said "not here" a moment ago.
-    let budget = sources.len() + MAX_CHUNK_ATTEMPTS.max(n) + discovered;
-    let plan: Vec<usize> = (0..budget).map(|k| k % sources.len()).collect();
+    // Every source once. One that failed without an answer gets one more try after a
+    // pause; "not here" is final for the source that said it.
+    let mut plan: std::collections::VecDeque<(usize, bool)> = (0..sources.len()).map(|i| (i, false)).collect();
+    let mut retried: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // A listed server out of reach means the object exists: a copy on its way to another
+    // server that said "not here" may land in a moment, so those are asked once more.
+    let mut home_unreached = false;
+    let mut attempts = 0usize;
 
     // Byte movement of every attempt: a duplicate is raced only against a stalled request.
     let watches: std::sync::Mutex<Vec<std::sync::Arc<crate::blossom::Moved>>> = Default::default();
-    let launch = |k: usize| {
-        let idx = plan[k];
+    let launch = |idx: usize, repeat: bool, attempt: usize| {
         let src = sources[idx].clone();
-        // A repeat of an already-tried address waits a little first.
-        let repeat = k >= sources.len();
-        let attempt = k + 1;
-        let repeat_no = k.saturating_sub(sources.len()) + 1;
         let moved = std::sync::Arc::new(crate::blossom::Moved::new());
         watches.lock().unwrap_or_else(|p| p.into_inner()).push(moved.clone());
         async move {
             if repeat {
-                chunk_backoff(repeat_no).await;
+                repeat_pause().await;
             }
-            // Waiting for the server's slot is not the server's answer time.
-            let q0 = std::time::Instant::now();
             let _host = host_slots(&src.url).acquire_owned().await;
-            let host_wait = q0.elapsed();
             let turn = crate::link::download_window().enter().await;
             let t0 = std::time::Instant::now();
             // Bounded by the stall watch inside: a slow chunk is let finish, a dead one is cut.
@@ -299,7 +463,7 @@ async fn download_blob_locations(
                 Err(_) if !moved.reached() => crate::link::Outcome::Unreached,
                 Err(_) => crate::link::Outcome::Broken,
             });
-            (idx, src, attempt, t0.elapsed(), host_wait, r)
+            (idx, src, attempt, t0.elapsed(), r)
         }
     };
     // Sources that answered "not here". Once every one has, the object is gone:
@@ -315,22 +479,23 @@ async fn download_blob_locations(
     // is raced against it and the first answer wins; the loser is dropped.
     let t_chunk = std::time::Instant::now();
     let mut inflight = FuturesUnordered::new();
-    inflight.push(launch(0));
-    let mut next = 1usize;
+    // Requests still waiting that may be raced once by a fresh connection to the same source.
+    let mut hedgeable: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    if let Some((idx, repeat)) = plan.pop_front() {
+        attempts += 1;
+        if !repeat { hedgeable.push_back(idx); }
+        inflight.push(launch(idx, repeat, attempts));
+    }
     let mut last_err: Option<MediaError> = None;
     loop {
         let hedge = tokio::time::sleep(hedge_delay());
         tokio::select! {
             done = inflight.next() => {
-                let Some((idx, src, attempt, took, host_wait, result)) = done else { break };
+                let Some((idx, src, attempt, took, result)) = done else { break };
+                hedgeable.retain(|&h| h != idx);
                 match result {
                     Ok(d) => {
                         note_host(&src.url, HostOutcome::Served(took));
-                        let all = t_chunk.elapsed();
-                        if all >= DL_SLOW {
-                            tracing::warn!(target: "alpha_ffi", "DL_CHUNK_SLOW chunk={} total_ms={} answer_ms={} host_wait_ms={} attempt={} relay={}",
-                                start_at, all.as_millis(), took.as_millis(), host_wait.as_millis(), attempt, src.relay);
-                        }
                         if let Some(base) = &src.discovered {
                             tracing::info!(target: "alpha_ffi", "CHUNK_DISCOVER hit on {base}");
                             blossom.discovery_note_hit(base);
@@ -348,38 +513,60 @@ async fn download_blob_locations(
                                 blossom.discovery_note_missing(base, cid);
                             }
                             not_held.insert(idx);
-                            if not_held.len() == sources.len() {
+                            // A resting server was not asked: it may still hold the object.
+                            if not_held.len() == sources.len() && resting == 0 {
                                 tracing::warn!(target: "alpha_ffi", "CHUNK_GONE chunk={} sources={} unknown={}", start_at, sources.len(), skipped_unknown);
                                 // Not on any server we know; the sender's own may still hold it.
                                 return Err(if skipped_unknown { MediaError::UnknownServer } else { MediaError::Gone });
                             }
+                            if home_unreached && retried.insert(idx) {
+                                plan.push_back((idx, true));
+                            }
+                        } else {
+                            // A server that has started resting gets no more tries now.
+                            if !host_resting(&src.url) && retried.insert(idx) {
+                                plan.push_back((idx, true));
+                            }
+                            if src.discovered.is_none() && !home_unreached {
+                                home_unreached = true;
+                                for &held in &not_held {
+                                    if retried.insert(held) {
+                                        plan.push_back((held, true));
+                                    }
+                                }
+                            }
                         }
                         last_err = Some(e);
-                        if next < plan.len() {
-                            inflight.push(launch(next));
-                            next += 1;
+                        if let Some((idx, repeat)) = plan.pop_front() {
+                            attempts += 1;
+                            if !repeat { hedgeable.push_back(idx); }
+                            inflight.push(launch(idx, repeat, attempts));
                         } else if inflight.is_empty() {
                             break;
                         }
                     }
                 }
             }
-            _ = hedge, if next < plan.len() => {
+            _ = hedge, if !plan.is_empty() || !hedgeable.is_empty() => {
                 // Bytes still arriving: the link is slow, and a duplicate would halve it.
                 if watches.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|w| w.idle() < hedge_delay()) {
                     continue;
                 }
-                tracing::warn!(target: "alpha_ffi", "CHUNK_HEDGE chunk={} after_ms={}", start_at, t_chunk.elapsed().as_millis());
-                inflight.push(launch(next));
-                next += 1;
+                // The next source if any is left, else one fresh connection to a stalled one.
+                if let Some((idx, repeat)) = plan.pop_front() {
+                    attempts += 1;
+                    if !repeat { hedgeable.push_back(idx); }
+                    inflight.push(launch(idx, repeat, attempts));
+                } else if let Some(idx) = hedgeable.pop_front() {
+                    attempts += 1;
+                    inflight.push(launch(idx, false, attempts));
+                }
             }
         }
     }
     Err(last_err.unwrap_or(MediaError::NoChunkUrls))
 }
 
-/// A chunk slower than this is logged: it is what a pause in the progress is made of.
-const DL_SLOW: std::time::Duration = std::time::Duration::from_millis(1500);
 /// How a host that just failed a chunk is ranked: as if it answered this slowly.
 const FAILED_HOST_MS: u64 = 20_000;
 
@@ -409,7 +596,40 @@ fn host_slots(url: &str) -> std::sync::Arc<tokio::sync::Semaphore> {
 enum HostOutcome { Served(std::time::Duration), Missing, Failed }
 
 #[derive(Default, Clone, Copy)]
-struct HostStat { ewma_ms: u64 }
+struct HostStat {
+    ewma_ms: u64,
+    /// Failures in a row (no answer or a server error); an answer of any kind clears it.
+    failures: u32,
+    /// Not asked until then: a server failing again and again only burns requests.
+    resting_until: Option<std::time::Instant>,
+}
+
+/// Failures in a row after which a server rests.
+const REST_AFTER_FAILURES: u32 = 3;
+/// The first rest; each failure after it doubles the rest, up to [MAX_REST].
+const FIRST_REST: std::time::Duration = std::time::Duration::from_secs(120);
+const MAX_REST: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// The rest after [failures] in a row: 2, 4, 8 … minutes, at most 30.
+fn rest_for(failures: u32) -> Option<std::time::Duration> {
+    let over = failures.checked_sub(REST_AFTER_FAILURES)?;
+    Some(FIRST_REST.saturating_mul(1u32 << over.min(5)).min(MAX_REST))
+}
+
+fn host_resting(url: &str) -> bool {
+    host_stats().lock().unwrap_or_else(|p| p.into_inner())
+        .get(&host_key(url))
+        .and_then(|s| s.resting_until)
+        .is_some_and(|t| std::time::Instant::now() < t)
+}
+
+/// A pause before the one more try a failing source gets: long enough for a server
+/// that just stumbled, short enough that a reader waits seconds, not minutes.
+async fn repeat_pause() {
+    use rand::Rng;
+    let ms = 2_000 + rand::thread_rng().gen_range(0..=2_000);
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
 
 fn host_key(url: &str) -> String {
     url.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or(url).to_ascii_lowercase()
@@ -424,6 +644,13 @@ fn host_stats() -> &'static std::sync::Mutex<std::collections::HashMap<String, H
 fn note_host(url: &str, outcome: HostOutcome) {
     let mut map = host_stats().lock().unwrap_or_else(|p| p.into_inner());
     let st = map.entry(host_key(url)).or_default();
+    if matches!(outcome, HostOutcome::Failed) {
+        st.failures += 1;
+        st.resting_until = rest_for(st.failures).map(|d| std::time::Instant::now() + d);
+    } else {
+        st.failures = 0;
+        st.resting_until = None;
+    }
     let sample = match outcome {
         HostOutcome::Served(t) => Some(t.as_millis().min(60_000) as u64),
         HostOutcome::Missing => None,
@@ -1040,7 +1267,6 @@ impl MediaPipeline {
     ) -> MediaResult<UploadResult> {
         use futures::stream::StreamExt;
         use std::io::Read;
-        use std::sync::atomic::{AtomicU64, Ordering};
 
         let io_err = |e: std::io::Error| MediaError::EncryptionFailed(format!("stream upload io: {e}"));
 
@@ -1108,11 +1334,11 @@ impl MediaPipeline {
         // re-encrypting them from disk — seconds at 50 MB. Starting from zero
         // would make every resume look like the send rolled back to the
         // start even though not a byte went to the network.
-        let uploaded = AtomicU64::new(resume_base.min(plaintext_len));
+        let shown = SendProgress::new(plaintext_len, resume_base);
         if resume_base > 0 {
             info!(
                 target: "alpha_ffi",
-                "RESUME подтверждено кусков {} из {chunk_total}, байтов {resume_base} из {plaintext_len}",
+                "RESUME confirmed chunks {} of {chunk_total}, bytes {resume_base} of {plaintext_len}",
                 confirmed.len(),
             );
             on_progress(resume_base.min(plaintext_len), plaintext_len);
@@ -1157,7 +1383,7 @@ impl MediaPipeline {
         let chunk_results = chunk_stream
             .map(|item| {
                 let blossom = &self.blossom;
-                let uploaded = &uploaded;
+                let shown = &shown;
                 let key = &media_key;
                 let confirmed = &confirmed;
                 let batcher = &batcher;
@@ -1202,7 +1428,7 @@ impl MediaPipeline {
                             // ref to chunks that are not in storage.
                             tracing::warn!(
                                 target: "alpha_ffi",
-                                "CHUNK_RESEND idx={idx} причина={why}",
+                                "CHUNK_RESEND idx={idx} why={why}",
                             );
                         }
                         crate::resume::ChunkPlan::Upload(_) => {}
@@ -1219,6 +1445,7 @@ impl MediaPipeline {
                     // link keeps the chunk stream from EVER finishing: the rest
                     // upload the file to the end while the send hangs silently,
                     // never failing — and a send that never fails never reaches the retry queue.
+                    let flight = (!was_counted).then(|| shown.fly(idx, enc.original_size));
                     let locations = match tokio::time::timeout(
                         CHUNK_DEADLINE,
                         upload_blob_mirrored(blossom, &blob, signer, crate::blob_transport::CHUNK_CONTENT_TYPE),
@@ -1273,10 +1500,9 @@ impl MediaPipeline {
 
                     // Progress is denominated in PLAINTEXT bytes so it matches the
                     // file the user picked (the encoded blob is ~33% larger).
-                    if !was_counted {
-                        let done = uploaded.fetch_add(enc.original_size, Ordering::Relaxed)
-                            + enc.original_size;
-                        on_progress(done.min(plaintext_len), plaintext_len);
+                    if let Some(flight) = flight {
+                        shown.land(flight);
+                        shown.show(on_progress);
                     }
 
                     Ok::<(u32, StreamChunkUploadInfo), MediaError>((
@@ -1308,10 +1534,15 @@ impl MediaPipeline {
         futures::pin_mut!(chunk_results);
         let mut indexed_infos: Vec<(u32, StreamChunkUploadInfo)> = Vec::new();
         let mut terminal_err: Option<MediaError> = None;
-        while let Some(next) = chunk_results.next().await {
-            match next {
-                Ok(v) => indexed_infos.push(v),
-                Err(e) => { terminal_err = Some(e); break; }
+        let mut tick = tokio::time::interval(SHOW_EVERY);
+        loop {
+            tokio::select! {
+                next = chunk_results.next() => match next {
+                    Some(Ok(v)) => indexed_infos.push(v),
+                    Some(Err(e)) => { terminal_err = Some(e); break; }
+                    None => break,
+                },
+                _ = tick.tick() => shown.show(on_progress),
             }
         }
         drop(chunk_results);
@@ -1325,7 +1556,7 @@ impl MediaPipeline {
         if let Some(e) = terminal_err {
             tracing::warn!(
                 target: "alpha_ffi",
-                "UPLOAD_ABORT out={filename} принято={} из {chunk_total} причина={e}",
+                "UPLOAD_ABORT out={filename} accepted={} of {chunk_total} why={e}",
                 indexed_infos.len(),
             );
             return Err(e);
@@ -1452,7 +1683,7 @@ impl MediaPipeline {
         batcher.flush();
         if is_cancelled() { return Err(MediaError::Cancelled); }
         if let Some(e) = failure {
-            tracing::warn!(target: "alpha_ffi", "EARLY_STOP out={filename} причина={e}");
+            tracing::warn!(target: "alpha_ffi", "EARLY_STOP out={filename} why={e}");
         }
         Ok(sent.load(Ordering::Relaxed))
     }
@@ -1482,12 +1713,12 @@ impl MediaPipeline {
         // the envelope existed) are raw ciphertext and pass through — see `unwrap_blob`.
         if locations.len() > crate::limits::MAX_LOCATIONS_PER_CHUNK {
             return Err(MediaError::InvalidStreamManifest(format!(
-                "у куска {} адресов при пределе {}", locations.len(), crate::limits::MAX_LOCATIONS_PER_CHUNK
+                "chunk has {} addresses over the limit {}", locations.len(), crate::limits::MAX_LOCATIONS_PER_CHUNK
             )));
         }
         let blob = download_blob_locations(&self.blossom, explicit_id, locations, chunk_index as usize, DownloadPolicy::RoundRobin).await?;
         if blob.len() as u64 > crate::limits::MAX_ENVELOPE_BYTES {
-            return Err(MediaError::InvalidStreamManifest("конверт превышает предел".into()));
+            return Err(MediaError::InvalidStreamManifest("envelope over the limit".into()));
         }
         // Envelope fields are CROSS-CHECKED against expectations from an
         // authenticated source, not used as truth: they sit outside AEAD.
@@ -1670,10 +1901,6 @@ impl MediaPipeline {
                                 .map_err(|_| MediaError::PipelineError("file slot pool closed".into()))?;
                             let _slot = chunk_slots().acquire().await
                                 .map_err(|_| MediaError::PipelineError("chunk slot pool closed".into()))?;
-                            let slot_wait = t_net.elapsed();
-                            if slot_wait >= DL_SLOW {
-                                tracing::warn!(target: "alpha_ffi", "DL_SLOT_WAIT chunk={i} ms={} global_free={}", slot_wait.as_millis(), chunk_slots().available_permits());
-                            }
                             download_blob_locations(blossom, chunk_info.transport_object_id.as_ref(), &chunk_info.locations, i, DownloadPolicy::RoundRobin).await?
                         };
                         net_us.fetch_add(t_net.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -1706,16 +1933,8 @@ impl MediaPipeline {
             tracing::warn!(target: "alpha_ffi", "DL_START chunks={} from={} servers={:?}", chunk_infos.len(), resume_chunks,
                 chunk_infos.first().map(|c| c.locations.iter().map(|l| l.relay.clone()).collect::<Vec<_>>()).unwrap_or_default());
             // network → decrypt → hash → write → flush → drop → next chunk.
-            let mut next_idx = resume_chunks;
             loop {
-                let t_wait = std::time::Instant::now();
                 let Some(item) = chunks.next().await else { break };
-                let waited = t_wait.elapsed();
-                if waited >= DL_SLOW {
-                    // The progress stood still this long: the chunk in order was late.
-                    tracing::warn!(target: "alpha_ffi", "DL_STALL chunk={next_idx} waited_ms={} done_kb={}", waited.as_millis(), written / 1024);
-                }
-                next_idx += 1;
                 let plaintext = item?;
                 let t_w = std::time::Instant::now();
                 hasher.update(&plaintext);
@@ -1845,7 +2064,7 @@ mod t2_discovery {
             &format!("https://s/{}f", H),                // too long
             &format!("https://s/{}", H.to_uppercase()),  // upper case
         ] {
-            assert!(parse(bad).is_none(), "принят недопустимый адрес: {bad}");
+            assert!(parse(bad).is_none(), "a forbidden address was accepted: {bad}");
         }
     }
 
@@ -1924,6 +2143,72 @@ mod t2_acceptance {
         FakeStore { addr, hits }
     }
 
+    /// A server that answers every request with an error, counting them.
+    async fn spawn_failing_store() -> FakeStore {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let h = h.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 2048];
+                    if sock.read(&mut buf).await.unwrap_or(0) == 0 { return; }
+                    h.fetch_add(1, Ordering::Relaxed);
+                    let _ = sock.write_all(b"HTTP/1.1 502 Bad Gateway
+Content-Length: 0
+Connection: close
+
+").await;
+                });
+            }
+        });
+        FakeStore { addr, hits }
+    }
+
+    #[test]
+    fn a_failing_server_rests_two_then_four_minutes_and_never_longer_than_thirty() {
+        assert_eq!(rest_for(2), None);
+        assert_eq!(rest_for(3), Some(std::time::Duration::from_secs(120)));
+        assert_eq!(rest_for(4), Some(std::time::Duration::from_secs(240)));
+        assert_eq!(rest_for(20), Some(std::time::Duration::from_secs(1800)));
+    }
+
+    #[tokio::test]
+    async fn a_failing_server_gets_one_more_try_then_rests() {
+        let obj = body(21);
+        let id = TransportObjectId::of_bytes(&obj);
+        let bad = spawn_failing_store().await;
+        let client = crate::blossom::BlossomClient::with_servers(&[bad.addr.clone()]).listed_only();
+        let at = [loc(&bad.addr, id.as_hex())];
+
+        let first = download_blob_locations(&client, Some(&id), &at, 0, DownloadPolicy::RoundRobin).await;
+        assert!(!matches!(first, Ok(_) | Err(MediaError::Gone)), "a server error is not \"gone\"");
+        assert_eq!(bad.hits.load(Ordering::Relaxed), 2, "one try and one more");
+
+        let _ = download_blob_locations(&client, Some(&id), &at, 0, DownloadPolicy::RoundRobin).await;
+        assert_eq!(bad.hits.load(Ordering::Relaxed), 3, "the third failure in a row starts its rest");
+
+        let resting = download_blob_locations(&client, Some(&id), &at, 0, DownloadPolicy::RoundRobin).await;
+        assert!(resting.is_err());
+        assert_eq!(bad.hits.load(Ordering::Relaxed), 3, "a resting server is not asked");
+    }
+
+    #[tokio::test]
+    async fn not_here_everywhere_is_final_after_one_ask_each() {
+        let obj = body(22);
+        let id = TransportObjectId::of_bytes(&obj);
+        let a = spawn_store(HashMap::new()).await;
+        let b = spawn_store(HashMap::new()).await;
+        let client = crate::blossom::BlossomClient::with_servers(&[a.addr.clone(), b.addr.clone()]).listed_only();
+        let got = download_blob_locations(&client, Some(&id), &[loc(&a.addr, id.as_hex())], 0, DownloadPolicy::RoundRobin).await;
+        assert!(matches!(got, Err(MediaError::Gone)));
+        assert_eq!(a.hits.load(Ordering::Relaxed) + b.hits.load(Ordering::Relaxed), 2, "each server asked once");
+    }
+
     fn body(seed: u8) -> Vec<u8> {
         (0..512u32).map(|i| (i as u8) ^ seed).collect()
     }
@@ -1995,7 +2280,7 @@ mod t2_acceptance {
         let client = crate::blossom::BlossomClient::with_servers(&[a.addr.clone(), b.addr.clone()]);
         let got = download_blob_locations(
             &client, Some(&id), &[loc(&a.addr, id.as_hex())], 0, DownloadPolicy::RoundRobin,
-        ).await.expect("объект обязан найтись на втором сервере");
+        ).await.expect("the object must be found on the second server");
         assert_eq!(got, obj);
     }
 
@@ -2016,10 +2301,10 @@ mod t2_acceptance {
         let got = download_blob_locations(
             &client, Some(&id), &[loc(&a.addr, id.as_hex())], 0, DownloadPolicy::RoundRobin,
         ).await.unwrap();
-        assert_ne!(got, real, "стенд обязан был отдать подменённые байты");
+        assert_ne!(got, real, "the stand must serve swapped bytes");
         assert_ne!(
             TransportObjectId::of_bytes(&got), id,
-            "идентичность подменённого объекта обязана расходиться с заявленной",
+            "a swapped object's identity must differ from the declared one",
         );
     }
 
@@ -2041,11 +2326,11 @@ mod t2_acceptance {
         let client = crate::blossom::BlossomClient::with_servers(&[a.addr.clone(), b.addr.clone()]);
 
         let g1 = download_blob_locations(&client, Some(&i1), &[loc(&a.addr, i1.as_hex())], 0, DownloadPolicy::RoundRobin).await;
-        assert!(g1.is_ok(), "объект 1 обязан найтись");
+        assert!(g1.is_ok(), "object 1 must be found");
         let g2 = download_blob_locations(&client, Some(&i2), &[loc(&a.addr, i2.as_hex())], 0, DownloadPolicy::RoundRobin).await;
-        assert!(g2.is_err(), "объекта 2 нет нигде");
+        assert!(g2.is_err(), "object 2 is nowhere");
         let g3 = download_blob_locations(&client, Some(&i3), &[loc(&a.addr, i3.as_hex())], 0, DownloadPolicy::RoundRobin).await;
-        assert_eq!(g3.expect("объект 3 обязан найтись ПОСЛЕ промаха по объекту 2"), o3);
+        assert_eq!(g3.expect("object 3 must be found after the miss on object 2"), o3);
     }
 
     /// Request upper bound: the search is limited by the number of configured
@@ -2066,13 +2351,13 @@ mod t2_acceptance {
 
         // First pass: MAX_CHUNK_ATTEMPTS tries on the hint + at most one
         // request to every unprobed configured server.
-        assert!(after_first <= MAX_CHUNK_ATTEMPTS + 2, "первый поиск сделал {after_first} запросов");
+        assert!(after_first <= MAX_CHUNK_ATTEMPTS + 2, "the first search made {after_first} requests");
         // The second pass on the same object must not probe B again:
         // the (B, object) miss is already remembered.
         let discovery_second = after_second - after_first;
         assert!(
             discovery_second <= MAX_CHUNK_ATTEMPTS,
-            "повторный поиск сделал {discovery_second} запросов — отрицательный кэш не сработал",
+            "the second search made {discovery_second} requests: the negative cache did not work",
         );
     }
 
@@ -2121,9 +2406,9 @@ mod t2_acceptance {
         let t0 = std::time::Instant::now();
         let got = download_blob_locations(&client, Some(&id), &[loc(&a, id.as_hex())], 0, DownloadPolicy::RoundRobin)
             .await
-            .expect("кусок обязан прийти через страховочный запрос");
+            .expect("the chunk must come through the hedge request");
         assert_eq!(got, obj);
-        assert!(t0.elapsed() < std::time::Duration::from_secs(HEDGE_MAX_MS / 1000 + 2), "страховка не сработала: {:?}", t0.elapsed());
+        assert!(t0.elapsed() < std::time::Duration::from_secs(HEDGE_MAX_MS / 1000 + 2), "the hedge did not fire: {:?}", t0.elapsed());
     }
 }
 
@@ -2161,9 +2446,9 @@ mod upload_budget {
         let peak = peak.load(Ordering::SeqCst);
         assert!(
             peak <= GLOBAL_UPLOAD_SLOTS,
-            "одновременных отправок {peak}, предел {GLOBAL_UPLOAD_SLOTS}",
+            "{peak} uploads at once over the limit {GLOBAL_UPLOAD_SLOTS}",
         );
-        assert_eq!(live.load(Ordering::SeqCst), 0, "разрешение не вернулось");
+        assert_eq!(live.load(Ordering::SeqCst), 0, "the permit did not come back");
     }
 
     /// The pre-retry pause takes NO slot: otherwise a failed chunk of a

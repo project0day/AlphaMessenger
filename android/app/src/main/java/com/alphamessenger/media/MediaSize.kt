@@ -50,12 +50,6 @@ object MediaSizeFormat {
 
     private const val KB = 1024.0
 
-    /** Units resolved from resources in the app language by [install].
-     *  Null only before [install] ran — unreachable in practice because
-     *  AlphaMessengerApp.onCreate installs them at process start. */
-    @Volatile
-    private var installed: MediaSizeUnits? = null
-
     private class MediaSizeUnits(
         val locale: java.util.Locale,
         val bytes: String,
@@ -63,6 +57,11 @@ object MediaSizeFormat {
         val mb: String,
         val gb: String,
     )
+
+    /** Units in the app language, loaded by [install] at process start; until then
+     *  the English units of the default resources. */
+    @Volatile
+    private var units = MediaSizeUnits(java.util.Locale.US, "%1\$d B", "%1\$.0f KB", "%1\$.1f MB", "%1\$.2f GB")
 
     /** Loads the unit patterns in the app-chosen language; mirrors
      *  util.Strings localization (per-app locales via AppCompatDelegate). */
@@ -74,7 +73,7 @@ object MediaSizeFormat {
             }
         )
         val res = ctx.resources
-        installed = MediaSizeUnits(
+        units = MediaSizeUnits(
             locale = res.configuration.locales[0],
             bytes = res.getString(R.string.size_unit_bytes),
             kb = res.getString(R.string.size_unit_kb),
@@ -83,38 +82,17 @@ object MediaSizeFormat {
         )
     }
 
-    /**
-     * The locale is pinned to the UI language, not taken from the system.
-     *
-     * The unit words here are Russian, so the number must be written the Russian
-     * way — with a decimal comma. The former formatters called `String.format`
-     * without a locale, i.e. depended on the PHONE's language: an English system
-     * produced a decimal point beside Russian unit words, and a system with a
-     * different numeral system would put outright wrong digits into the weight.
-     */
-    private val LOCALE = java.util.Locale("ru")
-
+    /** The number is written in the UI language, never the system one: the unit
+     *  words and the decimal separator must agree. */
     fun short(bytes: Long): String {
-        val units = installed
-        // Fallback (pre-install): hardcoded Russian units. Unreachable in
-        // practice once AlphaMessengerApp.onCreate has run install().
-        if (units == null) {
-            if (bytes <= 0L) return "0 Б"
-            val b = bytes.toDouble()
-            return when {
-                b < KB -> "$bytes Б"
-                b < KB * KB -> String.format(LOCALE, "%.0f КБ", b / KB)
-                b < KB * KB * KB -> String.format(LOCALE, "%.1f МБ", b / (KB * KB))
-                else -> String.format(LOCALE, "%.2f ГБ", b / (KB * KB * KB))
-            }
-        }
-        if (bytes <= 0L) return String.format(units.locale, units.bytes, 0L)
+        val u = units
+        if (bytes <= 0L) return String.format(u.locale, u.bytes, 0L)
         val b = bytes.toDouble()
         return when {
-            b < KB -> String.format(units.locale, units.bytes, bytes)
-            b < KB * KB -> String.format(units.locale, units.kb, b / KB)
-            b < KB * KB * KB -> String.format(units.locale, units.mb, b / (KB * KB))
-            else -> String.format(units.locale, units.gb, b / (KB * KB * KB))
+            b < KB -> String.format(u.locale, u.bytes, bytes)
+            b < KB * KB -> String.format(u.locale, u.kb, b / KB)
+            b < KB * KB * KB -> String.format(u.locale, u.mb, b / (KB * KB))
+            else -> String.format(u.locale, u.gb, b / (KB * KB * KB))
         }
     }
 

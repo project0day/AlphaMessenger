@@ -440,16 +440,6 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    /** Save the picked avatar path into core KV. Path points to a file in
-     *  app-private storage (copied there from the photo picker). */
-    fun updateAvatarPath(path: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching { repository.setMyProfile(avatarPath = path) }
-            // Force a re-emit so any avatar listener picks it up.
-            runCatching { repository.getMyProfile() }
-        }
-    }
-
     // --- Relay management ---
 
     /** Pull URLs/flags/connected from FFI into the singleton cache. */

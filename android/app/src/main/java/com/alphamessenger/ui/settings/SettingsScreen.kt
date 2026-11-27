@@ -30,8 +30,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.RadioButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -94,7 +92,6 @@ fun SettingsScreen(
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val snackbarHostState = remember { androidx.compose.material3.SnackbarHostState() }
     var shareSheetOpen by remember { mutableStateOf(false) }
-    var langDialogOpen by remember { mutableStateOf(false) }
     val npubFromState = state.identityInfo?.npub.orEmpty()
 
     // Pull the latest profile (avatar path + display name). Initial load
@@ -276,6 +273,17 @@ fun SettingsScreen(
                     onClick = onAutoDownloadClick,
                     colors = colors,
                 )
+                SettingsRowDivider(colors)
+                var backgroundGuide by remember { mutableStateOf(false) }
+                CategoryRow(
+                    title = stringResource(R.string.bg_delivery_title),
+                    subtitle = stringResource(R.string.settings_bg_delivery_subtitle),
+                    icon = AlphaIcons.Outlined.BatteryChargingFull,
+                    iconBg = Color(0xFFE5793B),
+                    onClick = { backgroundGuide = true },
+                    colors = colors,
+                )
+                if (backgroundGuide) com.alphamessenger.ui.background.BackgroundDeliverySheet(onDismiss = { backgroundGuide = false })
                 }
             }
 
@@ -339,70 +347,12 @@ fun SettingsScreen(
         )
     }
 
-    if (langDialogOpen) {
-        LanguagePickerDialog(
-            onDismiss = { langDialogOpen = false },
-        )
-    }
 }
 
 @Composable
 private fun currentLanguageName(): String {
     val tags = androidx.appcompat.app.AppCompatDelegate.getApplicationLocales().toLanguageTags()
-    return when (tags) {
-        "" -> stringResource(R.string.language_system)
-        "en" -> "English"
-        "ru" -> "Русский"
-        "fr" -> "Français"
-        "es" -> "Español"
-        else -> tags
-    }
-}
-
-@Composable
-private fun LanguagePickerDialog(onDismiss: () -> Unit) {
-    val current = androidx.appcompat.app.AppCompatDelegate.getApplicationLocales().toLanguageTags()
-    // native names, intentionally not translated
-    data class Opt(val tags: String, val label: String)
-    val options = listOf(
-        Opt("", stringResource(R.string.language_system)),
-        Opt("en", "English"),
-        Opt("ru", "Русский"),
-        Opt("fr", "Français"),
-        Opt("es", "Español"),
-    )
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.settings_language_title)) },
-        text = {
-            Column {
-                options.forEach { opt ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                val selected = if (opt.tags.isEmpty())
-                                    androidx.core.os.LocaleListCompat.getEmptyLocaleList()
-                                else androidx.core.os.LocaleListCompat.forLanguageTags(opt.tags)
-                                androidx.appcompat.app.AppCompatDelegate.setApplicationLocales(selected)
-                                onDismiss()
-                            }
-                            .padding(vertical = 10.dp),
-                    ) {
-                        RadioButton(
-                            selected = current == opt.tags,
-                            onClick = null,
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(opt.label)
-                    }
-                }
-            }
-        },
-        confirmButton = {},
-        dismissButton = {},
-    )
+    return if (tags.isEmpty()) stringResource(R.string.language_system) else nativeLanguageName(tags) ?: tags
 }
 
 // --- Top bar with back + search ---

@@ -462,6 +462,22 @@ impl ChatRepo {
 
 // --- MessageRepo ---
 
+/// Prefix: media refs of deleted messages whose files are still on the phone.
+const GONE_MEDIA_PREFIX: &str = "gone_media:";
+
+/// Media refs of messages deleted since the last call, for the app to delete their files.
+pub fn take_gone_media(conn: &Connection) -> Result<Vec<String>> {
+    let gone: Vec<(String, String)> = KeyValueRepo::list(conn)?
+        .into_iter()
+        .filter(|e| e.key.starts_with(GONE_MEDIA_PREFIX))
+        .map(|e| (e.key, e.value))
+        .collect();
+    for (k, _) in &gone {
+        KeyValueRepo::delete(conn, k)?;
+    }
+    Ok(gone.into_iter().map(|(_, v)| v).collect())
+}
+
 /// CRUD operations for the `messages` table.
 pub struct MessageRepo;
 
@@ -940,8 +956,16 @@ impl MessageRepo {
     }
 
     /// Mark a message as deleted (tombstone).
-    /// Also clears content for security (zeroize plaintext from DB).
+    /// Also clears content for security (zeroize plaintext from DB). Its media ref is
+    /// kept aside for the app, which deletes the file from the phone ([take_gone_media]).
     pub fn mark_deleted(conn: &Connection, id: &str) -> Result<bool> {
+        let media: Option<String> = conn
+            .query_row("SELECT media_ref FROM messages WHERE id = ?1", params![id], |r| r.get(0))
+            .optional()?
+            .flatten();
+        if let Some(m) = media.filter(|m| !m.is_empty()) {
+            KeyValueRepo::set(conn, &format!("{GONE_MEDIA_PREFIX}{id}"), &m)?;
+        }
         let now = now_rfc3339();
         let changes = conn.execute(
             "UPDATE messages SET is_deleted = 1, content = NULL, media_ref = NULL, edited_at = ?1 WHERE id = ?2",
@@ -1007,6 +1031,37 @@ impl MessageRepo {
              AND reply_to = ?3 AND content = ?4 AND msg_type = 'reaction'",
             params![chat_id, sender_id, target_id, emoji],
         )?)
+    }
+
+    /// Our own timed message (album items too) starts its countdown when a relay took
+    /// it, as a received one does when it is read. One-time messages count from opening.
+    pub fn start_own_countdown(conn: &Connection, id: &str) -> Result<usize> {
+        let rows: Vec<(String, i64)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, ttl_seconds FROM messages
+                 WHERE (id = ?1 OR id LIKE ?1 || '#al%') AND sender_id = 'self'
+                   AND ttl_seconds > 0 AND expires_at IS NULL
+                   AND (expiry_policy IS NULL OR expiry_policy != 'view_once')",
+            )?;
+            let found = stmt.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            found.collect::<rusqlite::Result<_>>()?
+        };
+        let now = Utc::now();
+        for (row, ttl) in &rows {
+            let at = (now + chrono::Duration::seconds(*ttl)).to_rfc3339();
+            conn.execute("UPDATE messages SET expires_at = ?1 WHERE id = ?2", params![at, row])?;
+        }
+        Ok(rows.len())
+    }
+
+    /// When the next timed message is due to disappear, in unix milliseconds.
+    pub fn next_expiry_ms(conn: &Connection) -> Result<Option<i64>> {
+        let at: Option<String> = conn.query_row(
+            "SELECT MIN(expires_at) FROM messages WHERE ttl_seconds IS NOT NULL AND expires_at IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(at.and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok()).map(|t| t.timestamp_millis()))
     }
 
     /// Remove all expired disappearing messages from the database.
@@ -1901,6 +1956,11 @@ impl PendingSendRepo {
         Ok(())
     }
 
+    /// Drops the queued send of [msg_id]; true when it had not gone out yet.
+    pub fn delete_by_msg(conn: &Connection, msg_id: &str) -> Result<bool> {
+        Ok(conn.execute("DELETE FROM pending_sends WHERE msg_id = ?1", params![msg_id])? > 0)
+    }
+
     pub fn count(conn: &Connection) -> Result<i64> {
         Ok(conn.query_row("SELECT COUNT(*) FROM pending_sends", [], |r| r.get(0))?)
     }
@@ -2367,13 +2427,13 @@ impl MediaSendObjectRepo {
                 (id, plain, cipher, hash, locations)
             else {
                 tracing::warn!(
-                    "checkpoint: кусок {object_index} отправки {send_id} неполон — будет отправлен заново"
+                    "checkpoint: chunk {object_index} of send {send_id} is incomplete, it will be sent again"
                 );
                 continue;
             };
             if id.is_empty() || hash.is_empty() || locations.is_empty() || plain <= 0 {
                 tracing::warn!(
-                    "checkpoint: кусок {object_index} отправки {send_id} испорчен — будет отправлен заново"
+                    "checkpoint: chunk {object_index} of send {send_id} is corrupt, it will be sent again"
                 );
                 continue;
             }
@@ -2459,7 +2519,7 @@ mod t4_checkpoint {
 
     /// What one transaction wrote is read back whole and in order.
     #[test]
-    fn подтверждения_переживают_запись_и_читаются_по_порядку() {
+    fn confirmations_survive_and_read_back_in_order() {
         let pool = fresh_pool();
         let mut conn = pool.connection();
         let batch: Vec<_> = [2u32, 0, 1].iter().map(|i| conf("s1", 7, *i)).collect();
@@ -2477,7 +2537,7 @@ mod t4_checkpoint {
     /// exist before any send, and taking it as proof of acceptance would
     /// hand the recipient a ref to chunks that are not in storage.
     #[test]
-    fn объявленный_кусок_не_считается_подтверждённым() {
+    fn an_announced_chunk_is_not_confirmed() {
         let pool = fresh_pool();
         let conn = pool.connection();
         MediaSendObjectRepo::store(&conn, &MediaSendObject {
@@ -2489,13 +2549,13 @@ mod t4_checkpoint {
 
         assert!(
             MediaSendObjectRepo::load_confirmed(&conn, "s2", 0, 7).unwrap().is_empty(),
-            "запись без подтверждения обязана остаться невидимой для возобновления",
+            "a row without confirmation must stay invisible to resume",
         );
     }
 
     /// An empty batch opens no transaction and changes nothing.
     #[test]
-    fn пустая_пачка_ничего_не_делает() {
+    fn an_empty_batch_does_nothing() {
         let pool = fresh_pool();
         let mut conn = pool.connection();
         assert_eq!(MediaSendObjectRepo::confirm_batch(&mut conn, &[]).unwrap(), 0);
@@ -2503,7 +2563,7 @@ mod t4_checkpoint {
 
     /// The revision changed — old confirmations do not apply to the new output.
     #[test]
-    fn подтверждения_другой_ревизии_не_видны() {
+    fn confirmations_of_another_revision_are_not_visible() {
         let pool = fresh_pool();
         let mut conn = pool.connection();
         MediaSendObjectRepo::confirm_batch(&mut conn, &[conf("s3", 7, 0)]).unwrap();
@@ -2511,11 +2571,11 @@ mod t4_checkpoint {
         assert_eq!(MediaSendObjectRepo::load_confirmed(&conn, "s3", 0, 7).unwrap().len(), 1);
         assert!(
             MediaSendObjectRepo::load_confirmed(&conn, "s3", 0, 8).unwrap().is_empty(),
-            "новая ревизия обязана начинать с чистого листа",
+            "a new revision must start clean",
         );
         assert!(
-            MediaSendObjectRepo::load_confirmed(&conn, "другая", 0, 7).unwrap().is_empty(),
-            "чужая отправка не имеет доступа к этим подтверждениям",
+            MediaSendObjectRepo::load_confirmed(&conn, "other", 0, 7).unwrap().is_empty(),
+            "another send must not see these confirmations",
         );
     }
 
@@ -2524,7 +2584,7 @@ mod t4_checkpoint {
     /// Panicking here would turn one broken record into "the file can
     /// never be sent at all"; the cost of skipping is re-sending that chunk.
     #[test]
-    fn испорченная_строка_не_ломает_остальные() {
+    fn a_corrupt_row_does_not_break_the_rest() {
         let pool = fresh_pool();
         let mut conn = pool.connection();
         let batch: Vec<_> = (0..3u32).map(|i| conf("s4", 7, i)).collect();
@@ -2546,7 +2606,7 @@ mod t4_checkpoint {
 
     /// Cancel and success clear the send state wholesale.
     #[test]
-    fn очистка_убирает_подтверждения_отправки() {
+    fn clearing_removes_the_sends_confirmations() {
         let pool = fresh_pool();
         let mut conn = pool.connection();
         let batch: Vec<_> = (0..4u32).map(|i| conf("s5", 7, i)).collect();
@@ -2558,7 +2618,7 @@ mod t4_checkpoint {
 
     /// Re-confirming the same chunk grows no rows.
     #[test]
-    fn повторное_подтверждение_обновляет_а_не_дублирует() {
+    fn a_repeated_confirmation_updates_not_duplicates() {
         let pool = fresh_pool();
         let mut conn = pool.connection();
         MediaSendObjectRepo::confirm_batch(&mut conn, &[conf("s6", 7, 0)]).unwrap();
@@ -2589,118 +2649,118 @@ mod t4_single_owner {
     /// caused the second send: success deletes a message's rows, but the
     /// queue walker follows a snapshot and knows nothing of the deletion.
     #[test]
-    fn повторная_постановка_не_плодит_строк() {
+    fn enqueueing_again_adds_no_rows() {
         let pool = fresh_pool();
         let conn = pool.connection();
         for n in 0..5 {
             PendingMediaRepo::enqueue(&conn, "chat", "msg-1", "single", &format!("{{\"n\":{n}}}"))
-                .expect("постановка");
+                .expect("enqueue");
         }
-        let rows = PendingMediaRepo::list(&conn).expect("список");
-        assert_eq!(rows.len(), 1, "одно сообщение — одна строка очереди");
-        assert!(rows[0].payload.contains("\"n\":4"), "содержимое обязано быть последним");
+        let rows = PendingMediaRepo::list(&conn).expect("list");
+        assert_eq!(rows.len(), 1, "one message, one queue row");
+        assert!(rows[0].payload.contains("\"n\":4"), "the content must be the latest");
     }
 
     /// A claim is granted exactly once. Two queue passes, however they
     /// overlap in time, cannot take the same row into work.
     #[test]
-    fn захват_достаётся_только_одному() {
+    fn only_one_claim_wins() {
         let pool = fresh_pool();
         let conn = pool.connection();
-        let id = PendingMediaRepo::enqueue(&conn, "chat", "msg-1", "single", "{}").expect("постановка");
+        let id = PendingMediaRepo::enqueue(&conn, "chat", "msg-1", "single", "{}").expect("enqueue");
 
-        assert!(PendingMediaRepo::claim(&conn, id).expect("захват"), "первый обязан получить право");
-        assert!(!PendingMediaRepo::claim(&conn, id).expect("захват"), "второй не имеет права на ту же строку");
-        assert!(!PendingMediaRepo::claim(&conn, id).expect("захват"), "и третий тоже");
+        assert!(PendingMediaRepo::claim(&conn, id).expect("claim"), "the first claim must win");
+        assert!(!PendingMediaRepo::claim(&conn, id).expect("claim"), "a second claim on the same row must fail");
+        assert!(!PendingMediaRepo::claim(&conn, id).expect("claim"), "and so must a third");
     }
 
     /// Published rows are deleted — there is nothing left to claim. That
     /// is the guard against a list snapshot taken before publication.
     #[test]
-    fn опубликованную_строку_захватить_нельзя() {
+    fn a_published_row_cannot_be_claimed() {
         let pool = fresh_pool();
         let conn = pool.connection();
-        let id = PendingMediaRepo::enqueue(&conn, "chat", "msg-1", "single", "{}").expect("постановка");
-        assert!(PendingMediaRepo::claim(&conn, id).expect("захват"));
+        let id = PendingMediaRepo::enqueue(&conn, "chat", "msg-1", "single", "{}").expect("enqueue");
+        assert!(PendingMediaRepo::claim(&conn, id).expect("claim"));
 
         // Successful publish.
-        PendingMediaRepo::delete(&conn, id).expect("удаление после успеха");
+        PendingMediaRepo::delete(&conn, id).expect("delete after success");
 
         assert!(
-            !PendingMediaRepo::claim(&conn, id).expect("захват"),
-            "строки больше нет — отправлять повторно нечего",
+            !PendingMediaRepo::claim(&conn, id).expect("claim"),
+            "the row is gone, nothing to send again",
         );
     }
 
     /// Failure returns the row to the queue: a retry must remain possible.
     #[test]
-    fn неудача_освобождает_захват() {
+    fn a_failure_releases_the_claim() {
         let pool = fresh_pool();
         let conn = pool.connection();
-        let id = PendingMediaRepo::enqueue(&conn, "chat", "msg-1", "single", "{}").expect("постановка");
-        assert!(PendingMediaRepo::claim(&conn, id).expect("захват"));
+        let id = PendingMediaRepo::enqueue(&conn, "chat", "msg-1", "single", "{}").expect("enqueue");
+        assert!(PendingMediaRepo::claim(&conn, id).expect("claim"));
 
-        PendingMediaRepo::mark_transient(&conn, "msg-1", "сеть").expect("временная неудача");
-        assert!(PendingMediaRepo::claim(&conn, id).expect("захват"), "после неудачи строка снова свободна");
+        PendingMediaRepo::mark_transient(&conn, "msg-1", "network").expect("transient failure");
+        assert!(PendingMediaRepo::claim(&conn, id).expect("claim"), "after a failure the row is free again");
 
-        PendingMediaRepo::release(&conn, id).expect("отпустить");
-        assert!(PendingMediaRepo::claim(&conn, id).expect("захват"), "явное освобождение тоже возвращает строку");
+        PendingMediaRepo::release(&conn, id).expect("release");
+        assert!(PendingMediaRepo::claim(&conn, id).expect("claim"), "an explicit release frees the row too");
     }
 
     /// Permanent failure parks the row — but the claim is lifted,
     /// otherwise a manual retry would hit the right of a nonexistent owner.
     #[test]
-    fn окончательная_неудача_не_держит_захват() {
+    fn a_final_failure_does_not_hold_the_claim() {
         let pool = fresh_pool();
         let conn = pool.connection();
-        let id = PendingMediaRepo::enqueue(&conn, "chat", "msg-1", "single", "{}").expect("постановка");
-        assert!(PendingMediaRepo::claim(&conn, id).expect("захват"));
+        let id = PendingMediaRepo::enqueue(&conn, "chat", "msg-1", "single", "{}").expect("enqueue");
+        assert!(PendingMediaRepo::claim(&conn, id).expect("claim"));
 
-        PendingMediaRepo::mark_failed(&conn, "msg-1", "отказ").expect("окончательная неудача");
-        PendingMediaRepo::requeue_by_msg(&conn, "msg-1").expect("ручной повтор");
+        PendingMediaRepo::mark_failed(&conn, "msg-1", "refused").expect("final failure");
+        PendingMediaRepo::requeue_by_msg(&conn, "msg-1").expect("manual retry");
 
-        assert!(PendingMediaRepo::claim(&conn, id).expect("захват"), "ручной повтор обязан получить право");
+        assert!(PendingMediaRepo::claim(&conn, id).expect("claim"), "a manual retry must win the claim");
     }
 
     /// A claim that outlived its process MUST expire: otherwise the send
     /// would forever belong to an owner that no longer exists.
     #[test]
-    fn просроченный_захват_отдаётся_новому_владельцу() {
+    fn an_expired_claim_goes_to_a_new_owner() {
         let pool = fresh_pool();
         let conn = pool.connection();
-        let id = PendingMediaRepo::enqueue(&conn, "chat", "msg-1", "single", "{}").expect("постановка");
-        assert!(PendingMediaRepo::claim(&conn, id).expect("захват"));
+        let id = PendingMediaRepo::enqueue(&conn, "chat", "msg-1", "single", "{}").expect("enqueue");
+        assert!(PendingMediaRepo::claim(&conn, id).expect("claim"));
 
         let stale = chrono::Utc::now().timestamp() - PendingMediaRepo::CLAIM_LEASE_SECS - 60;
         conn.execute("UPDATE pending_media SET claimed_at = ?1 WHERE id = ?2", params![stale, id])
-            .expect("состарить захват");
+            .expect("age the claim");
 
         assert!(
-            PendingMediaRepo::claim(&conn, id).expect("захват"),
-            "истёкшая аренда обязана отдать строку новому владельцу",
+            PendingMediaRepo::claim(&conn, id).expect("claim"),
+            "an expired lease must hand the row to a new owner",
         );
     }
 
     /// Opening the DB releases the previous run's claims: after a restart
     /// there is nothing to wait the lease out for — no old owner remains.
     #[test]
-    fn открытие_базы_освобождает_захваты_прежнего_запуска() {
+    fn opening_the_database_releases_claims_of_the_previous_run() {
         let mut p = std::env::temp_dir();
         p.push(format!("alpha_owner_{}.db", uuid::Uuid::new_v4()));
 
         let id = {
             let pool = DatabasePool::open(&p, "").expect("open");
             let conn = pool.connection();
-            let id = PendingMediaRepo::enqueue(&conn, "chat", "msg-1", "single", "{}").expect("постановка");
-            assert!(PendingMediaRepo::claim(&conn, id).expect("захват"));
+            let id = PendingMediaRepo::enqueue(&conn, "chat", "msg-1", "single", "{}").expect("enqueue");
+            assert!(PendingMediaRepo::claim(&conn, id).expect("claim"));
             id
         };
 
-        let pool = DatabasePool::open(&p, "").expect("повторное открытие");
+        let pool = DatabasePool::open(&p, "").expect("reopen");
         let conn = pool.connection();
-        let rows = PendingMediaRepo::list(&conn).expect("список");
-        assert_eq!(rows[0].status, "queued", "захват прежнего запуска обязан быть снят");
-        assert!(PendingMediaRepo::claim(&conn, id).expect("захват"));
+        let rows = PendingMediaRepo::list(&conn).expect("list");
+        assert_eq!(rows[0].status, "queued", "the previous run's claim must be released");
+        assert!(PendingMediaRepo::claim(&conn, id).expect("claim"));
         drop(conn);
         drop(pool);
         let _ = std::fs::remove_file(&p);
@@ -2921,12 +2981,12 @@ mod p1_fanout {
 
     fn snap(conn: &Connection) {
         DeliveryFanoutRepo::snapshot(conn, "chat", "msg", &[A.into(), B.into(), C.into()])
-            .expect("снимок");
+            .expect("snapshot");
     }
 
     /// The snapshot creates a row for EVERY recipient: otherwise there would be nothing to retry.
     #[test]
-    fn строки_заводятся_всем_получателям() {
+    fn rows_are_created_for_every_recipient() {
         let pool = fresh_pool();
         let conn = pool.connection();
         snap(&conn);
@@ -2937,7 +2997,7 @@ mod p1_fanout {
 
     /// Partial failure is preserved BY NAME: A and C accepted, B is not.
     #[test]
-    fn частичная_неудача_записывается_поимённо() {
+    fn a_partial_failure_is_recorded_per_recipient() {
         let pool = fresh_pool();
         let conn = pool.connection();
         snap(&conn);
@@ -2956,7 +3016,7 @@ mod p1_fanout {
     /// Retry — only the undelivered. An accepted one does not return to
     /// work, or it would receive a duplicate.
     #[test]
-    fn повтор_берёт_только_недоставленного() {
+    fn a_retry_takes_only_the_undelivered() {
         let pool = fresh_pool();
         let conn = pool.connection();
         snap(&conn);
@@ -2970,7 +3030,7 @@ mod p1_fanout {
 
     /// The fan-out is not complete while a single recipient is unsettled.
     #[test]
-    fn рассылка_завершена_только_когда_улажены_все() {
+    fn a_fanout_is_done_only_when_all_are_settled() {
         let pool = fresh_pool();
         let conn = pool.connection();
         snap(&conn);
@@ -2985,7 +3045,7 @@ mod p1_fanout {
     /// A process death mid-send does not leave the row hanging forever:
     /// opening the DB returns it to work.
     #[test]
-    fn перезапуск_возвращает_зависшую_отправку() {
+    fn a_restart_returns_a_stuck_send() {
         let mut p = std::env::temp_dir();
         p.push(format!("alpha_fanout_restart_{}.db", uuid::Uuid::new_v4()));
         {
@@ -3004,14 +3064,14 @@ mod p1_fanout {
             let pool = DatabasePool::open(&p, "").expect("reopen");
             let conn = pool.connection();
             let todo = DeliveryFanoutRepo::outstanding(&conn, "chat", "msg").unwrap();
-            assert!(todo.contains(&B.to_string()), "зависшая отправка не вернулась в работу");
+            assert!(todo.contains(&B.to_string()), "the stuck send did not come back");
         }
         let _ = std::fs::remove_file(&p);
     }
 
     /// State survives closing the DB — it is on disk, not in memory.
     #[test]
-    fn состояние_переживает_перезапуск() {
+    fn the_state_survives_a_restart() {
         let mut p = std::env::temp_dir();
         p.push(format!("alpha_fanout_persist_{}.db", uuid::Uuid::new_v4()));
         {
@@ -3024,7 +3084,7 @@ mod p1_fanout {
             let pool = DatabasePool::open(&p, "").expect("reopen");
             let conn = pool.connection();
             let todo = DeliveryFanoutRepo::outstanding(&conn, "chat", "msg").unwrap();
-            assert!(!todo.contains(&A.to_string()), "принятый воскрес после перезапуска");
+            assert!(!todo.contains(&A.to_string()), "an accepted recipient came back after a restart");
             assert_eq!(todo.len(), 2);
         }
         let _ = std::fs::remove_file(&p);
@@ -3033,7 +3093,7 @@ mod p1_fanout {
     /// A new member is NOT added to an existing message's snapshot:
     /// otherwise they would receive what was not written to them.
     #[test]
-    fn новый_участник_не_попадает_в_старое_сообщение() {
+    fn a_new_member_is_not_added_to_an_old_message() {
         let pool = fresh_pool();
         let conn = pool.connection();
         DeliveryFanoutRepo::snapshot(&conn, "chat", "msg", &[A.into(), B.into()]).unwrap();
@@ -3045,19 +3105,19 @@ mod p1_fanout {
 
     /// The removed member stops being a recipient in existing snapshots too.
     #[test]
-    fn исключённый_убирается_из_снимков() {
+    fn a_removed_member_leaves_the_snapshots() {
         let pool = fresh_pool();
         let conn = pool.connection();
         snap(&conn);
         let removed = DeliveryFanoutRepo::cancel_recipient(&conn, "chat", B).unwrap();
         assert_eq!(removed, 1);
         let todo = DeliveryFanoutRepo::outstanding(&conn, "chat", "msg").unwrap();
-        assert!(!todo.contains(&B.to_string()), "исключённому всё ещё шлём");
+        assert!(!todo.contains(&B.to_string()), "still sending to a removed member");
     }
 
     /// A repeated snapshot grows no rows and resets no progress.
     #[test]
-    fn повторный_снимок_не_плодит_строк() {
+    fn a_repeated_snapshot_adds_no_rows() {
         let pool = fresh_pool();
         let conn = pool.connection();
         snap(&conn);
@@ -3068,7 +3128,7 @@ mod p1_fanout {
         assert_eq!(
             rows.iter().find(|r| r.recipient_sig == A).unwrap().state,
             FanoutState::RelayAccepted,
-            "повторный снимок сбросил уже принятого",
+            "a repeated snapshot reset an accepted recipient",
         );
     }
 }
@@ -3092,7 +3152,7 @@ mod p1_removed_recipient {
 
     fn snap(conn: &Connection) {
         DeliveryFanoutRepo::snapshot(conn, "chat", "msg", &[A.into(), B.into(), C.into()])
-            .expect("снимок");
+            .expect("snapshot");
     }
 
     fn state_of(conn: &Connection, sig: &str) -> FanoutState {
@@ -3106,7 +3166,7 @@ mod p1_removed_recipient {
     /// decrypt old ciphertext, so finishing delivery to them would hand
     /// the content to someone already expelled.
     #[test]
-    fn удаление_до_приёма_прекращает_доставку() {
+    fn removal_before_acceptance_stops_delivery() {
         let pool = fresh_pool();
         let conn = pool.connection();
         snap(&conn);
@@ -3116,13 +3176,13 @@ mod p1_removed_recipient {
 
         assert_eq!(state_of(&conn, B), FanoutState::CanceledRemoved);
         let todo = DeliveryFanoutRepo::outstanding(&conn, "chat", "msg").unwrap();
-        assert!(!todo.contains(&B.to_string()), "исключённому всё ещё пытаемся слать");
+        assert!(!todo.contains(&B.to_string()), "still trying to send to a removed member");
     }
 
     /// What the relay already accepted cannot be recalled — it is
     /// physically impossible, and pretending it worked is not allowed.
     #[test]
-    fn удаление_после_приёма_не_отзывает() {
+    fn removal_after_acceptance_does_not_revoke() {
         let pool = fresh_pool();
         let conn = pool.connection();
         snap(&conn);
@@ -3132,14 +3192,14 @@ mod p1_removed_recipient {
 
         assert_eq!(
             state_of(&conn, B), FanoutState::RelayAccepted,
-            "принятое реле подменили отменой — это выдача желаемого за действительное",
+            "a relay acceptance was replaced by a cancel",
         );
     }
 
     /// The removed member does not keep the fan-out unfinished, but is
     /// NOT counted as delivered either: the reason is recorded honestly.
     #[test]
-    fn исключённый_не_требуется_для_завершения() {
+    fn a_removed_member_is_not_needed_to_finish() {
         let pool = fresh_pool();
         let conn = pool.connection();
         snap(&conn);
@@ -3151,30 +3211,30 @@ mod p1_removed_recipient {
 
         assert!(
             DeliveryFanoutRepo::all_settled(&conn, "chat", "msg").unwrap(),
-            "рассылка зависла из-за исключённого",
+            "the fanout hangs on a removed member",
         );
         assert_ne!(
             state_of(&conn, B), FanoutState::RelayAccepted,
-            "исключённого выдали за доставленного",
+            "a removed member was reported delivered",
         );
     }
 
     /// A failed removal does not touch the recipient: delivery may be
     /// stopped ONLY after a confirmed membership change.
     #[test]
-    fn несостоявшееся_удаление_не_снимает_получателя() {
+    fn a_failed_removal_keeps_the_recipient() {
         let pool = fresh_pool();
         let conn = pool.connection();
         snap(&conn);
         // The removal was not applied — cancel_recipient is not called at all.
         let todo = DeliveryFanoutRepo::outstanding(&conn, "chat", "msg").unwrap();
-        assert!(todo.contains(&B.to_string()), "получатель снят без подтверждённого удаления");
+        assert!(todo.contains(&B.to_string()), "the recipient was dropped without a confirmed removal");
         assert_eq!(state_of(&conn, B), FanoutState::Pending);
     }
 
     /// Cancellation survives a restart: the removed one does not return to work.
     #[test]
-    fn отмена_переживает_перезапуск() {
+    fn a_cancel_survives_a_restart() {
         let mut p = std::env::temp_dir();
         p.push(format!("alpha_removed_restart_{}.db", uuid::Uuid::new_v4()));
         {
@@ -3190,7 +3250,7 @@ mod p1_removed_recipient {
             let todo = DeliveryFanoutRepo::outstanding(&conn, "chat", "msg").unwrap();
             assert!(
                 !todo.contains(&B.to_string()),
-                "исключённый вернулся в работу после перезапуска",
+                "a removed member came back after a restart",
             );
         }
         let _ = std::fs::remove_file(&p);
@@ -3254,6 +3314,8 @@ mod search_tests {
         ).unwrap();
     }
 
+    // The search samples are Cyrillic on purpose: case folding and word starts must
+    // work beyond ASCII.
     #[test]
     fn finds_word_starts_in_any_case_and_follows_edits_and_deletes() {
         let conn = db();
@@ -3434,5 +3496,58 @@ mod export_pages {
         drop(conn);
         drop(pool);
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod countdown_tests {
+    use super::*;
+
+    fn db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migrations::run_migrations(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO contacts (id, nostr_pubkey, created_at, updated_at) VALUES ('self', x'00', 't', 't');
+             INSERT INTO contacts (id, nostr_pubkey, created_at, updated_at) VALUES ('peer', x'01', 't', 't');
+             INSERT INTO chats (id, chat_type, created_at, updated_at) VALUES ('c1', 'direct', 't', 't');",
+        ).unwrap();
+        conn
+    }
+
+    fn put(conn: &Connection, id: &str, sender: &str, ttl: i64, policy: &str) {
+        conn.execute(
+            "INSERT INTO messages(id, chat_id, sender_id, msg_type, content, ttl_seconds, expiry_policy, created_at)
+             VALUES (?1, 'c1', ?2, 'text', 'x', ?3, ?4, '2026-01-01T00:00:00+00:00')",
+            params![id, sender, ttl, policy],
+        ).unwrap();
+    }
+
+    fn expires(conn: &Connection, id: &str) -> Option<String> {
+        conn.query_row("SELECT expires_at FROM messages WHERE id = ?1", params![id], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn our_timed_message_counts_from_its_send_and_a_one_time_one_does_not() {
+        let conn = db();
+        put(&conn, "m", "self", 10, "after_read");
+        conn.execute(
+            "INSERT INTO messages(id, chat_id, sender_id, msg_type, content, ttl_seconds, created_at)
+             VALUES ('m#al1', 'c1', 'self', 'media', 'x', 10, '2026-01-01T00:00:00+00:00')",
+            [],
+        ).unwrap();
+        put(&conn, "once", "self", 10, "view_once");
+        put(&conn, "theirs", "peer", 10, "after_read");
+        assert_eq!(MessageRepo::next_expiry_ms(&conn).unwrap(), None, "nothing counts before it is sent");
+
+        let before = Utc::now();
+        assert_eq!(MessageRepo::start_own_countdown(&conn, "m").unwrap(), 2, "the album items count too");
+        assert_eq!(MessageRepo::start_own_countdown(&conn, "once").unwrap(), 0);
+        assert_eq!(MessageRepo::start_own_countdown(&conn, "theirs").unwrap(), 0, "a received one counts from reading");
+        assert!(expires(&conn, "once").is_none());
+
+        let due = MessageRepo::next_expiry_ms(&conn).unwrap().expect("a countdown runs");
+        let ten = before.timestamp_millis() + 10_000;
+        assert!((ten..ten + 2_000).contains(&due), "due ten seconds after the send: {due}");
+        assert_eq!(MessageRepo::start_own_countdown(&conn, "m").unwrap(), 0, "a countdown starts once");
     }
 }

@@ -110,7 +110,7 @@ class CallActivity : androidx.appcompat.app.AppCompatActivity() {
         setContent {
             val variant by themeViewModel.themeVariant.collectAsState()
             val customTheme by themeViewModel.activeCustom.collectAsState()
-            AlphaTheme(variant = variant, custom = customTheme) {
+            AlphaTheme(variant = variant, custom = customTheme, navigationScrim = false) {
                 val state by viewModel.state.collectAsState()
                 torGate?.let { cancel ->
                     com.alphamessenger.calls.TorCallWarningDialog(onDismiss = { torGate = null; cancel() })

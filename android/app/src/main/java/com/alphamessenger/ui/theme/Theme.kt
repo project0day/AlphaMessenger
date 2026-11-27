@@ -1,6 +1,8 @@
 package com.alphamessenger.ui.theme
 
 import android.app.Activity
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
@@ -9,6 +11,7 @@ import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
@@ -85,6 +88,15 @@ internal fun AlphaColorScheme.toMaterial3() = darkColorScheme(
     onSurface            = textPrimary,
     surfaceVariant       = bgTertiary,
     onSurfaceVariant     = textSecondary,
+    // Menus, dialogs and sheets are drawn on these: left unset they stayed the stock
+    // dark ones, dark text on dark in a light theme.
+    surfaceDim           = bgPrimary,
+    surfaceBright        = bgTertiary,
+    surfaceContainerLowest  = bgPrimary,
+    surfaceContainerLow     = bgSecondary,
+    surfaceContainer        = bgSecondary,
+    surfaceContainerHigh    = bgTertiary,
+    surfaceContainerHighest = bgTertiary,
     outline              = borderLight,
     outlineVariant       = alphaBorder,
     error                = danger,
@@ -116,6 +128,8 @@ fun AlphaTheme(
     typography: androidx.compose.material3.Typography = AlphaTypography,
     /** The user's own theme (built on [variant]); null = the built-in [variant]. */
     custom: CustomTheme? = null,
+    /** Draw the screen colour under the navigation buttons ([NavigationBarScrim]). */
+    navigationScrim: Boolean = true,
     content: @Composable () -> Unit
 ) {
     val customScheme = androidx.compose.runtime.remember(custom) { custom?.scheme() }
@@ -152,21 +166,19 @@ fun AlphaTheme(
         }
         // State read in composition + applied through the single window owner.
         val overlay = SystemBars.fullscreenOverlay
-        val navRequest = SystemBars.navColor
         val statusRequest = SystemBars.statusColor
         val iconsRequest = SystemBars.lightIcons
-        DisposableEffect(overlay, navRequest, statusRequest, iconsRequest, alphaColors.bgBottom) {
-            SystemBars.apply(view, alphaColors.bgBottom, Color.Transparent, variant.isLight)
+        DisposableEffect(overlay, statusRequest, iconsRequest, variant.isLight) {
+            SystemBars.apply(view, Color.Transparent, variant.isLight)
             onDispose { }
         }
-        val latestNav = androidx.compose.runtime.rememberUpdatedState(alphaColors.bgBottom)
         val latestLight = androidx.compose.runtime.rememberUpdatedState(variant.isLight)
         val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
         DisposableEffect(lifecycleOwner, view) {
             val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
                 if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
                     SystemBars.attach((view.context as Activity).window) // drops the stale cache
-                    SystemBars.apply(view, latestNav.value, Color.Transparent, latestLight.value)
+                    SystemBars.apply(view, Color.Transparent, latestLight.value)
                 }
             }
             lifecycleOwner.lifecycle.addObserver(observer)
@@ -179,11 +191,16 @@ fun AlphaTheme(
     CompositionLocalProvider(
         LocalAlphaColorScheme provides alphaColors
     ) {
-        MaterialTheme(
-            colorScheme = m3Colors,
-            typography  = themedTypography,
-            content     = content
-        )
+        MaterialTheme(colorScheme = m3Colors, typography = themedTypography) {
+            if (navigationScrim) {
+                Box(Modifier.fillMaxSize(), propagateMinConstraints = true) {
+                    content()
+                    NavigationBarScrim(alphaColors.bgBottom, Modifier.matchParentSize())
+                }
+            } else {
+                content()
+            }
+        }
     }
 }
 

@@ -485,14 +485,12 @@ impl CatchUpManager {
                                 }
                                 // DIRECT (1:1): re-create the dialog on this new message.
                                 let ah = &raw_event.author_pubkey_hex;
-                                let nm = if ah.len() >= 8 {
-                                    format!("npub…{}", &ah[ah.len() - 8..])
-                                } else { "Контакт".to_string() };
+                                let nm = (ah.len() >= 8).then(|| format!("npub…{}", &ah[ah.len() - 8..]));
                                 let epoch = mls_session.group_epoch(group_id).unwrap_or(0) as i64;
                                 let chat = alpha_database::new_chat(
                                     chat_id.clone(),
                                     alpha_database::models::ChatType::Direct,
-                                    Some(nm),
+                                    nm,
                                     epoch,
                                 );
                                 let _ = alpha_database::ChatRepo::insert(&conn, &chat);
@@ -1281,7 +1279,7 @@ impl CatchUpManager {
                             }
                         }
                     }
-                    tracing::info!("DIR_BOOTSTRAP записан для чата {chat_id}");
+                    tracing::info!("DIR_BOOTSTRAP stored for chat {chat_id}");
                     if let Some(i) = info.as_ref() {
                         alpha_database::policy::record_proven(
                             &conn, &chat_id, &alpha_mls::leaf_binding::proven_owners(&i.members));
@@ -1354,23 +1352,19 @@ impl CatchUpManager {
                 } else { sender_pk_hex };
                 let kv_key = format!("direct_chat_for:{}", sender_pk_hex);
 
-                // Prefer the chat name shipped in the v3 envelope (group
-                // title set by the creator). Fall back to placeholders.
+                // The name the creator shipped in the envelope. An unnamed group
+                // stays unnamed: the app shows its own localized title.
                 let conn = self.db.connection();
-                let display_name = if let Some(ref n) = envelope.name {
-                    if !n.trim().is_empty() { n.clone() }
-                    else if is_group { format!("Группа ({} участников)", member_count) }
-                    else { format!("npub…{}", &sender_pk_hex[sender_pk_hex.len().saturating_sub(8)..]) }
-                } else if is_group {
-                    format!("Группа ({} участников)", member_count)
-                } else {
-                    format!("npub…{}", &sender_pk_hex[sender_pk_hex.len().saturating_sub(8)..])
+                let display_name = match envelope.name.as_ref().filter(|n| !n.trim().is_empty()) {
+                    Some(n) => Some(n.clone()),
+                    None if is_group => None,
+                    None => Some(format!("npub…{}", &sender_pk_hex[sender_pk_hex.len().saturating_sub(8)..])),
                 };
 
                 let chat = new_chat(
                     chat_id.clone(),
                     chat_type,
-                    Some(display_name),
+                    display_name,
                     epoch as i64,
                 );
                 if let Err(e) = ChatRepo::insert(&conn, &chat) {

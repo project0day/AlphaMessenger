@@ -1,5 +1,6 @@
 package com.alphamessenger.ui.chat.v2
 
+import android.os.SystemClock
 import android.view.View
 import com.alphamessenger.R
 import androidx.compose.runtime.Composable
@@ -27,32 +28,79 @@ class KeyboardMotion {
     var heightPx by mutableIntStateOf(0)
         private set
 
+    /** Where the keyboard is heading: its full height while up or rising, zero once it is on its way down. */
+    var targetPx by mutableIntStateOf(0)
+        private set
+
     private var animating = false
     private var from = 0
     private var to = 0
+        set(value) { field = value; targetPx = value }
     /** The open keyboard's height once it stood still. */
     private var settledPx = 0
+    /** The latest height the window reported, and the view to wait on. */
+    private var reported = 0
+    private var host: View? = null
+    /** When the running slide last moved. */
+    private var lastFrameAt = 0L
+
+    // A slide the window cut off (it left, it was covered) may never report its end; one that
+    // stopped moving is taken as over, at the height the window last reported.
+    private val lostEnd = object : Runnable {
+        override fun run() {
+            if (!animating) return
+            val idle = SystemClock.uptimeMillis() - lastFrameAt
+            if (idle < LOST_END_MS) { host?.postDelayed(this, LOST_END_MS - idle); return }
+            animating = false
+            onInsets(reported)
+        }
+    }
 
     internal fun onInsets(imeBottom: Int) {
-        if (animating) to = endHeight(imeBottom)
-        else {
-            heightPx = imeBottom
-            if (imeBottom > 0) settledPx = imeBottom
+        reported = imeBottom
+        if (animating) {
+            to = endHeight(imeBottom)
+            return
         }
+        // A window coming back reports the keyboard taller for a moment, outside any
+        // animation, then corrects it: a taller keyboard counts once it stays so.
+        if (settledPx > 0 && imeBottom > settledPx) {
+            heightPx = settledPx
+            to = settledPx
+            host?.postDelayed({
+                if (!animating && reported == imeBottom) {
+                    heightPx = imeBottom
+                    to = imeBottom
+                    settledPx = imeBottom
+                }
+            }, TALLER_CONFIRM_MS)
+            return
+        }
+        heightPx = imeBottom
+        to = imeBottom
+        if (imeBottom > 0) settledPx = imeBottom
     }
 
     // Reopened quickly, the keyboard announces an end height taller than it is and
     // corrects it only after the slide, while the keyboard itself never grows. A real
-    // size change arrives outside an animation and is taken as it comes.
+    // size change arrives outside an animation and is taken once it stays (onInsets).
     private fun endHeight(imeBottom: Int) =
         if (settledPx > 0 && imeBottom > settledPx) settledPx else imeBottom
 
-    internal fun callback(view: View) = object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+    internal fun callback(view: View): WindowInsetsAnimationCompat.Callback {
+        host = view
+        return animationCallback(view)
+    }
+
+    private fun animationCallback(view: View) = object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
         override fun onPrepare(animation: WindowInsetsAnimationCompat) {
             if (animation.isIme()) {
                 animating = true
                 from = heightPx
                 to = heightPx
+                lastFrameAt = SystemClock.uptimeMillis()
+                view.removeCallbacks(lostEnd)
+                view.postDelayed(lostEnd, LOST_END_MS)
             }
         }
 
@@ -71,12 +119,14 @@ class KeyboardMotion {
             runningAnimations: MutableList<WindowInsetsAnimationCompat>,
         ): WindowInsetsCompat {
             val ime = runningAnimations.firstOrNull { it.isIme() } ?: return insets
+            lastFrameAt = SystemClock.uptimeMillis()
             heightPx = (from + (to - from) * ime.interpolatedFraction).roundToInt()
             return insets
         }
 
         override fun onEnd(animation: WindowInsetsAnimationCompat) {
             if (!animation.isIme()) return
+            view.removeCallbacks(lostEnd)
             animating = false
             heightPx = to
             // A keyboard that really did change size reports it once the slide is over.
@@ -88,7 +138,25 @@ class KeyboardMotion {
         }
     }
 
+    /**
+     * The window left or came back: an animation cut off by it may never report its end,
+     * and the keyboard a returning window brings back arrives without one. The height is
+     * taken from the window as it is.
+     */
+    internal fun resync(view: View) {
+        animating = false
+        view.removeCallbacks(lostEnd)
+        ViewCompat.getRootWindowInsets(view)?.getInsets(WindowInsetsCompat.Type.ime())?.bottom?.let { onInsets(it) }
+    }
+
     private fun WindowInsetsAnimationCompat.isIme() = typeMask and WindowInsetsCompat.Type.ime() != 0
+
+    private companion object {
+        /** How long a taller keyboard must stay so before the bar follows it. */
+        const val TALLER_CONFIRM_MS = 300L
+        /** A keyboard slide takes about a third of this; one silent for this long has ended. */
+        const val LOST_END_MS = 500L
+    }
 }
 
 /**
@@ -159,10 +227,25 @@ private class KeyboardMotionHub(private val content: View) {
 @Composable
 fun BindKeyboardMotion(motion: KeyboardMotion) {
     val view = LocalView.current
-    DisposableEffect(view, motion) {
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(view, motion, lifecycle) {
         val content = view.rootView.findViewById<View>(android.R.id.content) ?: view
         val hub = KeyboardMotionHub.of(content)
         hub.add(motion)
-        onDispose { hub.remove(motion) }
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> motion.resync(content)
+                androidx.lifecycle.Lifecycle.Event.ON_START -> {
+                    motion.resync(content)
+                    ViewCompat.requestApplyInsets(content)
+                }
+                else -> {}
+            }
+        }
+        lifecycle.addObserver(observer)
+        onDispose {
+            lifecycle.removeObserver(observer)
+            hub.remove(motion)
+        }
     }
 }

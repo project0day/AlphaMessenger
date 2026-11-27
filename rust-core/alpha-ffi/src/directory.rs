@@ -226,7 +226,7 @@ mod tests {
             DirectoryDecision::Accept(v) => {
                 assert!(v.iter().any(|(s, n)| s == CAROL && n == N_CAROL));
             }
-            other => panic!("ожидалось принятие, получено {other:?}"),
+            other => panic!("expected acceptance, got {other:?}"),
         }
     }
 
@@ -341,9 +341,9 @@ mod tests {
         let d = c.decide(ALICE, &[entry(BOB, N_BOB), entry(CAROL, N_CAROL)]);
         match d {
             DirectoryDecision::Accept(v) => {
-                assert!(!v.iter().any(|(s, _)| s == CAROL), "исключённый попал в справочник");
+                assert!(!v.iter().any(|(s, _)| s == CAROL), "a removed member got into the directory");
             }
-            other => panic!("ожидалось принятие, получено {other:?}"),
+            other => panic!("expected acceptance, got {other:?}"),
         }
     }
 
@@ -490,7 +490,7 @@ mod ready_tests {
         let r = transport_ready(
             &[ME.into(), A.into()], ME, 5, 5, &|s| m.get(s).cloned(),
         ).unwrap();
-        assert_eq!(r, vec!["npub_a".to_string()], "исключённый попал в получатели");
+        assert_eq!(r, vec!["npub_a".to_string()], "a removed member got into the recipients");
     }
 
     /// Membership unavailable — nowhere to publish.

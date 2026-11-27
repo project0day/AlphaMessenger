@@ -36,6 +36,7 @@ pub mod models;
 pub mod pool;
 pub mod repositories;
 pub mod delivery;
+pub mod early;
 
 // ── Re-exports ─────────────────────────────────────────────────────────────
 
@@ -47,5 +48,5 @@ pub use repositories::{
     ChatRepo, ChunkConfirmation, ContactRepo, KeyValueRepo, KeyPackageRepo, MediaSendKeyRepo, MediaSendObject, MediaSendObjectRepo, MessageRepo, MlsGroupRepo,
     MlsStorageRepo, OutboxEntry, OutboxRepo, PendingMedia, PendingMediaRepo, PendingSend,
     PendingSendRepo, ProcessedEventsRepo, SyncCheckpointRepo, new_chat, new_chat_member, new_contact, new_message,
-    new_ephemeral_message, new_mls_group_row, new_mls_key_package_row,
+    new_ephemeral_message, new_mls_group_row, new_mls_key_package_row, take_gone_media,
 };

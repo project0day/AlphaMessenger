@@ -77,7 +77,7 @@ object MediaOutputFactory {
         // What we EXPECT from the result comes from the plan, not re-derived.
         val expect = expectationFrom(plan, meta, spec, item.isVideo)
         if (validate(target, item.isVideo, expect)) {
-            android.util.Log.i(TAG, "элемент ${item.index}: готовый файл уже есть — работа не повторяется")
+            android.util.Log.i(TAG, "item ${item.index}: the output exists, not redone")
             onProgress(100)
             return@withContext target
         }
@@ -92,7 +92,7 @@ object MediaOutputFactory {
         val produced = runCatching {
             if (item.isVideo) produceVideo(context, item.draft, plan, meta, part, onProgress, onEstimate)
             else produceImage(context, item.draft, spec, part)
-        }.onFailure { android.util.Log.e(TAG, "элемент ${item.index}: подготовка сорвалась", it) }
+        }.onFailure { android.util.Log.e(TAG, "item ${item.index}: preparation failed", it) }
             .getOrDefault(false)
         MediaTrace.event(
             sendId.ifBlank { "-" }, item.index, MediaTrace.PROCESS_END,
@@ -193,7 +193,7 @@ object MediaOutputFactory {
                 }
             }
             if (video == null) {
-                android.util.Log.e(TAG, "проверка: видеодорожки нет — ${file.name}")
+                android.util.Log.e(TAG, "check: no video track in ${file.name}")
                 return@runCatching false
             }
             val mime = video.getString(android.media.MediaFormat.KEY_MIME).orEmpty()
@@ -212,33 +212,33 @@ object MediaOutputFactory {
 
             android.util.Log.i(
                 TAG,
-                "проверка ${file.name}: $mime ${opt(android.media.MediaFormat.KEY_WIDTH)}x" +
-                    "${opt(android.media.MediaFormat.KEY_HEIGHT)} длительность=$durationMs мс " +
-                    "первый штамп=$firstPts мкс transfer=$transfer " +
+                "check ${file.name}: $mime ${opt(android.media.MediaFormat.KEY_WIDTH)}x" +
+                    "${opt(android.media.MediaFormat.KEY_HEIGHT)} duration=$durationMs ms " +
+                    "first pts=$firstPts us transfer=$transfer " +
                     "standard=${opt(android.media.MediaFormat.KEY_COLOR_STANDARD)} " +
                     "range=${opt(android.media.MediaFormat.KEY_COLOR_RANGE)} HDR=$hdrLeft " +
-                    "вес=${file.length()}",
+                    "size=${file.length()}",
             )
 
             when {
                 !mime.startsWith("video/") -> false
                 durationMs <= 0L -> {
-                    android.util.Log.e(TAG, "проверка: нулевая длительность"); false
+                    android.util.Log.e(TAG, "check: zero duration"); false
                 }
                 firstPts < 0L -> {
-                    android.util.Log.e(TAG, "проверка: нет первого пакета"); false
+                    android.util.Log.e(TAG, "check: no first packet"); false
                 }
                 // Off by more than a second and more than a quarter of the
                 // expected length — not encoder rounding but a wrong trim.
                 expect.durationMs > 0 && kotlin.math.abs(durationMs - expect.durationMs) > 1000L &&
                     kotlin.math.abs(durationMs - expect.durationMs) > expect.durationMs / 4 -> {
                     android.util.Log.e(
-                        TAG, "проверка: длительность $durationMs мс вместо ожидаемых ${expect.durationMs} мс",
+                        TAG, "check: duration $durationMs ms instead of the expected ${expect.durationMs} ms",
                     )
                     false
                 }
                 expect.requireSdr && hdrLeft -> {
-                    android.util.Log.e(TAG, "проверка: результат остался HDR, хотя требовалось приведение к SDR")
+                    android.util.Log.e(TAG, "check: the result is still HDR although SDR was required")
                     false
                 }
                 else -> true
@@ -275,7 +275,7 @@ object MediaOutputFactory {
         if (plan.videoGeometryRequested) {
             android.util.Log.e(
                 TAG,
-                "план требует геометрию кадра видео — в V1 не реализовано, результат будет БЕЗ неё",
+                "the plan needs video frame geometry, not implemented: the result goes without it",
             )
         }
         if (plan.changesContent) {

@@ -1032,7 +1032,7 @@ private fun SelfProfileContent(
         ActivityResultContracts.GetContent()
     ) { uri ->
         if (uri != null) {
-            val path = saveAvatarToInternal(ctx, uri)
+            val path = com.alphamessenger.ui.settings.saveOwnPhoto(ctx, uri)
             if (!path.isNullOrBlank()) viewModel?.setMyAvatar(path)
         }
     }

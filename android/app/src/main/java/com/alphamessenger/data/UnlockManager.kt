@@ -162,6 +162,8 @@ class UnlockManager @Inject constructor(
         // already in the DB, so the user sees their bubbles right after unlock —
         // instead of discovering "it never sent".
         runCatching { mediaSendQueue.resume() }
+        // Files of messages deleted while the app was not running leave the phone and the servers.
+        runCatching { repository.cleanUpDeletedMedia() }
 
         // C2 migration trigger: if we have a real key and the DB is still
         // legacy, migrate it to the production DatabaseKey now — after init, before

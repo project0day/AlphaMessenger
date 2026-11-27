@@ -92,20 +92,19 @@ fun SelfProfileScreen(
     // The key is held only while it is shown: a Kotlin string cannot be wiped,
     // so the reference is dropped as soon as it is not needed.
     androidx.compose.runtime.DisposableEffect(Unit) { onDispose { nsec = "" } }
-    var coverPath by remember { mutableStateOf(coverFile(ctx).takeIf { it.exists() }?.absolutePath ?: "") }
+    var coverPath by remember { mutableStateOf("") }
     var videoPath by remember { mutableStateOf("") }
     var avatarSheet by remember { mutableStateOf(false) }
     var videoSource by remember { mutableStateOf<Uri?>(null) }
-    // Bumped on every avatar/cover pick so the shared image cache reloads
-    // in-place (the file path is reused, so a plain state change wouldn't).
-    var mediaVersion by remember { mutableStateOf(0) }
     var busy by remember { mutableStateOf(false) }
     var customStatus by remember { mutableStateOf("") }
     var statusColor by remember { mutableStateOf(0) }
     var statusSheet by remember { mutableStateOf(false) }
     var nameSheet by remember { mutableStateOf(false) }
     var bioSheet by remember { mutableStateOf(false) }
-    var saving by remember { mutableStateOf(false) }
+    var qrSheet by remember { mutableStateOf(false) }
+    var keyOpen by remember { mutableStateOf(false) }
+    var viewerAt by remember { mutableStateOf<Int?>(null) }
 
     LaunchedEffect(Unit) {
         val (b, c, col) = loadStatus(ctx)
@@ -115,34 +114,26 @@ fun SelfProfileScreen(
         runCatching { viewModel.repository.getMyProfile() }.getOrNull()?.let { p ->
             if (name.isBlank()) name = p.displayName
             if (bio.isBlank()) bio = p.bio
-            if (avatarPath.isBlank()) avatarPath = p.avatarPath
             if (npub.isBlank() && p.npub.isNotBlank()) npub = p.npub
         }
-        videoPath = viewModel.repository.myAvatarVideo().takeIf { java.io.File(it).length() > 0 }.orEmpty()
         if (npub.isBlank()) {
             runCatching { viewModel.repository.getIdentityInfo() }.getOrNull()?.npub
                 ?.takeIf { it.isNotBlank() }?.let { npub = it }
         }
     }
+    // The pictures are the core's: shown as it holds them, and again whenever they change.
+    LaunchedEffect(Unit) {
+        suspend fun reload() {
+            val p = viewModel.repository.myPictures()
+            avatarPath = p.photo
+            videoPath = p.video.takeIf { java.io.File(it).length() > 0 }.orEmpty()
+            coverPath = p.cover.takeIf { java.io.File(it).length() > 0 }.orEmpty()
+        }
+        reload()
+        viewModel.repository.profileChanged.collect { reload() }
+    }
     LaunchedEffect(state.displayName) {
         if (state.displayName.isNotBlank() && name.isBlank()) name = state.displayName
-    }
-
-    fun doSave() {
-        if (saving) return
-        saving = true
-        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            val res = runCatching {
-                viewModel.repository.setMyProfile(displayName = name, bio = bio, avatarPath = avatarPath)
-            }
-            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                saving = false
-                snackbarHostState.showSnackbar(
-                    if (res.isSuccess) ctx.getString(R.string.profile_saved)
-                    else ctx.getString(R.string.profile_save_failed, res.exceptionOrNull()?.message ?: ctx.getString(R.string.common_unknown))
-                )
-            }
-        }
     }
 
     // The cropped photo is applied once this screen is resumed and has drawn a
@@ -155,41 +146,31 @@ fun SelfProfileScreen(
         if (result.isSuccessful) croppedAvatar = result.uriContent
     }
     val profileLifecycle = androidx.compose.ui.platform.LocalLifecycleOwner.current.lifecycle
-    androidx.compose.runtime.LaunchedEffect(croppedAvatar) {
-        val picked = croppedAvatar ?: return@LaunchedEffect
-        profileLifecycle.withResumed { }
-        androidx.compose.runtime.withFrameNanos { }
-        croppedAvatar = null
-        run {
-            picked.let { uri ->
-                val path = saveAvatarToInternal(ctx, uri)
-                if (path != null) {
-                    avatarPath = path
-                    mediaVersion++
-                    // A new photo replaces a video avatar.
-                    val hadVideo = videoPath.isNotBlank()
-                    videoPath = ""
-                    scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                        if (hadVideo) viewModel.repository.setMyAvatarVideo("")
-                        runCatching { viewModel.repository.setMyProfile(avatarPath = path) }
-                        dropOldAvatarVideos(ctx, keep = emptySet())
-                    }
-                }
+    // One long-lived collector: clearing the pending crop must not cancel the save in flight.
+    LaunchedEffect(Unit) {
+        androidx.compose.runtime.snapshotFlow { croppedAvatar }.collect { picked ->
+            if (picked == null) return@collect
+            profileLifecycle.withResumed { }
+            androidx.compose.runtime.withFrameNanos { }
+            val path = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { saveOwnPhoto(ctx, picked) }
+            croppedAvatar = null
+            if (path != null) {
+                // A new photo replaces a video avatar.
+                avatarPath = path
+                videoPath = ""
+                viewModel.repository.setMyPhoto(path)
             }
         }
     }
     val coverCrop = rememberLauncherForActivityResult(
         contract = com.canhub.cropper.CropImageContract(),
     ) { result ->
-        if (result.isSuccessful) {
-            result.uriContent?.let { uri ->
-                saveCoverToInternal(ctx, uri)?.let { path ->
-                    coverPath = path
-                    mediaVersion++
-                    scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                        runCatching { viewModel.repository.setMyCover(path) }
-                    }
-                }
+        val uri = result.uriContent
+        if (result.isSuccessful && uri != null) scope.launch {
+            val path = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { saveCoverToInternal(ctx, uri) }
+            if (path != null) {
+                coverPath = path
+                viewModel.repository.setMyCoverPicture(path)
             }
         }
     }
@@ -198,12 +179,39 @@ fun SelfProfileScreen(
         androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia(),
     ) { uri -> if (uri != null) videoSource = uri }
 
-    val status: ProfileStatus = if (busy) ProfileStatus.Dnd else ProfileStatus.Online
+    val pages = remember(avatarPath, videoPath, coverPath) {
+        com.alphamessenger.ui.profile.avatarPages(avatarPath, videoPath, coverPath)
+    }
+    viewerAt?.let { at ->
+        com.alphamessenger.ui.profile.AvatarViewer(
+            name, pages, at,
+            onDismiss = { viewerAt = null },
+            onRemove = { page ->
+                when {
+                    page.path == coverPath -> { coverPath = ""; viewModel.repository.setMyCoverPicture("") }
+                    page.isVideo -> { videoPath = ""; viewModel.repository.removeMyVideoAvatar() }
+                    else -> { avatarPath = ""; videoPath = ""; viewModel.repository.removeMyAvatar() }
+                }
+                if (pages.size <= 1) viewerAt = null
+            },
+        )
+    }
+    if (qrSheet) {
+        com.alphamessenger.ui.chatlist.ShareNpubSheet(
+            npub = npub,
+            colors = colors,
+            onDismiss = { qrSheet = false },
+            loadCode = { viewModel.repository.contactCode() },
+        )
+    }
+
+    val online = stringResource(R.string.presence_online)
+    val dnd = stringResource(R.string.profile_dnd)
+    val statusLine = listOf(if (busy) dnd else online, customStatus.trim()).filter { it.isNotBlank() }.joinToString(" · ")
 
     Scaffold(
         containerColor = colors.bgPrimary,
         contentWindowInsets = WindowInsets(0),
-        topBar = { SelfTopBar(colors, onBack, saving, ::doSave) },
         snackbarHost = { SnackbarHost(snackbarHostState, modifier = Modifier.navigationBarsPadding()) },
     ) { inner ->
         Column(
@@ -211,38 +219,65 @@ fun SelfProfileScreen(
                 .fillMaxSize()
                 .padding(inner)
                 .navigationBarsPadding()
-                .imePadding()
                 .verticalScroll(rememberScrollState()),
         ) {
-            ProfileContent(
-                displayName = name,
-                avatarPath = avatarPath,
-                npub = npub,
+            SelfHero(
                 colors = colors,
-                coverPath = coverPath,
-                videoPath = videoPath,
-                status = status,
-                statusText = customStatus,
-                statusColor = statusColor.takeIf { it != 0 },
-                mediaVersion = mediaVersion,
-                isSelf = true,
-                showAvatarDot = false,
-                onChangeCover = { coverCrop.launch(coverCropOptions(ctx)) },
-                onChangeAvatar = { avatarSheet = true },
-                onSetStatus = { statusSheet = true },
-                onEditName = { nameSheet = true },
-                bio = bio,
-                onEditBio = { bioSheet = true },
+                name = name,
+                npub = npub,
+                photo = avatarPath,
+                video = videoPath,
+                cover = coverPath,
+                statusLine = statusLine,
+                statusDot = ownStatusDot(busy, statusColor),
+                onBack = onBack,
+                onCover = { coverCrop.launch(coverCropOptions(ctx)) },
+                onAvatar = { avatarSheet = true },
+                onCopyKey = {
+                    val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("npub", npub))
+                    scope.launch { snackbarHostState.showSnackbar(ctx.getString(R.string.common_copied)) }
+                },
             )
 
-            Spacer(Modifier.height(6.dp))
-            SectionLabel(stringResource(R.string.selfprofile_nsec_title), colors)
+            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SelfTile(AlphaIcons.Outlined.PhotoCamera, stringResource(R.string.common_avatar), colors, Modifier.weight(1f)) { avatarSheet = true }
+                SelfTile(AlphaIcons.Outlined.EmojiEmotions, stringResource(R.string.profile_status_title), colors, Modifier.weight(1f)) { statusSheet = true }
+                SelfTile(AlphaIcons.Outlined.QrCode, stringResource(R.string.selfprofile_qr), colors, Modifier.weight(1f)) { qrSheet = true }
+                SelfTile(AlphaIcons.Outlined.Share, stringResource(R.string.common_share), colors, Modifier.weight(1f)) {
+                    scope.launch {
+                        val code = runCatching { viewModel.repository.contactCode() }.getOrDefault(npub)
+                        val send = android.content.Intent(android.content.Intent.ACTION_SEND)
+                            .setType("text/plain").putExtra(android.content.Intent.EXTRA_TEXT, code)
+                        ctx.startActivity(android.content.Intent.createChooser(send, ctx.getString(R.string.common_share)))
+                    }
+                }
+            }
+
+            SelfSectionTitle(stringResource(R.string.profile_title), colors)
+            SelfCard(colors) {
+                SelfRow(name.ifBlank { stringResource(R.string.profile_name_question) }, stringResource(R.string.common_name), colors, placeholder = name.isBlank()) { nameSheet = true }
+                SelfCardDivider(colors)
+                SelfRow(bio.ifBlank { stringResource(R.string.profile_bio_add) }, stringResource(R.string.profile_bio_label), colors, placeholder = bio.isBlank()) { bioSheet = true }
+            }
+
+            SelfSectionTitle(stringResource(R.string.selfprofile_section_security), colors)
             val withOwner: (() -> Unit) -> Unit = { action ->
                 val act = ctx as? androidx.fragment.app.FragmentActivity
                 if (act == null) action()
                 else com.alphamessenger.util.DeviceAuth.confirm(act, ctx.getString(R.string.selfprofile_nsec_auth), action)
             }
-            SecretKeyBlock(
+            SelfCard(colors) {
+                SelfRow(
+                    stringResource(R.string.selfprofile_nsec_row), stringResource(R.string.selfprofile_nsec_hint), colors,
+                    lead = { DangerBadge(AlphaIcons.Outlined.Lock) },
+                ) {
+                    if (keyOpen) { keyOpen = false; nsecRevealed = false; nsec = "" } else keyOpen = true
+                }
+            }
+            if (keyOpen) {
+                Spacer(Modifier.height(10.dp))
+                SecretKeyBlock(
                 revealed = nsecRevealed,
                 value = nsec,
                 colors = colors,
@@ -269,18 +304,20 @@ fun SelfProfileScreen(
                         }
                     } }
                 },
-            )
+                )
+            }
 
             Spacer(Modifier.height(36.dp))
         }
     }
 
     if (statusSheet) {
-        StatusSheet(
+        OwnStatusSheet(
             colors = colors,
             initialBusy = busy,
             initialCustom = customStatus,
             initialColor = statusColor,
+            palette = STATUS_COLORS,
             onDismiss = { statusSheet = false },
             onSave = { newBusy, newCustom, newColor ->
                 busy = newBusy
@@ -318,20 +355,28 @@ fun SelfProfileScreen(
     }
 
     if (avatarSheet) {
-        AvatarKindSheet(
+        val hasAvatar = avatarPath.isNotBlank()
+        OwnAvatarSheet(
             colors = colors,
-            hasVideo = videoPath.isNotBlank(),
+            name = name,
+            seed = npub,
+            photo = avatarPath,
+            video = videoPath,
             onDismiss = { avatarSheet = false },
+            onOpen = if (hasAvatar) ({ avatarSheet = false; viewerAt = 0 }) else null,
             onPhoto = { pendingPick = "photo"; avatarSheet = false },
             onVideo = { pendingPick = "video"; avatarSheet = false },
-            onRemoveVideo = {
+            onRemoveVideo = if (videoPath.isNotBlank()) ({
                 avatarSheet = false
                 videoPath = ""
-                scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    viewModel.repository.setMyAvatarVideo("")
-                    dropOldAvatarVideos(ctx, keep = setOf(avatarPath))
-                }
-            },
+                viewModel.repository.removeMyVideoAvatar()
+            }) else null,
+            onRemove = if (hasAvatar) ({
+                avatarSheet = false
+                avatarPath = ""
+                videoPath = ""
+                viewModel.repository.removeMyAvatar()
+            }) else null,
         )
     }
 
@@ -344,12 +389,7 @@ fun SelfProfileScreen(
                 videoSource = null
                 avatarPath = cover.absolutePath
                 videoPath = video.absolutePath
-                mediaVersion++
-                scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    runCatching { viewModel.repository.setMyProfile(avatarPath = cover.absolutePath) }
-                    viewModel.repository.setMyAvatarVideo(video.absolutePath)
-                    dropOldAvatarVideos(ctx, keep = setOf(video.absolutePath, cover.absolutePath))
-                }
+                viewModel.repository.setMyVideoAvatar(video.absolutePath, cover.absolutePath)
             },
         )
     }
@@ -386,58 +426,6 @@ fun SelfProfileScreen(
                 nameSheet = false
             },
         )
-    }
-}
-
-/** Earlier video avatars and their covers — only the current ones stay. */
-private fun dropOldAvatarVideos(ctx: Context, keep: Set<String>) {
-    java.io.File(ctx.filesDir, "profile").listFiles()?.forEach { f ->
-        val ours = f.name.startsWith("avatar_video_") || f.name.startsWith("avatar_cover_")
-        if (ours && f.absolutePath !in keep) f.delete()
-    }
-}
-
-/** Avatar: a photo, or a short looping video. */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun AvatarKindSheet(
-    colors: AlphaColorScheme,
-    hasVideo: Boolean,
-    onDismiss: () -> Unit,
-    onPhoto: () -> Unit,
-    onVideo: () -> Unit,
-    onRemoveVideo: () -> Unit,
-) {
-    com.alphamessenger.ui.components.AlphaSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-    ) {
-        Column(modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(vertical = 12.dp)) {
-            Text(stringResource(R.string.common_avatar), color = colors.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
-            AvatarKindRow(AlphaIcons.Outlined.PhotoCamera, stringResource(R.string.video_avatar_pick_photo), colors.textPrimary, colors, onPhoto)
-            AvatarKindRow(AlphaIcons.Outlined.Videocam, stringResource(R.string.video_avatar_pick_video), colors.textPrimary, colors, onVideo)
-            if (hasVideo) AvatarKindRow(AlphaIcons.Outlined.DeleteOutline, stringResource(R.string.video_avatar_remove), colors.danger, colors, onRemoveVideo)
-            Spacer(Modifier.height(12.dp))
-        }
-    }
-}
-
-@Composable
-private fun AvatarKindRow(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    tint: androidx.compose.ui.graphics.Color,
-    colors: AlphaColorScheme,
-    onClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, null, tint = tint, modifier = Modifier.size(22.dp))
-        Spacer(Modifier.size(16.dp))
-        Text(label, color = tint, fontSize = 15.sp)
     }
 }
 
@@ -488,133 +476,6 @@ private fun NameSheet(
     }
 }
 
-@Composable
-private fun SelfTopBar(colors: AlphaColorScheme, onBack: () -> Unit, saving: Boolean, onSave: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(colors.bgPrimary)
-            .padding(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
-                Icon(AlphaIcons.AutoMirrored.Outlined.ArrowBack, contentDescription = stringResource(R.string.common_back), tint = colors.textPrimary)
-            }
-            Text(stringResource(R.string.profile_title), color = colors.textPrimary, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            Box(
-                modifier = Modifier
-                    .padding(end = 14.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(colors.accent)
-                    .clickable(enabled = !saving, onClick = onSave)
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (saving) {
-                    CircularProgressIndicator(strokeWidth = 2.dp, color = colors.bgPrimary, modifier = Modifier.size(14.dp))
-                } else {
-                    Text(stringResource(R.string.common_save), color = colors.bgPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun StatusSheet(
-    colors: AlphaColorScheme,
-    initialBusy: Boolean,
-    initialCustom: String,
-    initialColor: Int,
-    onDismiss: () -> Unit,
-    onSave: (Boolean, String, Int) -> Unit,
-) {
-    var busy by remember { mutableStateOf(initialBusy) }
-    var custom by remember { mutableStateOf(initialCustom) }
-    var color by remember { mutableStateOf(initialColor) }
-    com.alphamessenger.ui.components.AlphaSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-    ) {
-        Column(modifier = Modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(20.dp)) {
-            Text(stringResource(R.string.profile_status_title), color = colors.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(16.dp))
-            OutlinedTextField(
-                value = custom,
-                onValueChange = { custom = it.take(80) },
-                placeholder = { Text(stringResource(R.string.profile_status_hint), color = colors.textMuted) },
-                singleLine = true,
-                shape = RoundedCornerShape(22.dp),
-                colors = textFieldColors(colors),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(16.dp))
-            Text(stringResource(R.string.profile_status_color), color = colors.textMuted, fontSize = 12.sp)
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                for (c in STATUS_COLORS) {
-                    val selected = c == color
-                    Box(
-                        modifier = Modifier
-                            .size(if (selected) 34.dp else 28.dp)
-                            .clip(CircleShape)
-                            .background(androidx.compose.ui.graphics.Color(c))
-                            .clickable { color = if (selected) 0 else c },
-                    )
-                }
-            }
-            Spacer(Modifier.height(16.dp))
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(stringResource(R.string.profile_dnd), color = colors.textPrimary, fontSize = 15.sp)
-                    Text(stringResource(R.string.profile_dnd_desc), color = colors.textMuted, fontSize = 12.sp)
-                }
-                Switch(checked = busy, onCheckedChange = { busy = it })
-            }
-            Spacer(Modifier.height(20.dp))
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(22.dp))
-                    .background(colors.accent)
-                    .clickable { onSave(busy, custom.trim(), color) }
-                    .padding(vertical = 14.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(stringResource(R.string.common_save), color = colors.bgPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            }
-            Spacer(Modifier.height(10.dp))
-            // One-tap return to plain "Online": clears text, colour and DND.
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(22.dp))
-                    .clickable { onSave(false, "", 0) }
-                    .padding(vertical = 12.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(stringResource(R.string.profile_reset_status), color = colors.textMuted, fontSize = 14.sp)
-            }
-            Spacer(Modifier.height(28.dp))
-        }
-    }
-}
-
-@Composable
-private fun SectionLabel(text: String, colors: AlphaColorScheme) {
-    Text(
-        text,
-        color = colors.accent,
-        fontSize = 12.sp,
-        fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 6.dp),
-    )
-}
-
 /**
  * Preset indicator colours (ARGB ints) offered in the status sheet. Green is
  * intentionally omitted — it is reserved for the REAL "online" state, so a
@@ -631,11 +492,6 @@ private val STATUS_COLORS = listOf(
     0xFFFF8A3D.toInt(), // orange
     0xFFEDEFF2.toInt(), // white
 )
-
-// --- Cover storage (local, cacheDir/media) ---
-
-private fun coverFile(ctx: Context): java.io.File =
-    java.io.File(java.io.File(ctx.cacheDir, "media").apply { mkdirs() }, "cover.jpg")
 
 private fun avatarCropOptions(ctx: Context) = com.canhub.cropper.CropImageContractOptions(
     uri = null,
@@ -681,12 +537,13 @@ private fun coverCropOptions(ctx: Context) = com.canhub.cropper.CropImageContrac
 )
 
 /**
- * Copy + downscale the picked image to `cacheDir/media/cover.jpg` at 3:1
- * (1080×360 center-crop JPEG q85). Local only. Mirrors saveAvatarToInternal.
+ * Copy + downscale the picked image to a 3:1 center-crop JPEG stored under its
+ * content name (see [com.alphamessenger.data.OwnPictureFiles]).
  */
 internal fun saveCoverToInternal(ctx: Context, uri: Uri): String? {
-    val target = coverFile(ctx)
-    val tmp = java.io.File(target.parentFile, "cover.jpg.tmp")
+    val files = com.alphamessenger.data.OwnPictureFiles
+    val target = files.scratch(ctx, files.COVER)
+    val tmp = java.io.File(target.parentFile, "${target.name}.tmp")
     return try {
         ctx.contentResolver.openInputStream(uri)?.use { input ->
             java.io.FileOutputStream(tmp).use { out -> input.copyTo(out) }
@@ -727,7 +584,7 @@ internal fun saveCoverToInternal(ctx: Context, uri: Uri): String? {
             scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 88, out)
         }
         scaled.recycle()
-        if (!target.exists() || target.length() <= 0L) null else target.absolutePath
+        if (!target.exists() || target.length() <= 0L) null else files.adopt(ctx, target, files.COVER)
     } catch (t: Throwable) {
         null
     } finally {

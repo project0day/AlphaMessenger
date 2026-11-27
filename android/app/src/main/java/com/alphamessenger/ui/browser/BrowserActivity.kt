@@ -174,7 +174,7 @@ class BrowserActivity : androidx.appcompat.app.AppCompatActivity() {
             setContent {
                 val variant by themeViewModel.themeVariant.collectAsState()
                 val customTheme by themeViewModel.activeCustom.collectAsState()
-                AlphaTheme(variant = variant, custom = customTheme) { BrowserScreen(this@BrowserActivity, stage) }
+                AlphaTheme(variant = variant, custom = customTheme, navigationScrim = false) { BrowserScreen(this@BrowserActivity, stage) }
             }
         }, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         setContentView(root)

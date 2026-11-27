@@ -8,7 +8,12 @@ import android.view.WindowManager
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -93,12 +98,52 @@ fun AlphaMapView(
     controller: AlphaMapController? = null,
     onCameraIdle: ((Double, Double) -> Unit)? = null,
 ) {
+    // A TextureView map loses its surface while the app is in the background and draws
+    // nothing after it comes back: a fresh one takes over where the old one stood.
+    var generation by remember { mutableIntStateOf(0) }
+    var camera by remember { mutableStateOf<CameraPosition?>(null) }
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle) {
+        var stopped = false
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> stopped = true
+                Lifecycle.Event.ON_START -> if (stopped) {
+                    stopped = false
+                    generation++
+                }
+                else -> Unit
+            }
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
+    key(generation) {
+        MapInstance(
+            camera ?: CameraPosition.Builder().target(LatLng(lat, lng)).zoom(zoom).build(),
+            lat, lng, dark, showMarker, controller, onCameraIdle, { camera = it }, modifier,
+        )
+    }
+}
+
+@Composable
+private fun MapInstance(
+    start: CameraPosition,
+    lat: Double,
+    lng: Double,
+    dark: Boolean,
+    showMarker: Boolean,
+    controller: AlphaMapController?,
+    onCameraIdle: ((Double, Double) -> Unit)?,
+    onLeave: (CameraPosition) -> Unit,
+    modifier: Modifier,
+) {
     val ctx = LocalContext.current
     val mapView = remember {
         AlphaMapInit.ensure(ctx)
         val options = MapLibreMapOptions.createFromAttributes(ctx)
             .textureMode(true) // a TextureView composes cleanly inside Compose/Dialogs
-            .camera(CameraPosition.Builder().target(LatLng(lat, lng)).zoom(zoom).build())
+            .camera(start)
             .compassEnabled(false)
             .logoEnabled(false)
             .attributionEnabled(true) // OSM/OpenMapTiles attribution is required
@@ -106,28 +151,37 @@ fun AlphaMapView(
             .tiltGesturesEnabled(false)
         MapView(ctx, options).also { it.onCreate(null) }
     }
+    var shown by remember { mutableStateOf<MapLibreMap?>(null) }
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle, mapView) {
+        var started = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> mapView.onStart()
+                Lifecycle.Event.ON_START -> { mapView.onStart(); started = true }
                 Lifecycle.Event.ON_RESUME -> mapView.onResume()
                 Lifecycle.Event.ON_PAUSE -> mapView.onPause()
-                Lifecycle.Event.ON_STOP -> mapView.onStop()
+                Lifecycle.Event.ON_STOP -> {
+                    shown?.cameraPosition?.let(onLeave)
+                    mapView.onStop()
+                    started = false
+                }
                 else -> Unit
             }
         }
         lifecycle.addObserver(observer)
         onDispose {
             lifecycle.removeObserver(observer)
-            controller?.map = null
-            mapView.onPause()
-            mapView.onStop()
+            if (controller?.map === shown) controller?.map = null
+            if (started) {
+                mapView.onPause()
+                mapView.onStop()
+            }
             mapView.onDestroy()
         }
     }
     LaunchedEffect(mapView, dark) {
         mapView.getMapAsync { map ->
+            shown = map
             controller?.map = map
             map.setStyle(Style.Builder().fromUri(AlphaMapStyle.url(dark))) {
                 map.clear()

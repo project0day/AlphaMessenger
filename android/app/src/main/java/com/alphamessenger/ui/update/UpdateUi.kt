@@ -47,7 +47,14 @@ import kotlinx.coroutines.launch
  * [expanded] also shows what is new (settings); the chat list keeps it to one line until tapped.
  */
 @Composable
-fun UpdateCard(colors: AlphaColorScheme, repo: AlphaCoreRepository, modifier: Modifier = Modifier, expanded: Boolean = false) {
+fun UpdateCard(
+    colors: AlphaColorScheme,
+    repo: AlphaCoreRepository,
+    modifier: Modifier = Modifier,
+    expanded: Boolean = false,
+    /** Off where the notes are already on screen (the update's own post). */
+    notes: Boolean = true,
+) {
     val ctx = LocalContext.current
     FeedStore.load(ctx)
     val post = remember(FeedStore.posts, AppUpdate.laterTick) { if (expanded) AppUpdate.available(ctx) else AppUpdate.offerInList(ctx) } ?: return
@@ -103,7 +110,7 @@ fun UpdateCard(colors: AlphaColorScheme, repo: AlphaCoreRepository, modifier: Mo
             LinearProgressIndicator(progress = { p }, modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
                 color = colors.accent, trackColor = colors.bgTertiary)
         }
-        if (open && post.body.isNotBlank()) {
+        if (notes && open && post.body.isNotBlank()) {
             Spacer(Modifier.height(10.dp))
             Text(stringResource(R.string.update_whats_new), color = colors.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
             com.alphamessenger.ui.chat.text.MessageText(

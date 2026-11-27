@@ -16,13 +16,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
 import com.alphamessenger.ui.theme.AlphaColorScheme
 
@@ -40,11 +37,6 @@ import com.alphamessenger.ui.theme.AlphaColorScheme
  *      (overlay per spec — the InputBar survives underneath).
  *   3. [bottomPanel] — ONE slot whose height = [BottomSurfaceState.bottomPanelHeight]
  *      and whose CONTENT follows [BottomSurfaceState.panelMode].
- *
- * ## THE ONE actuation
- * panelMode drives IME show/hide + focus — nothing else does. Pure state:
- *   KEYBOARD → focus + show; EMOJI/ATTACH/NONE → hide + clear focus;
- *   RECORDING → keep the IME only if it was up when the lock started.
  */
 @Composable
 fun BottomSurfaceV2(
@@ -63,29 +55,6 @@ fun BottomSurfaceV2(
     /** Reply / edit / forward / link preview, above the input row: no recording bar covers it. */
     header: @Composable () -> Unit = {},
 ) {
-    val keyboardController = LocalSoftwareKeyboardController.current
-    val focusManager = LocalFocusManager.current
-
-    LaunchedEffect(state.panelMode) {
-        when (state.panelMode) {
-            PanelMode.KEYBOARD -> {
-                state.focusInput()
-            }
-            PanelMode.EMOJI, PanelMode.ATTACH, PanelMode.NONE -> {
-                state.releaseInput()
-                keyboardController?.hide()
-                focusManager.clearFocus(force = true)
-            }
-            PanelMode.RECORDING -> {
-                if (!state.recordingKeepsKb) {
-                    state.releaseInput()
-                    keyboardController?.hide()
-                    focusManager.clearFocus(force = true)
-                }
-            }
-        }
-    }
-
     Column(modifier = Modifier.fillMaxWidth()) {
         if (!onGlass) HorizontalDivider(thickness = 0.5.dp, color = colors.alphaBorder)
 

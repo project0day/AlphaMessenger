@@ -22,12 +22,7 @@ internal fun MediaWindowEffect(secure: Boolean) {
     val view = LocalView.current
     val context = LocalContext.current
 
-    DisposableEffect(Unit) {
-        SystemBars.fullscreenOverlay = true
-        onDispose {
-            SystemBars.fullscreenOverlay = false
-        }
-    }
+    com.alphamessenger.ui.theme.BlackSystemBars()
 
     DisposableEffect(view, secure) {
         val dialogWindow = (view.parent as? DialogWindowProvider)?.window

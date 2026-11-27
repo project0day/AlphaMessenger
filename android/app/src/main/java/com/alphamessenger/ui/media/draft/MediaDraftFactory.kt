@@ -32,13 +32,13 @@ object MediaDraftFactory {
 
     sealed class Failure(message: String) : Exception(message) {
         /** URI unavailable: deleted, provider silent, or grants revoked. */
-        class Unreadable(val uri: Uri) : Failure("URI недоступен для чтения: $uri")
+        class Unreadable(val uri: Uri) : Failure("URI not readable: $uri")
 
         /** Over the sending limit for its type: not copied at all. */
-        class TooLarge(val uri: Uri) : Failure("Файл больше допустимого размера: $uri")
+        class TooLarge(val uri: Uri) : Failure("File over the size limit: $uri")
 
         /** Grants are transient and a local copy could not be made. */
-        class CopyFailed(val uri: Uri) : Failure("Не удалось создать локальную копию: $uri")
+        class CopyFailed(val uri: Uri) : Failure("Could not make a local copy: $uri")
     }
 
     suspend fun fromUri(

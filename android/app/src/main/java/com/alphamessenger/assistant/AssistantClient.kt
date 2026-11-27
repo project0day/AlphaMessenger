@@ -107,6 +107,8 @@ object AssistantClient {
         tools: JSONArray? = null,
         /** A tool the model must call in this reply (when the request leaves no doubt). */
         force: String? = null,
+        /** The longest answer asked for; null leaves it to the service. */
+        maxTokens: Int? = null,
         /** The model began writing a call to this tool (its arguments are still coming). */
         onToolStart: (String) -> Unit = {},
         onDelta: (thinking: String, answer: String) -> Unit,
@@ -117,7 +119,8 @@ object AssistantClient {
             val o = JSONObject().put("role", t.role)
             when {
                 t.toolCallId != null -> o.put("tool_call_id", t.toolCallId).put("content", t.text)
-                t.toolCalls.isNotEmpty() -> o.put("content", t.text.ifBlank { JSONObject.NULL })
+                // An empty string, never null: some services refuse a null content.
+                t.toolCalls.isNotEmpty() -> o.put("content", t.text)
                     .put("tool_calls", JSONArray(t.toolCalls.map { c ->
                         JSONObject().put("id", c.id).put("type", "function")
                             .put("function", JSONObject().put("name", c.name).put("arguments", c.arguments))
@@ -132,6 +135,8 @@ object AssistantClient {
             messages.put(o)
         }
         val payload = JSONObject().put("model", p.model).put("messages", messages).put("stream", true)
+        // Some services cut every answer at a small default length unless told otherwise.
+        if (maxTokens != null) payload.put("max_tokens", maxTokens)
         if (tools != null && tools.length() > 0) {
             payload.put("tools", tools)
             if (force != null) payload.put("tool_choice", JSONObject().put("type", "function").put("function", JSONObject().put("name", force)))

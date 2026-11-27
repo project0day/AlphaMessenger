@@ -55,7 +55,7 @@ impl TransportObjectId {
         let t = s.trim();
         if t.len() != 64 || !t.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(MediaError::SerializationError(format!(
-                "transportObjectId: ожидались 64 шестнадцатеричных символа, получено {} симв.",
+                "transportObjectId: expected 64 hex characters, got {}",
                 t.len()
             )));
         }
@@ -667,7 +667,7 @@ mod t2_identity {
     #[test]
     fn t2_parse_rejects_everything_else() {
         for bad in ["", "zz", &H[..63], &format!("{H}f"), &format!("{}g", &H[..63])] {
-            assert!(TransportObjectId::parse(bad).is_err(), "принято: {bad}");
+            assert!(TransportObjectId::parse(bad).is_err(), "accepted: {bad}");
         }
     }
 
@@ -689,7 +689,7 @@ mod t2_identity {
     #[test]
     fn t2_missing_identity_is_legacy_not_error() {
         let json = r#"{"locations":[],"ciphertext_size":1,"original_size":1,"hash":"ab"}"#;
-        let c: StreamChunkInfo = serde_json::from_str(json).expect("legacy ref обязан читаться");
+        let c: StreamChunkInfo = serde_json::from_str(json).expect("a legacy ref must parse");
         assert!(c.transport_object_id.is_none());
     }
 

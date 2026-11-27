@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn a_link_comes_back_as_it_went() {
         for channel in [true, false] {
-            let inv = sample(channel, "Северный ветер");
+            let inv = sample(channel, "Vent du Nord — été");
             let link = encode(&inv).unwrap();
             assert!(link.starts_with(if channel { "alpha://channel/" } else { "alpha://group/" }));
             assert!(link.len() < 170, "{} chars: {link}", link.len());
@@ -132,10 +132,10 @@ mod tests {
 
     #[test]
     fn a_long_name_is_cut_on_a_character() {
-        let inv = sample(true, &"ё".repeat(100));
+        let inv = sample(true, &"é".repeat(100));
         let back = decode(&encode(&inv).unwrap()).unwrap();
         assert!(back.name.len() <= NAME_MAX);
-        assert!(back.name.chars().all(|c| c == 'ё'));
+        assert!(back.name.chars().all(|c| c == 'é'));
     }
 
     #[test]

@@ -106,6 +106,8 @@ fun CameraStudioScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
+    com.alphamessenger.ui.theme.BlackSystemBars()
+    com.alphamessenger.ui.chat.v2.TakeKeyboardFromBelow()
 
     // SD / HD is one remembered choice, the same as in the review screen.
     val mediaQuality = com.alphamessenger.ui.media.export.MediaQuality

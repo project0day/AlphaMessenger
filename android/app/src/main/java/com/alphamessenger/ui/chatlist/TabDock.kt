@@ -234,6 +234,14 @@ fun BottomTabDock(
     colors: AlphaColorScheme,
     modifier: Modifier = Modifier,
 ) {
+    // The dock's haze reaches under the navigation buttons: no scrim over it.
+    if (visible) {
+        androidx.compose.runtime.DisposableEffect(Unit) {
+            val owner = Any()
+            com.alphamessenger.ui.theme.SystemBars.requestNav(owner, androidx.compose.ui.graphics.Color.Transparent)
+            onDispose { com.alphamessenger.ui.theme.SystemBars.releaseNav(owner) }
+        }
+    }
     AnimatedVisibility(
         visible = visible,
         modifier = modifier,

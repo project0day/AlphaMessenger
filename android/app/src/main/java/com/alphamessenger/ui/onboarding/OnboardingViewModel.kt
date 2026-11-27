@@ -150,7 +150,7 @@ class OnboardingViewModel @Inject constructor(
             val uri = _uiState.value.avatarUri
             val avatarPath = if (uri != null) {
                 kotlinx.coroutines.withContext(Dispatchers.IO) {
-                    runCatching { com.alphamessenger.ui.settings.saveAvatarToInternal(appContext, uri) }.getOrNull()
+                    runCatching { com.alphamessenger.ui.settings.saveOwnPhoto(appContext, uri) }.getOrNull()
                 }
             } else null
             runCatching {

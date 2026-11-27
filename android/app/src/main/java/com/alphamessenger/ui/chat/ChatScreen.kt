@@ -226,18 +226,6 @@ import kotlinx.coroutines.launch
  *  several messages; a caption is held to it in the input. */
 internal const val MAX_MESSAGE_CHARS = 4096
 
-/**
- * V2 bottom-surface switch. When true, ChatScreen uses the new independent
- * BottomSurfaceV2 system (BottomSurfaceV2 + InputBarV2 + BottomPanelV2 +
- * BottomSurfaceState in `ui.chat.v2`). When false, the legacy bottom surface
- * (BottomSurface + InputBar + the inline panels defined later in this file)
- * is used — byte-for-byte unchanged.
- *
- * Flip this to `false` to instantly revert to the old implementation for
- * testing; the old code is kept intact until V2 is fully validated.
- */
-internal const val USE_BOTTOM_SURFACE_V2 = true
-
 /** BATTERY/PERF: compile-time gate for the per-frame/per-recomposition trace
  *  logs (KBTRACE/CompTrace/MsgTrace). `false` → R8 dead-code-eliminates every
  *  guarded Log.i in release, so no string building or I/O on the hot paths
@@ -439,11 +427,6 @@ internal fun decodeSampledBitmap(path: String, maxPx: Int): android.graphics.Bit
  *  ExoPlayer's default is 15s forward / 5s back; we make both a symmetric 5s. */
 internal const val SEEK_FORWARD_MS = 5_000L
 internal const val SEEK_BACK_MS = 5_000L
-
-/** Bottom panel mode — only ONE is active at a time.
- *  READ_ONLY covers blocked / removed-from-group / chat-closed / write-restricted /
- *  muted-by-admin strips: the input bar is hidden and a status strip replaces it. */
-private enum class PanelMode { NONE, KEYBOARD, EMOJI, ATTACH, RECORDING, READ_ONLY }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -878,65 +861,11 @@ fun ChatScreen(
             )
         }
     }
-    // Locally-owned keyboard/emoji choice (KEYBOARD vs EMOJI vs NONE). ATTACH,
-    // RECORDING and READ_ONLY are driven by the ViewModel truth and folded into
-    // `panelMode` below. `inputMode` is the SINGLE writer of local input state;
-    // WindowInsets.ime is read-only measurement only.
-    // --- Bottom panel: ONE owner of the bottom surface ---
-    // The bottom surface is a SINGLE permanent Layout (BottomSurface) that always
-    // contains: Divider + InputBar (never destroyed) + BottomPanel (one slot whose
-    // content changes with `panelMode`). There is exactly ONE spacer
-    // (BottomPanel.height = bottomPanelHeight) and ONE derived height variable.
-    //
-    // `panelMode` is the single source of truth for which panel is up. It is
-    // derived from the ViewModel truth (showAttachPanel / isRecording / read-only
-    // flags) PLUS the locally-owned keyboard/emoji choice. It NEVER needs the IME
-    // inset to be set — it switches instantly, and the layout follows imeContentDp
-    // atomically (no 0-frame, no hold, no latch).
-    val attachDensity = androidx.compose.ui.platform.LocalDensity.current
-    val screenHeightDp = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp
-    val imeBottomPx = androidx.compose.foundation.layout.WindowInsets.ime.getBottom(attachDensity)
-    val imeDp = with(attachDensity) { imeBottomPx.toDp() }
-    // The IME inset INCLUDES the navigation-bar region; the Column already adds
-    // navigationBarsPadding, so we use the keyboard height ABOVE the nav bar to
-    // avoid a nav-bar-tall gap between the keyboard and the input bar.
-    val navBarDp = with(attachDensity) {
-        WindowInsets.navigationBars.getBottom(attachDensity).toDp()
+    val navBarDp = with(androidx.compose.ui.platform.LocalDensity.current) {
+        WindowInsets.navigationBars.getBottom(this).toDp()
     }
-    val imeContentDp = (imeDp - navBarDp).coerceAtLeast(0.dp)
 
-    // Locally-owned keyboard/emoji choice (KEYBOARD vs EMOJI vs NONE). ATTACH,
-    // RECORDING and READ_ONLY are driven by the ViewModel truth and folded into
-    // `panelMode` below. This is the ONLY local input state; WindowInsets.ime is
-    // read-only measurement.
-    var inputMode by remember { mutableStateOf(PanelMode.NONE) }
-    val inputFocusRequester = remember { FocusRequester() }
-
-    // Drag-resizable panel height for EMOJI and ATTACH (shared — both panels snap
- // to the same detents, classic). Seeded to a screen-proportional
-    // estimate so the first open (before the keyboard has been shown) is full
-    // height, not a tiny sliver.
-    var panelHeight by remember(screenHeightDp) { mutableStateOf(screenHeightDp * 0.42f) }
-    // True while a finger actively drags the panel grabber: the height then
-    // tracks 1:1 (snap), and the spring only smooths the release-to-detent glide.
-    var isPanelDragging by remember { mutableStateOf(false) }
-    val glideSpec = androidx.compose.animation.core.spring<androidx.compose.ui.unit.Dp>(
-        dampingRatio = androidx.compose.animation.core.Spring.DampingRatioNoBouncy,
-        stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow,
-    )
-    // Fast, non-bouncy spring for discrete jumps INSIDE ime-driven modes (e.g.
-    // emoji dragged high → keyboard): glides the mismatch instead of snapping.
-    val trackSpec = androidx.compose.animation.core.spring<androidx.compose.ui.unit.Dp>(
-        dampingRatio = androidx.compose.animation.core.Spring.DampingRatioNoBouncy,
-        stiffness = 2500f,
-    )
-    // THE one animated bottom height (Animatable so the target formula below can
-    // read the CURRENT value — needed for ride-vs-hold decisions).
-    val bottomPanel = remember { androidx.compose.animation.core.Animatable(0.dp, androidx.compose.ui.unit.Dp.VectorConverter) }
-    val bottomPanelHeight = bottomPanel.value
-
-    // READ_ONLY is true whenever the composer must be replaced by a status strip
-    // (blocked / removed-from-group / chat-closed / write-restricted / muted).
+    // The composer must be replaced by a status strip (blocked, removed, closed, restricted, muted).
     val secretWaiting = state.secretOrigin.isNotEmpty() && state.secretWaiting
     val isReadOnly = secretWaiting || state.isRequest || state.discussion?.locked == true || state.peerBlocked || state.removedFromGroup ||
         state.chatClosedUntilMe > com.alphamessenger.util.TrustedTime.nowSeconds() ||
@@ -944,171 +873,22 @@ fun ChatScreen(
         (state.channel != null && !state.isAdmin) ||
         state.mutedUntilMe > com.alphamessenger.util.TrustedTime.nowSeconds()
 
-    // THE single panel mode: ONE derived value that drives actuation + the bottom
-    // height. ViewModel truth wins over the local keyboard/emoji choice; READ_ONLY
-    // wins over everything (no input allowed).
-    val panelMode = when {
-        isReadOnly -> PanelMode.READ_ONLY
-        state.showAttachPanel -> PanelMode.ATTACH
-        state.isRecordingLocked -> PanelMode.RECORDING
-        else -> inputMode
-    }
-
-    // --- V2 bottom-surface state ---
-    // Independent of the legacy declarations above. Created ONCE per
-    // ChatScreen; lives until the screen leaves composition. Owns its own
-    // FocusRequester / ScrollState / TextFieldValue / panelHeight / inputMode
-    // / single Animatable bottom height — none of the legacy compensators
-    // (measuredKbHeight, imeUpThisSession, imeCollapsing, kbRiseFloor) are
-    // consulted. IME motion is ridden purely from the live inset.
+    // The one owner of the keyboard, the emoji panel and the slot under the input bar.
     val v2State = rememberBottomSurfaceState()
     v2State.bindImeInset()
-    // Fold the ViewModel truth (attach open / locked recording) into the ONE
-    // derived panelMode. Guarded writes — idempotent, cheap.
     v2State.syncExternal(
         attach = state.showAttachPanel,
         recording = state.isRecordingLocked,
     )
     val v2PanelMode = v2State.panelMode
-    // NOTE: no animateBottomPanel — the ONE bottomPanelHeight is driven by
-    // state.bottomPanelHeight() (animateDpAsState) inside BottomPanelV2.
-    // Read-only is handled INSIDE the InputBar (enabled=false + readOnlyContent),
-    // NOT as a separate panel mode.
-    // --- end V2 bottom-surface state ---
 
-    // Last settled keyboard height — grows instantly with the live IME, then a
-    // 200ms debounce below corrects it DOWN to the true settled value (spring
-    // overshoot otherwise records a too-high peak → gap). Seeded to 0 on purpose:
-    // the FIRST-ever open rides up with the IME; every later open pre-reserves
-    // this floor so InputBar stands still while the keyboard slides in under it.
-    var measuredKbHeight by remember(screenHeightDp) { mutableStateOf(0.dp) }
-
-    // Per-session latch: false at the START of every KEYBOARD session (reset by
-    // LaunchedEffect(inputMode)), true once the IME has actually risen > 120dp.
-    // Guards the NONE-dismiss condition so it cannot fire on the very first frame
-    // (when imeBottomPx is still 0 and the IME hasn't moved yet).
-    var imeUpThisSession by remember { mutableStateOf(false) }
-    // IME direction latch: false while rising (hold the measured floor so the
-    // InputBar never dips mid-rise), true while descending (follow the live inset
-    // so the bar rides the keyboard down instead of snapping to 0 at the end).
-    var imeCollapsing by remember { mutableStateOf(false) }
-    // Whether the keyboard was up at the moment locked recording started —
-    // captured synchronously in onTapLockRecord. Only then does RECORDING keep
-    // the IME alive and hold its space; otherwise nothing moves and the
-    // keyboard is NOT summoned.
-    var recordingKeepsKb by remember { mutableStateOf(false) }
-    var prevImeDp by remember { mutableStateOf(0.dp) }
-    LaunchedEffect(imeContentDp) {
-        if (imeContentDp > prevImeDp) imeCollapsing = false
-        else if (imeContentDp < prevImeDp) imeCollapsing = true
-        prevImeDp = imeContentDp
-    }
-    // Fresh-session latch reset. NOTE: this effect runs AFTER the frame that
-    // switched the mode — the click handlers below ALSO reset both latches
-    // synchronously, otherwise a stale imeCollapsing=true (left over from the
-    // IME descent that opened the emoji panel) makes the very first KEYBOARD
-    // frame target ime(=0) → one-frame collapse: InputBar hits the floor and
-    // a bubble flashes at the list top. Kept as a safety net only.
-    LaunchedEffect(inputMode) {
-        if (inputMode == PanelMode.KEYBOARD) {
-            imeUpThisSession = false  // fresh session
-            imeCollapsing = false
-        }
-    }
-    // A reply (swipe or menu) goes straight to typing: the quote lands in the
-    // field and the keyboard comes up — through the live bottom surface (V2),
-    // the same path a tap on the field takes. (The legacy inputMode drives no
-    // field any more: switching it showed a keyboard with nothing focused.)
+    // A reply (swipe or menu) goes straight to typing: the quote lands in the field and the keyboard comes up.
     val replyAndType: (MessageUi) -> Unit = { m ->
         viewModel.setReplyTo(m)
-        if (v2State.panelMode != PanelModeV2.KEYBOARD) v2State.enterKeyboard()
-        else v2State.focusInput()
+        v2State.openKeyboard()
     }
     // A reply to a chosen fragment: the quote is already set, only the keyboard comes up.
-    val replyAndTypeKeepQuote: (MessageUi, String) -> Unit = { _, _ ->
-        if (v2State.panelMode != PanelModeV2.KEYBOARD) v2State.enterKeyboard()
-        else v2State.focusInput()
-    }
-    LaunchedEffect(imeContentDp, panelMode, state.isRecording) {
-        // Track upward immediately so the floor never lags behind a rising keyboard.
-        if (imeContentDp > measuredKbHeight) measuredKbHeight = imeContentDp
-        if (imeContentDp > 120.dp) imeUpThisSession = true
-        // Suppress the IME-collapse watchdog while recording: a mic press can
-        // cause a transient imeContentDp==0 (OS re-measures the window during
-        // the touch), which would otherwise set inputMode=NONE → hide()+clearFocus()
-        // → keyboard + panel collapse under the user's finger. The watchdog
-        // resumes when isRecording returns to false.
-        if (panelMode == PanelMode.KEYBOARD && !state.isRecording
-            && imeBottomPx == 0 && imeContentDp == 0.dp && imeUpThisSession) {
-            inputMode = PanelMode.NONE
-            imeUpThisSession = false
-        }
-    }
-    // Debounce: correct measuredKbHeight DOWNWARD after the keyboard fully settles.
-    // Fixes the 1-in-10 gap caused by spring-animation overshoot recording a peak
-    // value higher than the true settled height.
-    LaunchedEffect(imeContentDp) {
-        if (imeContentDp > 120.dp) {
-            delay(200)
-            if (imeContentDp > 120.dp) measuredKbHeight = imeContentDp
-        }
-    }
-
- // ATTACH drag detents: compact / half / tall. Drag is
-    // continuous; release snaps to the nearest detent (or closes below the exit
-    // threshold). When the caption keyboard is up the VISIBLE part of the panel
-    // is clamped so panel + IME never overflow the column (caption stays on
-    // screen); the IME share is added back below.
-    val attachVisibleTarget = panelHeight.coerceAtMost(screenHeightDp - imeContentDp - 120.dp)
-
-    // THE single bottom height target for the ONE BottomPanel slot.
-    // KEYBOARD rise RIDES the live IME up from below (guide: InputBar rises
-    // together with the keyboard). `minOf(current, floor)` makes it hold when a
-    // panel already stands at/above keyboard height (emoji→keyboard swap) and
-    // ride once the IME catches up; descent (imeCollapsing) follows the inset
-    // down. RECORDING holds the keyboard space ONLY when the keyboard was up at
-    // lock time (recordingKeepsKb).
-    val bottomPanelTarget = when (panelMode) {
-        PanelMode.KEYBOARD  -> if (imeCollapsing) imeContentDp
-            else maxOf(imeContentDp, minOf(bottomPanelHeight, measuredKbHeight))
-        PanelMode.EMOJI     -> maxOf(panelHeight, imeContentDp)
-        PanelMode.ATTACH    -> attachVisibleTarget + imeContentDp
-        PanelMode.RECORDING -> if (recordingKeepsKb) {
-            if (imeCollapsing) imeContentDp else maxOf(imeContentDp, measuredKbHeight)
-        } else 0.dp
-        PanelMode.READ_ONLY -> 0.dp
-        PanelMode.NONE      -> 0.dp
-    }
-    val imeDriven = panelMode == PanelMode.KEYBOARD ||
-        panelMode == PanelMode.RECORDING || panelMode == PanelMode.READ_ONLY ||
-        (panelMode == PanelMode.ATTACH && imeContentDp > 0.dp)
-    // Actuation: finger drag → 1:1 snap. Ime-driven CONTINUOUS motion (target
-    // moved < 32dp since the last frame and nothing is mid-glide) → snap-ride
-    // the inset. Everything else (panel open/close, drag-release detents,
-    // discrete jumps inside ime modes) → spring glide. NEVER flip a running
-    // glide to snap — that flip was a visible jolt.
-    var prevBottomTarget by remember { mutableStateOf(0.dp) }
-    LaunchedEffect(bottomPanelTarget, isPanelDragging) {
-        val jump = kotlin.math.abs((bottomPanelTarget - prevBottomTarget).value)
-        prevBottomTarget = bottomPanelTarget
-        when {
-            isPanelDragging -> bottomPanel.snapTo(bottomPanelTarget)
-            imeDriven && jump < 32f && !bottomPanel.isRunning -> bottomPanel.snapTo(bottomPanelTarget)
-            imeDriven -> bottomPanel.animateTo(bottomPanelTarget, trackSpec)
-            else -> bottomPanel.animateTo(bottomPanelTarget, glideSpec)
-        }
-    }
-
-    // While a panel glides shut (mode already NONE, height still > 0) keep
-    // rendering the LAST panel content so the surface visibly slides down
-    // instead of vanishing into an empty shrinking box.
-    var lastVisiblePanel by remember { mutableStateOf(PanelMode.NONE) }
-    if (panelMode == PanelMode.EMOJI || panelMode == PanelMode.ATTACH) lastVisiblePanel = panelMode
-    val displayMode =
-        if (panelMode == PanelMode.NONE && bottomPanelHeight > 4.dp) lastVisiblePanel else panelMode
-    // KBTRACE (temporary): track the single driver of the bottom height.
-    androidx.compose.runtime.LaunchedEffect(bottomPanelHeight, imeContentDp, imeBottomPx, panelMode) {
-    }
+    val replyAndTypeKeepQuote: (MessageUi, String) -> Unit = { _, _ -> v2State.openKeyboard() }
     // --- Message actions (Batch A) ---
     // Single-tap → action sheet (reactions + actions). Long-press →
     // selection mode (multi-select + bulk forward/delete).
@@ -1579,34 +1359,6 @@ fun ChatScreen(
         if (isAtBottom) unreadWhileScrolled = 0
     }
     val scope = rememberCoroutineScope()
-    val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
-    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
-
-    // THE single actuation effect: panelMode is the only trigger, and this is the
-    // only place that shows/hides the IME, moves focus, and decides which panel is
-    // up. WindowInsets.ime is never written from here — no loop. No hold, no
-    // latch: InputBar is never destroyed, so the IME connection survives swaps and
-    // there is no 0-frame to bridge.
-    LaunchedEffect(panelMode) {
-        when (panelMode) {
-            PanelMode.KEYBOARD -> {
-                val __rf = runCatching { inputFocusRequester.requestFocus() }
-                keyboardController?.show()
-            }
-            PanelMode.EMOJI, PanelMode.ATTACH, PanelMode.NONE, PanelMode.READ_ONLY -> {
-                keyboardController?.hide()
-                focusManager.clearFocus(force = true)
-            }
-            PanelMode.RECORDING -> {
-                // Keep the field focused so the reserved keyboard space stays up —
-                // but ONLY if the keyboard was up when the lock started. A focus
-                // grab without that summons the IME out of nowhere.
-                if (recordingKeepsKb) {
-                    val __rf = runCatching { inputFocusRequester.requestFocus() }
-                }
-            }
-        }
-    }
 
     // Location fetch + permission (declared after `scope`, which it uses).
     val fetchLocation: () -> Unit = {
@@ -1647,12 +1399,6 @@ fun ChatScreen(
             android.Manifest.permission.ACCESS_COARSE_LOCATION,
         ))
     }
-    // Opening the in-app camera must dismiss the keyboard, otherwise it stays
-    // floating over the live preview.
-    LaunchedEffect(showCameraStudio) {
-        if (showCameraStudio) { keyboardController?.hide(); focusManager.clearFocus(force = true) }
-    }
-
     // Title priority for 1:1 direct chat: peer-broadcast display_name >
     // chat's local name (e.g. "npub…ab12") > generic placeholder.
     // For groups: chat's name > placeholder.
@@ -1678,13 +1424,16 @@ fun ChatScreen(
     LaunchedEffect(savedTag) { if (savedTag != null) viewModel.revealStart { } }
     val isSecret = state.secretOrigin.isNotEmpty()
     val torState by com.alphamessenger.data.EmbeddedTor.state.collectAsState()
-    // The chat's own connection: checked until it is up, then now and then.
-    val secretLinkUp by androidx.compose.runtime.produceState(false, isSecret, state.secretWaiting) {
+    // The chat's own connection: checked until it is up, then now and then. Unknown (null)
+    // until the first check answers: no "not connected" is shown before anyone knows.
+    val secretLink by androidx.compose.runtime.produceState<Boolean?>(null, isSecret, state.secretWaiting) {
         while (isSecret && !state.secretWaiting) {
-            value = viewModel.secretLinkReady()
-            kotlinx.coroutines.delay(if (value) 10_000 else 1_500)
+            val up = viewModel.secretLinkReady()
+            value = up
+            kotlinx.coroutines.delay(if (up) 10_000 else 1_500)
         }
     }
+    val secretLinkUp = secretLink == true
     val linkDots by androidx.compose.runtime.produceState("", secretLinkUp) {
         var n = 0
         while (!secretLinkUp) { value = ".".repeat(n % 4); n++; kotlinx.coroutines.delay(400) }
@@ -2036,7 +1785,7 @@ fun ChatScreen(
             if (state.isGroup && state.channel == null && state.discussion == null && !scheduledMode) {
                 com.alphamessenger.calls.group.GroupCallBanner(chatId)
             }
-            if (isSecret && !state.secretWaiting && !secretLinkUp && torState != com.alphamessenger.data.EmbeddedTor.State.ON) {
+            if (isSecret && !state.secretWaiting && secretLink == false && torState != com.alphamessenger.data.EmbeddedTor.State.ON) {
                 com.alphamessenger.ui.secret.SecretTorBanner()
             }
             // Saved Messages: the tags in use, to show one at a time.
@@ -2857,274 +2606,99 @@ fun ChatScreen(
             }
 
 
-            // --- BottomSurface: the SINGLE permanent bottom-area owner ---
-            // Always in composition. Always renders: Divider + InputBar (never
-            // destroyed, hidden only in READ_ONLY) + BottomPanel (ONE slot whose
-            // height = bottomPanelHeight and whose content follows panelMode).
-            // No mutually-exclusive if/else if around InputBar; no second spacer;
-            // no compensators. panelMode is the only driver.
-            //
-            // V2 switch: when USE_BOTTOM_SURFACE_V2 is true, the bottom surface
-            // is owned by the new independent V2 system (BottomSurfaceV2 +
-            // InputBarV2 + BottomPanelV2 + BottomSurfaceState). The old code
-            // below stays intact and is reached by flipping the flag to false.
-            if (USE_BOTTOM_SURFACE_V2) {
-                val mentionCandidates by viewModel.mentionCandidates.collectAsState()
-                LaunchedEffect(state.isGroup) { if (state.isGroup) viewModel.loadMentionCandidates() }
-                BottomSurfaceV2(
-                    state = v2State,
-                    colors = colors,
-                    onGlass = true,
-                    panelModifier = Modifier.chatPanelGlass(chatHaze, colors, navBarDp, v2State),
-                    // Measured with the pill's margins: the list and the wallpaper run on under all of it.
-                    barModifier = Modifier.onSizeChanged { inputBarHpx = it.height }.chatInputPill(chatHaze, colors),
-                    lockedRecording = state.isRecordingLocked,
-                    lockedRecordingBar = {
-                        com.alphamessenger.ui.chat.v2.RecordingPanelV2(
-                            onGlass = true,
-                            seconds = state.recordingDuration,
-                            paused = state.recordingPaused,
-                            ticks = viewModel.recorderTicks,
-                            colors = colors,
-                            onPauseResume = {
-                                if (state.recordingPaused) viewModel.resumeRecording() else viewModel.pauseRecording()
-                            },
-                            onCancel = { viewModel.cancelRecording() },
-                            onSend = { schedulable { viewModel.stopRecording() } },
-                        )
-                    },
-                    // Above the input row: the recording bars cover the row, never this.
-                    header = {
-                    // Edit banner (if editing) — prefill input, override send.
-                    editingMsg?.let { em ->
-                        ReplyPreview(
-                            senderName = "",
-                            title = if (em.isMedia) stringResource(R.string.chat_edit_caption_title) else stringResource(R.string.chat_editing_title),
-                            text = if (em.isMedia) (em.mediaCaption ?: stringResource(R.string.preview_add_caption)) else em.text,
-                            onClose = { editingMsg = null; viewModel.updateInput("") },
-                            colors = colors,
-                            message = em.takeIf { it.isMedia || it.albumItems != null },
-                        )
-                    }
-                    // Forward preview (staged messages to forward here).
-                    if (state.pendingForward.isNotEmpty()) {
-                        val first = state.pendingForward.first()
-                        val label = if (state.pendingForward.size > 1)
-                            pluralStringResource(R.plurals.chat_messages_count, state.pendingForward.size, state.pendingForward.size)
-                        else replyPreviewLabel(first)
-                        ForwardPreview(text = label, onClose = { viewModel.cancelForward() }, colors = colors)
-                    }
+            // The bottom surface: input bar plus one panel slot, owned by BottomSurfaceState.
+            val mentionCandidates by viewModel.mentionCandidates.collectAsState()
+            LaunchedEffect(state.isGroup) { if (state.isGroup) viewModel.loadMentionCandidates() }
+            BottomSurfaceV2(
+                state = v2State,
+                colors = colors,
+                onGlass = true,
+                panelModifier = Modifier.chatPanelGlass(chatHaze, colors, navBarDp, v2State),
+                // Measured with the pill's margins: the list and the wallpaper run on under all of it.
+                barModifier = Modifier.onSizeChanged { inputBarHpx = it.height }.chatInputPill(chatHaze, colors),
+                lockedRecording = state.isRecordingLocked,
+                lockedRecordingBar = {
+                    com.alphamessenger.ui.chat.v2.RecordingPanelV2(
+                        onGlass = true,
+                        seconds = state.recordingDuration,
+                        paused = state.recordingPaused,
+                        ticks = viewModel.recorderTicks,
+                        colors = colors,
+                        onPauseResume = {
+                            if (state.recordingPaused) viewModel.resumeRecording() else viewModel.pauseRecording()
+                        },
+                        onCancel = { viewModel.cancelRecording() },
+                        onSend = { schedulable { viewModel.stopRecording() } },
+                    )
+                },
+                // Above the input row: the recording bars cover the row, never this.
+                header = {
+                // Edit banner (if editing) — prefill input, override send.
+                editingMsg?.let { em ->
+                    ReplyPreview(
+                        senderName = "",
+                        title = if (em.isMedia) stringResource(R.string.chat_edit_caption_title) else stringResource(R.string.chat_editing_title),
+                        text = if (em.isMedia) (em.mediaCaption ?: stringResource(R.string.preview_add_caption)) else em.text,
+                        onClose = { editingMsg = null; viewModel.updateInput("") },
+                        colors = colors,
+                        message = em.takeIf { it.isMedia || it.albumItems != null },
+                    )
+                }
+                // Forward preview (staged messages to forward here).
+                if (state.pendingForward.isNotEmpty()) {
+                    val first = state.pendingForward.first()
+                    val label = if (state.pendingForward.size > 1)
+                        pluralStringResource(R.plurals.chat_messages_count, state.pendingForward.size, state.pendingForward.size)
+                    else replyPreviewLabel(first)
+                    ForwardPreview(text = label, onClose = { viewModel.cancelForward() }, colors = colors)
+                }
  // Link preview of the URL being typed.
-                    if (editingMsg == null) {
-                        com.alphamessenger.ui.chat.preview.ComposerLinkPreview(
-                            data = state.composerPreview,
-                            loading = state.composerPreviewLoading,
-                            colors = colors,
-                            onClose = { viewModel.dismissComposerPreview() },
-                        )
+                if (editingMsg == null) {
+                    com.alphamessenger.ui.chat.preview.ComposerLinkPreview(
+                        data = state.composerPreview,
+                        loading = state.composerPreviewLoading,
+                        colors = colors,
+                        onClose = { viewModel.dismissComposerPreview() },
+                    )
+                }
+                // A lone emoji typed: the stickers that carry it, one tap sends instead.
+                if (editingMsg == null && state.pendingForward.isEmpty()) {
+                    com.alphamessenger.ui.sticker.StickerSuggestions(state.inputText) { pid, s ->
+                        viewModel.sendSticker(pid, s)
+                        viewModel.updateInput("")
                     }
-                    // A lone emoji typed: the stickers that carry it, one tap sends instead.
-                    if (editingMsg == null && state.pendingForward.isEmpty()) {
-                        com.alphamessenger.ui.sticker.StickerSuggestions(state.inputText) { pid, s ->
-                            viewModel.sendSticker(pid, s)
-                            viewModel.updateInput("")
-                        }
-                    }
-                    // Reply preview (if any).
-                    if (editingMsg == null) state.replyTo?.let { reply ->
-                        ReplyPreview(
-                            senderName = reply.senderName ?: stringResource(R.string.notif_you),
-                            text = state.replyQuote?.let { "❝ $it" } ?: replyPreviewLabel(reply),
-                            onClose = { viewModel.setReplyTo(null) },
-                            colors = colors,
-                            message = reply,
-                        )
-                    }
-                    },
-                    inputBar = {
-                        Box {
-                        InputBarV2(
-                            onGlass = true,
-                            onStop = if (isAssistant && assistantLive != null) ({ viewModel.assistant.stop(chatId) }) else null,
-                            mentionCandidates = mentionCandidates,
-                            // Messages waiting for their time: calendar in the field.
-                            onOpenScheduled = if (!scheduledMode && heldHere.isNotEmpty()) ({ onOpenScheduled(chatId) }) else null,
-                            state = v2State,
-                            value = state.inputText,
-                            onValueChange = viewModel::updateInput,
-                            charLimit = if (editingMsg?.isMedia == true) MAX_MESSAGE_CHARS else null,
-                            isSending = state.isSending,
-                            // While editing, Send only saves: no hold menu.
-                            onSendLongPress = if (editingMsg != null) null else ({ if (state.inputText.isNotBlank()) pendingScheduled = { sendComposerText() } }),
-                            onSendSilent = if (editingMsg != null) null else ({
-                                if (state.inputText.isNotBlank() && state.pendingForward.isEmpty()) {
-                                    schedulable { viewModel.armSilent(); sendComposerText() }
-                                }
-                            }),
-                            onSend = {
-                                val em = editingMsg
-                                when {
-                                    em != null -> {
-                                        viewModel.editMessage(em.id, state.inputText)
-                                        editingMsg = null
-                                        viewModel.updateInput("")
-                                    }
-                                    state.pendingForward.isNotEmpty() -> {
-                                        viewModel.sendForward(state.inputText)
-                                    }
-                                    else -> schedulable { sendComposerText() }
-                                }
-                            },
-                            onAttach = {
-                                v2State.enterAttach()
-                                viewModel.setShowAttachPanel(true)
-                            },
-                            emojiOpen = v2PanelMode == PanelModeV2.EMOJI,
-                            onEmoji = {
-                                if (v2PanelMode == PanelModeV2.EMOJI) v2State.enterKeyboard()
-                                else v2State.enterEmoji()
-                            },
-                            onInputFocused = {
-                                if (v2State.panelMode != PanelModeV2.KEYBOARD) v2State.enterKeyboard()
-                            },
-                            onCamera = onCameraTap,
-                            forceSend = state.pendingForward.isNotEmpty(),
-                            colors = colors,
-                            isRecording = state.isRecording,
-                            recordingSeconds = state.recordingDuration,
-                            onRoundStart = { startRound(false) },
-                            onRoundEnd = { end ->
-                                when (end) {
-                                    com.alphamessenger.ui.chat.v2.RoundEnd.SEND -> roundRec.finish(send = true)
-                                    com.alphamessenger.ui.chat.v2.RoundEnd.CANCEL -> roundRec.finish(send = false)
-                                    com.alphamessenger.ui.chat.v2.RoundEnd.LOCK -> roundRec.locked = true
-                                }
-                            },
-                            onStartRecord = {
-                                // Capture keyboard-up AT PRESS START, not at release.
-                                v2State.recordingKeepsKb = v2State.imeContentDp > 120.dp
-                                if (androidx.core.content.ContextCompat.checkSelfPermission(
-                                        chatCtx, android.Manifest.permission.RECORD_AUDIO,
-                                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                                ) viewModel.startRecording()
-                                else micPermission.launch(android.Manifest.permission.RECORD_AUDIO)
-                            },
-                            onFinishRecord = {
-                                if (roundRec.recording) roundRec.finish(send = true)
-                                else schedulable { viewModel.stopRecording() }
-                            },
-                            onCancelRecord = { if (roundRec.recording) roundRec.finish(send = false) else viewModel.cancelRecording() },
-                            onTapLockRecord = {
-                                if (roundRec.recording) { roundRec.locked = true; return@InputBarV2 }
-                                // recordingKeepsKb was captured at ACTION_DOWN above.
-                                viewModel.lockRecording()
-                            },
-                            // Read-only handled INSIDE the InputBar (per spec):
-                            // enabled=false + dimmed + send area → ReadOnlyStrip.
-                            readOnly = isReadOnly || chatSearchQuery != null,
-                            cooldownSeconds = state.discussion?.status
-                                ?.takeIf { it.reason == "slow_mode" }?.value?.coerceAtLeast(0) ?: 0L,
-                            readOnlyContent = if (chatSearchQuery != null) {
-                                {
-                                    ChatSearchSteps(
-                                        position = searchPos,
-                                        count = searchHits.size,
-                                        searching = !searchLoaded && !chatSearchQuery.isNullOrBlank(),
-                                        colors = colors,
-                                        onOlder = { if (searchPos + 1 < searchHits.size) { searchPos++; jumpRequest = searchHits[searchPos] } },
-                                        onNewer = { if (searchPos > 0) { searchPos--; jumpRequest = searchHits[searchPos] } },
-                                        onCalendar = { pickSearchDate = true },
-                                        onList = { if (searchFound.isNotEmpty()) searchListOpen = true },
-                                    )
-                                }
-                            } else if (secretWaiting && state.secretState == "invited") {
-                                {
-                                    com.alphamessenger.ui.secret.SecretAnswerBar(
-                                        onAccept = { viewModel.acceptSecretOffer(state.secretInvite) },
-                                        onDecline = { viewModel.declineSecretOffer(state.secretInvite) { onBack() } },
-                                    )
-                                }
-                            } else if (secretWaiting) {
-                                { Spacer(Modifier.fillMaxWidth().navigationBarsPadding()) }
-                            } else if (state.isRequest) {
-                                {
-                                    ChatRequestBar(
-                                        colors = colors,
-                                        onBlock = { viewModel.declineRequest(block = true, onDone = onBack) },
-                                        onDelete = { viewModel.declineRequest(block = false, onDone = onBack) },
-                                        onAccept = { viewModel.acceptRequest() },
-                                    )
-                                }
-                            } else if (isReadOnly && state.discussion?.locked == true && !state.removedFromGroup) {
-                                { state.discussion?.let { com.alphamessenger.ui.channel.DiscussionLockStrip(colors, it.status) } }
-                            } else if (state.channel != null && !state.chromeKnown) {
-                                // My role is not known yet: no subscriber bar that turns into a composer.
-                                { Spacer(Modifier.fillMaxWidth().navigationBarsPadding()) }
-                            } else if (isReadOnly && state.channel != null && !state.isAdmin && !state.removedFromGroup) {
-                                {
-                                    com.alphamessenger.ui.channel.ChannelSubscriberBar(
-                                        muted = state.isMuted,
-                                        colors = colors,
-                                        onToggleMute = { viewModel.toggleMute() },
-                                        compact = true,
-                                    )
-                                }
-                            } else if (isReadOnly) {
-                                {
-                                    com.alphamessenger.ui.chat.v2.ReadOnlyStripV2(
-                                        colors = colors,
-                                        model = com.alphamessenger.ui.chat.v2.ReadOnlyModel(
-                                            peerBlocked = state.peerBlocked,
-                                            removedFromGroup = state.removedFromGroup,
-                                            chatClosedUntilMe = state.chatClosedUntilMe,
-                                            writeRestricted = state.writeRestricted,
-                                            mutedUntilMe = state.mutedUntilMe,
-                                            onUnblock = { viewModel.unblockPeer() },
-                                        ),
-                                    )
-                                }
-                            } else null,
-                        )
-                        }
-                    },
-                    bottomPanel = {
-                        BottomPanelV2(
-                            state = v2State,
-                            colors = colors,
-                            onEmojiPick = { e -> viewModel.updateInput(state.inputText + e) },
-                            onGifSend = { g -> viewModel.sendGif(g) },
-                            onStickerSend = { pid, s -> viewModel.sendSticker(pid, s) },
-                            repository = viewModel.repository,
-                            onEmojiBackspace = {
-                                val text = state.inputText
-                                if (text.isNotEmpty()) {
-                                    val cpCount = text.codePointCount(0, text.length)
-                                    if (cpCount > 0) {
-                                        val newEnd = text.offsetByCodePoints(0, cpCount - 1)
-                                        viewModel.updateInput(text.substring(0, newEnd))
-                                    }
-                                }
-                            },
-                        )
-                    },
-                )
-            } else {
-            BottomSurface {
-                HorizontalDivider(thickness = 0.5.dp, color = colors.alphaBorder)
-
-                // InputBar is ALWAYS in composition. Hidden (0-height clipped
-                // wrapper, NOT removed) in READ_ONLY and ATTACH so FocusRequester /
-                // BasicTextField / ScrollState survive across mode transitions.
-                val inputBarHidden = panelMode == PanelMode.READ_ONLY || panelMode == PanelMode.ATTACH
-                Box(
-                    modifier = Modifier.fillMaxWidth()
-                        .then(if (inputBarHidden) Modifier.height(0.dp).clipToBounds() else Modifier),
-                ) {
-                    android.os.Trace.beginSection("CT_InputBar"); val __cib = System.nanoTime()
-                    InputBar(
+                }
+                // Reply preview (if any).
+                if (editingMsg == null) state.replyTo?.let { reply ->
+                    ReplyPreview(
+                        senderName = reply.senderName ?: stringResource(R.string.notif_you),
+                        text = state.replyQuote?.let { "❝ $it" } ?: replyPreviewLabel(reply),
+                        onClose = { viewModel.setReplyTo(null) },
+                        colors = colors,
+                        message = reply,
+                    )
+                }
+                },
+                inputBar = {
+                    Box {
+                    InputBarV2(
+                        onGlass = true,
+                        onStop = if (isAssistant && assistantLive != null) ({ viewModel.assistant.stop(chatId) }) else null,
+                        mentionCandidates = mentionCandidates,
+                        // Messages waiting for their time: calendar in the field.
+                        onOpenScheduled = if (!scheduledMode && heldHere.isNotEmpty()) ({ onOpenScheduled(chatId) }) else null,
+                        state = v2State,
                         value = state.inputText,
                         onValueChange = viewModel::updateInput,
+                        charLimit = if (editingMsg?.isMedia == true) MAX_MESSAGE_CHARS else null,
                         isSending = state.isSending,
+                        // While editing, Send only saves: no hold menu.
+                        onSendLongPress = if (editingMsg != null) null else ({ if (state.inputText.isNotBlank()) pendingScheduled = { sendComposerText() } }),
+                        onSendSilent = if (editingMsg != null) null else ({
+                            if (state.inputText.isNotBlank() && state.pendingForward.isEmpty()) {
+                                schedulable { viewModel.armSilent(); sendComposerText() }
+                            }
+                        }),
                         onSend = {
                             val em = editingMsg
                             when {
@@ -3134,283 +2708,139 @@ fun ChatScreen(
                                     viewModel.updateInput("")
                                 }
                                 state.pendingForward.isNotEmpty() -> {
-                                    // Forward staged message(s) + optional quoting comment.
                                     viewModel.sendForward(state.inputText)
                                 }
-                                else -> sendComposerText()
+                                else -> schedulable { sendComposerText() }
                             }
                         },
                         onAttach = {
-                            // Local part → NONE; ViewModel truth drives ATTACH. The
-                            // single actuation effect hides the IME. Open at the
-                            // half detent; the user drags from there.
-                            inputMode = PanelMode.NONE
-                            panelHeight = screenHeightDp * 0.55f
+                            v2State.enterAttach()
                             viewModel.setShowAttachPanel(true)
                         },
-                        emojiOpen = panelMode == PanelMode.EMOJI,
-                        inputFocusRequester = inputFocusRequester,
-                        onInputFocused = {
-                            // Tapping the field → keyboard (from NONE or EMOJI).
-                            // Reset the IME latches IN THE SAME FRAME (see note at
-                            // the latch declarations) so the first KEYBOARD frame
-                            // holds the measured floor instead of collapsing to 0.
-                            imeCollapsing = false
-                            imeUpThisSession = false
-                            inputMode = PanelMode.KEYBOARD
-                        },
-                        onEmoji = {
- // other messengers swap — set the mode only; actuation is centralized.
-                            // Seed the panel height from the live keyboard so the emoji
-                            // grid opens at the same height the keyboard occupied.
-                            if (panelMode == PanelMode.EMOJI) {
-                                imeCollapsing = false
-                                imeUpThisSession = false
-                                inputMode = PanelMode.KEYBOARD
-                            } else {
-                                if (imeContentDp > 0.dp) panelHeight = imeContentDp
-                                inputMode = PanelMode.EMOJI
-                            }
-                        },
+                        emojiOpen = v2PanelMode == PanelModeV2.EMOJI,
+                        onEmoji = { v2State.toggleEmoji() },
+                        onInputFocused = { v2State.onFieldTapped() },
                         onCamera = onCameraTap,
                         forceSend = state.pendingForward.isNotEmpty(),
                         colors = colors,
                         isRecording = state.isRecording,
                         recordingSeconds = state.recordingDuration,
+                        onRoundStart = { startRound(false) },
+                        onRoundEnd = { end ->
+                            when (end) {
+                                com.alphamessenger.ui.chat.v2.RoundEnd.SEND -> roundRec.finish(send = true)
+                                com.alphamessenger.ui.chat.v2.RoundEnd.CANCEL -> roundRec.finish(send = false)
+                                com.alphamessenger.ui.chat.v2.RoundEnd.LOCK -> roundRec.locked = true
+                            }
+                        },
                         onStartRecord = {
-                            // Capture whether the keyboard is up AT PRESS START,
-                            // not at release: the IME may dip during the press and
-                            // sampling at release (onTapLockRecord) would latch
-                            // false, dropping the reserved keyboard space.
-                            recordingKeepsKb = imeContentDp > 120.dp
+                            // Capture keyboard-up AT PRESS START, not at release.
+                            v2State.recordingKeepsKb = v2State.keyboardShown
                             if (androidx.core.content.ContextCompat.checkSelfPermission(
                                     chatCtx, android.Manifest.permission.RECORD_AUDIO,
                                 ) == android.content.pm.PackageManager.PERMISSION_GRANTED
                             ) viewModel.startRecording()
                             else micPermission.launch(android.Manifest.permission.RECORD_AUDIO)
                         },
-                        onFinishRecord = { viewModel.stopRecording() },
-                        onCancelRecord = { viewModel.cancelRecording() },
+                        onFinishRecord = {
+                            if (roundRec.recording) roundRec.finish(send = true)
+                            else schedulable { viewModel.stopRecording() }
+                        },
+                        onCancelRecord = { if (roundRec.recording) roundRec.finish(send = false) else viewModel.cancelRecording() },
                         onTapLockRecord = {
+                            if (roundRec.recording) { roundRec.locked = true; return@InputBarV2 }
                             // recordingKeepsKb was captured at ACTION_DOWN above.
                             viewModel.lockRecording()
                         },
-                    )
-                }
-
-                // --- BottomPanel ---
-                // ONE fixed-height slot (height = bottomPanelHeight) for EVERY
-                // mode, ATTACH included — no weight branch, no second spacer.
-                // `displayMode` (not panelMode) picks the content so a closing
-                // panel keeps rendering while the slot glides to 0. NO clip here:
-                // READ_ONLY / RECORDING overlay the 0-height slot upward.
-                Box(modifier = Modifier.fillMaxWidth().height(bottomPanelHeight)) {
-                    when (displayMode) {
-                        PanelMode.NONE, PanelMode.KEYBOARD -> {
-                            // Empty — the keyboard (or nothing) occupies this space.
-                        }
-                        PanelMode.EMOJI -> {
-                            EmojiPanel(
-                                modifier = Modifier.fillMaxSize(),
-                                colors = colors,
-                                onPick = { e -> viewModel.updateInput(state.inputText + e) },
-                                onDrag = { deltaPx ->
-                                    isPanelDragging = true
-                                    val dDp = with(attachDensity) { deltaPx.toDp() }
-                                    panelHeight = (panelHeight - dDp).coerceIn(screenHeightDp * 0.15f, screenHeightDp * 0.80f)
-                                },
-                                onDragRelease = {
-                                    isPanelDragging = false
-                                    if (panelHeight < screenHeightDp * 0.18f) {
-                                        inputMode = PanelMode.NONE
-                                        panelHeight = screenHeightDp * 0.42f  // sane height for next open
-                                    } else if (panelHeight > screenHeightDp * 0.6f) panelHeight = screenHeightDp * 0.78f
-                                },
-                            )
-                        }
-                        PanelMode.ATTACH -> Column(modifier = Modifier.fillMaxSize()) {
-                            MediaPickerContent(
-                                colors = colors,
-                                orderOf = { item -> draftVm.orderOf(item.uri) },
-                                onToggle = onGalleryToggle,
-                                modifier = Modifier.fillMaxWidth().weight(1f),
-                                isFullScreen = panelHeight > screenHeightDp * 0.65f,
-                                onCamera = { viewModel.setShowAttachPanel(false); onCameraTap() },
-                                onFile = { viewModel.setShowAttachPanel(false); filePicker.launch("*/*") },
-                                onMusic = { viewModel.setShowAttachPanel(false); audioPicker.launch("audio/*") },
-                                onSecretNote = {
-                                    viewModel.setShowAttachPanel(false)
-                                    showSecretNoteDialog = true
-                                },
-                                onLocation = {
-                                    viewModel.setShowAttachPanel(false)
-                                    onLocationTap()
-                                },
-                                onClose = {
-                                    if (draft.size > 0) pickerDiscard = true
-                                    else viewModel.setShowAttachPanel(false)
-                                },
-                                onDrag = { deltaPx ->
-                                    isPanelDragging = true
-                                    val dDp = with(attachDensity) { deltaPx.toDp() }
-                                    panelHeight = (panelHeight - dDp).coerceIn(screenHeightDp * 0.20f, screenHeightDp * 0.85f)
-                                },
-                                onDragRelease = {
-                                    isPanelDragging = false
-                                    if (panelHeight < screenHeightDp * 0.25f) {
-                                        // Dragged low → close; with a pending selection
-                                        // snap back to compact instead of losing it.
-                                        if (draft.size > 0) panelHeight = screenHeightDp * 0.35f
-                                        else viewModel.setShowAttachPanel(false)
-                                    } else {
-                                        panelHeight = listOf(0.35f, 0.55f, 0.80f)
-                                            .map { screenHeightDp * it }
-                                            .minByOrNull { d -> kotlin.math.abs((d - panelHeight).value) }!!
-                                    }
-                                },
-                            )
-                            if (draft.size > 0) {
-                                PickerCaptionBar(
+                        // Read-only handled INSIDE the InputBar (per spec):
+                        // enabled=false + dimmed + send area → ReadOnlyStrip.
+                        readOnly = isReadOnly || chatSearchQuery != null,
+                        cooldownSeconds = state.discussion?.status
+                            ?.takeIf { it.reason == "slow_mode" }?.value?.coerceAtLeast(0) ?: 0L,
+                        readOnlyContent = if (chatSearchQuery != null) {
+                            {
+                                ChatSearchSteps(
+                                    position = searchPos,
+                                    count = searchHits.size,
+                                    searching = !searchLoaded && !chatSearchQuery.isNullOrBlank(),
                                     colors = colors,
-                                    caption = pickerCaption,
-                                    count = draft.size,
-                                    focusRequester = pickerCaptionFocus,
-                                    onCaptionChange = { pickerCaption = it },
-                                    // No height jump on focus: the slot target already
-                                    // adds the IME share, so the panel rides up with
-                                    // the keyboard and settles back when it closes.
-                                    onFocused = {},
-                                    onSend = {
-                                        draft.setCaption(pickerCaption.text.trim().takeIf { it.isNotEmpty() })
-                                        viewModel.setShowAttachPanel(false)
-                                        previewOpen = true
-                                    },
+                                    onOlder = { if (searchPos + 1 < searchHits.size) { searchPos++; jumpRequest = searchHits[searchPos] } },
+                                    onNewer = { if (searchPos > 0) { searchPos--; jumpRequest = searchHits[searchPos] } },
+                                    onCalendar = { pickSearchDate = true },
+                                    onList = { if (searchFound.isNotEmpty()) searchListOpen = true },
                                 )
                             }
-                            // Keyboard spacer: lifts the caption bar above the IME —
-                            // its share is already included in bottomPanelHeight.
-                            Box(modifier = Modifier.fillMaxWidth().height(imeContentDp))
-                        }
-                        PanelMode.RECORDING -> {
-                            VoiceRecordPanel(
-                                seconds = state.recordingDuration,
-                                paused = state.recordingPaused,
-                                ticks = viewModel.recorderTicks,
-                                colors = colors,
-                                keepKeyboard = state.isRecordingLocked && recordingKeepsKb,
-                                onPauseResume = {
-                                    if (state.recordingPaused) viewModel.resumeRecording() else viewModel.pauseRecording()
-                                },
-                                onCancel = { viewModel.cancelRecording() },
-                                onSend = { viewModel.stopRecording() },
-                            )
-                        }
-                        PanelMode.READ_ONLY -> {
-                            // Read-only status strip. Wrap-content (the slot's
-                            // height is 0.dp, so we overlay the strip with its own
-                            // height via wrapContentHeight).
-                            Column(
-                                modifier = Modifier.fillMaxWidth().wrapContentHeight(align = Alignment.Bottom)
-                                    .background(colors.bgSecondary),
-                            ) {
-                                when {
-                                    state.peerBlocked -> {
-                                        Column(
-                                            modifier = Modifier.fillMaxWidth()
-                                                .padding(horizontal = 20.dp, vertical = 12.dp),
-                                            horizontalAlignment = Alignment.CenterHorizontally,
-                                        ) {
-                                            Text(
-                                                stringResource(R.string.chat_blocked_notice),
-                                                color = colors.textMuted, fontSize = 14.sp,
-                                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                                            )
-                                            Spacer(Modifier.height(6.dp))
-                                            Text(
-                                                stringResource(R.string.chat_unblock),
-                                                color = colors.accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                                                maxLines = 1,
-                                                modifier = Modifier
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .clickable { viewModel.unblockPeer() }
-                                                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                                            )
-                                        }
-                                    }
-                                    state.removedFromGroup -> {
-                                        Box(
-                                            modifier = Modifier.fillMaxWidth()
-                                                .padding(horizontal = 20.dp, vertical = 18.dp),
-                                            contentAlignment = Alignment.Center,
-                                        ) {
-                                            Text(
-                                                stringResource(R.string.chat_group_unavailable),
-                                                color = colors.textMuted, fontSize = 14.sp,
-                                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                                            )
-                                        }
-                                    }
-                                    state.channel != null && !state.isAdmin -> {
-                                        com.alphamessenger.ui.channel.ChannelSubscriberBar(
-                                            muted = state.isMuted,
-                                            colors = colors,
-                                            onToggleMute = { viewModel.toggleMute() },
-                                        )
-                                    }
-                                    state.chatClosedUntilMe > com.alphamessenger.util.TrustedTime.nowSeconds() -> {
-                                        val until = remember(state.chatClosedUntilMe) {
-                                            java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault())
-                                                .format(java.util.Date(state.chatClosedUntilMe * 1000))
-                                        }
-                                        Box(
-                                            modifier = Modifier.fillMaxWidth()
-                                                .padding(horizontal = 20.dp, vertical = 18.dp),
-                                            contentAlignment = Alignment.Center,
-                                        ) {
-                                            Text(
-                                                stringResource(R.string.chat_closed_until, until),
-                                                color = colors.textMuted, fontSize = 14.sp,
-                                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                                            )
-                                        }
-                                    }
-                                    state.writeRestricted -> {
-                                        Box(
-                                            modifier = Modifier.fillMaxWidth()
-                                                .padding(horizontal = 20.dp, vertical = 18.dp),
-                                            contentAlignment = Alignment.Center,
-                                        ) {
-                                            Text(
-                                                stringResource(R.string.chat_admins_only),
-                                                color = colors.textMuted, fontSize = 14.sp,
-                                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                                            )
-                                        }
-                                    }
-                                    state.mutedUntilMe > com.alphamessenger.util.TrustedTime.nowSeconds() -> {
-                                        val until = remember(state.mutedUntilMe) {
-                                            java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault())
-                                                .format(java.util.Date(state.mutedUntilMe * 1000))
-                                        }
-                                        Box(
-                                            modifier = Modifier.fillMaxWidth()
-                                                .padding(horizontal = 20.dp, vertical = 18.dp),
-                                            contentAlignment = Alignment.Center,
-                                        ) {
-                                            Text(
-                                                stringResource(R.string.chat_muted_until, until),
-                                                color = colors.textMuted, fontSize = 14.sp,
-                                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                                            )
-                                        }
-                                    }
+                        } else if (secretWaiting && state.secretState == "invited") {
+                            {
+                                com.alphamessenger.ui.secret.SecretAnswerBar(
+                                    onAccept = { viewModel.acceptSecretOffer(state.secretInvite) },
+                                    onDecline = { viewModel.declineSecretOffer(state.secretInvite) { onBack() } },
+                                )
+                            }
+                        } else if (secretWaiting) {
+                            { Spacer(Modifier.fillMaxWidth().navigationBarsPadding()) }
+                        } else if (state.isRequest) {
+                            {
+                                ChatRequestBar(
+                                    colors = colors,
+                                    onBlock = { viewModel.declineRequest(block = true, onDone = onBack) },
+                                    onDelete = { viewModel.declineRequest(block = false, onDone = onBack) },
+                                    onAccept = { viewModel.acceptRequest() },
+                                )
+                            }
+                        } else if (isReadOnly && state.discussion?.locked == true && !state.removedFromGroup) {
+                            { state.discussion?.let { com.alphamessenger.ui.channel.DiscussionLockStrip(colors, it.status) } }
+                        } else if (state.channel != null && !state.chromeKnown) {
+                            // My role is not known yet: no subscriber bar that turns into a composer.
+                            { Spacer(Modifier.fillMaxWidth().navigationBarsPadding()) }
+                        } else if (isReadOnly && state.channel != null && !state.isAdmin && !state.removedFromGroup) {
+                            {
+                                com.alphamessenger.ui.channel.ChannelSubscriberBar(
+                                    muted = state.isMuted,
+                                    colors = colors,
+                                    onToggleMute = { viewModel.toggleMute() },
+                                    compact = true,
+                                )
+                            }
+                        } else if (isReadOnly) {
+                            {
+                                com.alphamessenger.ui.chat.v2.ReadOnlyStripV2(
+                                    colors = colors,
+                                    model = com.alphamessenger.ui.chat.v2.ReadOnlyModel(
+                                        peerBlocked = state.peerBlocked,
+                                        removedFromGroup = state.removedFromGroup,
+                                        chatClosedUntilMe = state.chatClosedUntilMe,
+                                        writeRestricted = state.writeRestricted,
+                                        mutedUntilMe = state.mutedUntilMe,
+                                        onUnblock = { viewModel.unblockPeer() },
+                                    ),
+                                )
+                            }
+                        } else null,
+                    )
+                    }
+                },
+                bottomPanel = {
+                    BottomPanelV2(
+                        state = v2State,
+                        colors = colors,
+                        onEmojiPick = { e -> viewModel.updateInput(state.inputText + e) },
+                        onGifSend = { g -> viewModel.sendGif(g) },
+                        onStickerSend = { pid, s -> viewModel.sendSticker(pid, s) },
+                        repository = viewModel.repository,
+                        onEmojiBackspace = {
+                            val text = state.inputText
+                            if (text.isNotEmpty()) {
+                                val cpCount = text.codePointCount(0, text.length)
+                                if (cpCount > 0) {
+                                    val newEnd = text.offsetByCodePoints(0, cpCount - 1)
+                                    viewModel.updateInput(text.substring(0, newEnd))
                                 }
                             }
-                        }
-                    }
-                }
-            } // ── end BottomSurface
-            } // ── end else (V2 switch)
+                        },
+                    )
+                },
+            )
             }
         }
         } // end wallpaper Box
@@ -3419,16 +2849,13 @@ fun ChatScreen(
     // Back: picker open → discard-if-selected / close; else emoji → none.
     // Flag-aware: the emoji check must read the ACTIVE architecture's mode,
     // otherwise Back with the V2 emoji panel open exits the chat.
-    val emojiOpenForBack =
-        if (USE_BOTTOM_SURFACE_V2) v2PanelMode == PanelModeV2.EMOJI else panelMode == PanelMode.EMOJI
-    androidx.activity.compose.BackHandler(enabled = state.showAttachPanel || emojiOpenForBack) {
+    androidx.activity.compose.BackHandler(enabled = state.showAttachPanel || v2PanelMode == PanelModeV2.EMOJI) {
         when {
             state.showAttachPanel -> {
                 if (draft.size > 0) pickerDiscard = true
                 else viewModel.setShowAttachPanel(false)
             }
-            USE_BOTTOM_SURFACE_V2 -> v2State.dismiss()
-            else -> inputMode = PanelMode.NONE
+            else -> v2State.closeEmoji()
         }
     }
 
@@ -3807,28 +3234,15 @@ fun ChatScreen(
                 // The viewer may have fetched the file itself (▶ on an
                 // undownloaded video) — the transfer engine does not know, and the
                 // bubble keeps a "download" badge. Ask for a re-check: consider()
-                // first asks the repository what is on disk, and all its guards
-                // (active/completed/cancelled transfer) stay in force — this does
-                // not spawn duplicate downloads.
+                // only reads the disk (an evicted file whose bytes are back becomes
+                // ready); it never starts a download the policy would not.
                 viewModel.transferUi.let { ui ->
                     galleryMsgs.forEach { m ->
                         val ref = m.mediaRefJson ?: return@forEach
-                        val key = com.alphamessenger.transfer.TransferKey.download(ref)
-                        val before = ui.snapshots.value[key.value]?.state
-                        if (before is com.alphamessenger.transfer.TransferState.CacheEvicted) {
-                            // The user once deleted this from the cache and the
-                            // eviction marker pins the state — consider() must
-                            // respect it. But the bytes are back, fetched by the
-                            // viewer itself. Same path as tapping ↓: start() clears
-                            // the marker and re-asks the disk, and with the file
-                            // already there, nothing is downloaded.
-                            ui.dispatch(key, com.alphamessenger.transfer.TransferAction.Start, m.id)
-                        } else {
-                            ui.consider(
-                                key, m.mediaType, m.mediaFilename, m.mediaSizeBytes ?: 0L,
-                                m.isOutgoing, m.localMediaPath, m.id,
-                            )
-                        }
+                        ui.consider(
+                            com.alphamessenger.transfer.TransferKey.download(ref), m.mediaType, m.mediaFilename,
+                            m.mediaSizeBytes ?: 0L, m.isOutgoing, m.localMediaPath, m.id,
+                        )
                     }
                 }
             },
@@ -6875,429 +6289,9 @@ private fun ForwardPreview(
 
 // --- Gallery-picker caption + send bar (MAIN window → rises with the keyboard). ---
 
-@Composable
-private fun PickerCaptionBar(
-    colors: AlphaColorScheme,
-    caption: androidx.compose.ui.text.input.TextFieldValue,
-    count: Int,
-    focusRequester: FocusRequester,
-    onCaptionChange: (androidx.compose.ui.text.input.TextFieldValue) -> Unit,
-    onFocused: () -> Unit,
-    onSend: () -> Unit,
-) {
-    val remaining = MAX_MESSAGE_CHARS - caption.text.length
-    val overLimit = remaining < 0
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(colors.bgSecondary)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .heightIn(min = 42.dp)
-                .clip(RoundedCornerShape(21.dp))
-                .background(colors.bgPrimary)
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            com.alphamessenger.ui.chat.v2.PlatformTextField(
-                value = caption,
-                onEdit = onCaptionChange,
-                onSelect = { onCaptionChange(caption.copy(selection = it)) },
-                hint = stringResource(R.string.chat_caption_hint),
-                colors = colors,
-                textSizeSp = 15f,
-                lineHeightSp = 20f,
-                minHeight = 20.dp,
-                maxHeight = 80.dp,
-                padding = com.alphamessenger.ui.chat.v2.FieldPadding(0.dp, 0.dp, 0.dp, 0.dp),
-                modifier = Modifier.fillMaxWidth(),
-                scrollBar = false,
-                onTapped = onFocused,
-            )
-        }
-        if (remaining <= 200) {
-            Text(
-                "$remaining",
-                color = if (overLimit) Color(0xFFEB5757) else colors.textMuted,
-                fontSize = 11.sp,
-                modifier = Modifier.padding(start = 6.dp),
-            )
-        }
-        Spacer(Modifier.width(8.dp))
-        Row(
-            modifier = Modifier
-                .height(44.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(if (overLimit) colors.textMuted else colors.accent)
-                .clickable(enabled = !overLimit, onClick = onSend)
-                .padding(horizontal = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("$count", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.width(8.dp))
-            Icon(
-                AlphaIcons.AutoMirrored.Outlined.Send, stringResource(R.string.common_send),
-                tint = Color.White, modifier = Modifier.size(20.dp),
-            )
-        }
-    }
-}
-
 // --- Tap-to-record voice panel — blinking mic + live equalizer + pause/cancel/send ---
 
-@Composable
-private fun VoiceRecordPanel(
-    seconds: Int,
-    paused: Boolean,
-    ticks: kotlinx.coroutines.flow.SharedFlow<RecorderTick>,
-    colors: AlphaColorScheme,
-    onPauseResume: () -> Unit,
-    onCancel: () -> Unit,
-    onSend: () -> Unit,
-    keepKeyboard: Boolean = false,
-) {
-    // Waveform lives HERE (not in ChatState): collect the 10 Hz mic stream and
-    // keep the last 48 samples locally, so only this panel repaints.
-    val waveform = remember { androidx.compose.runtime.mutableStateListOf<Float>() }
-    LaunchedEffect(Unit) {
-        ticks.collect { t ->
-            waveform.add(t.amplitude)
-            while (waveform.size > 48) waveform.removeAt(0)
-        }
-    }
-    val blink = androidx.compose.animation.core.rememberInfiniteTransition(label = "rec")
-    val micAlpha by blink.animateFloat(
-        initialValue = 0.3f, targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(650), RepeatMode.Reverse), label = "mic",
-    )
-    Box(modifier = Modifier.fillMaxWidth()) {
-      if (keepKeyboard) {
-        // Invisible focus anchor keeps the IME up during hands-free recording —
-        // this panel has no text field to hold focus.
-        val anchorFocus = remember { FocusRequester() }
-        val kb = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
-        androidx.compose.foundation.text.BasicTextField(
-            value = "", onValueChange = {},
-            modifier = Modifier.size(1.dp).graphicsLayer(alpha = 0f).focusRequester(anchorFocus),
-        )
-        LaunchedEffect(Unit) { runCatching { anchorFocus.requestFocus() }; kb?.show() }
-      }
-    Row(
-        modifier = Modifier.fillMaxWidth().background(colors.bgSecondary)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            AlphaIcons.Outlined.Mic, contentDescription = null,
-            tint = Color(0xFFEB5757).copy(alpha = if (paused) 0.35f else micAlpha),
-            modifier = Modifier.size(24.dp),
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(fmtMs(seconds * 1000), color = colors.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-        Spacer(Modifier.width(10.dp))
-        // Live equalizer (recent amplitudes, scrolling right).
-        androidx.compose.foundation.Canvas(modifier = Modifier.weight(1f).height(30.dp)) {
-            val slots = 48
-            val barW = size.width / slots
-            val minH = 2.dp.toPx()
-            waveform.takeLast(slots).forEachIndexed { i, a ->
-                val h = (a * size.height).coerceAtLeast(minH)
-                val x = i * barW + barW / 2
-                drawLine(
-                    color = colors.accent,
-                    start = androidx.compose.ui.geometry.Offset(x, (size.height - h) / 2),
-                    end = androidx.compose.ui.geometry.Offset(x, (size.height + h) / 2),
-                    strokeWidth = barW * 0.55f,
-                    cap = androidx.compose.ui.graphics.StrokeCap.Round,
-                )
-            }
-        }
-        Spacer(Modifier.width(6.dp))
-        IconButton(onClick = onPauseResume, modifier = Modifier.size(40.dp)) {
-            Icon(
-                if (paused) AlphaIcons.Filled.PlayArrow else AlphaIcons.Filled.Pause,
-                contentDescription = if (paused) stringResource(R.string.common_continue) else stringResource(R.string.editor_pause),
-                tint = colors.textPrimary, modifier = Modifier.size(24.dp),
-            )
-        }
-        IconButton(onClick = onCancel, modifier = Modifier.size(40.dp)) {
-            Icon(AlphaIcons.Outlined.Close, stringResource(R.string.common_cancel), tint = colors.textMuted, modifier = Modifier.size(22.dp))
-        }
-        Box(
-            modifier = Modifier.size(46.dp).clip(CircleShape).background(Color(0xFF34C759))
-                .clickable(onClick = onSend),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(AlphaIcons.AutoMirrored.Outlined.Send, stringResource(R.string.common_send), tint = Color.White, modifier = Modifier.size(22.dp))
-        }
-    }
-    }
-}
-
 // --- Input bar — emoji, text field, attach, mic→send ---
-
-/**
- * Architectural seam (Step 1 of the bottom-area refactor). NOT the owner yet.
- *
- * No layout. No measurements. No state. No behavior. It adds NO Compose layout
- * node — [content] runs in the SAME [ColumnScope], so weight / constraints /
- * placement are byte-for-byte unchanged. This is only a named place into which
- * InputBar / Attach / Caption / Emoji / Recording will migrate in later steps;
- * it will BECOME the single bottom-area owner then, not now.
- *
- * ALLOWED here: `content()` and nothing else. FORBIDDEN until later steps:
- * Column / Box / Layout / SubcomposeLayout / AnimatedVisibility / remember /
- * rememberSaveable / LaunchedEffect / DisposableEffect / WindowInsets / any
- * Modifier (padding / offset / clip / background / height / weight). Keep empty.
- */
-// BottomSurface is now a real permanent Column Layout that owns the bottom area.
-// It always renders Divider + InputBar (never destroyed) + BottomPanel (one slot
-// whose height = bottomPanelHeight). The trailing-lambda form below keeps the
-// call site in ColumnScope and lets the children participate in the parent
-// Column's weight/constraints — same as before, but the children are now
-// permanent (no if/else if around them).
-@Composable
-private fun ColumnScope.BottomSurface(content: @Composable ColumnScope.() -> Unit) {
-    content()
-}
-
-@Composable
-private fun InputBar(
-    value: String,
-    onValueChange: (String) -> Unit,
-    isSending: Boolean,
-    onSend: () -> Unit,
-    onAttach: () -> Unit,
-    onEmoji: () -> Unit,
-    onCamera: () -> Unit = {},
-    /** Force the SEND button (not mic) even with empty text — used for forwarding
-     *  staged messages with no comment. */
-    forceSend: Boolean = false,
-    colors: AlphaColorScheme,
-    isRecording: Boolean = false,
-    recordingSeconds: Int = 0,
-    onStartRecord: () -> Unit = {},
-    onFinishRecord: () -> Unit = {},
-    onCancelRecord: () -> Unit = {},
-    onTapLockRecord: () -> Unit = {},
-    /** True when the inline emoji panel is open → show the ⌨️ icon instead of 😊. */
-    emojiOpen: Boolean = false,
-    /** Lets the host pop the keyboard (emoji → keyboard swap). */
-    inputFocusRequester: FocusRequester? = null,
-    /** The text field gained focus (host switches emoji→keyboard). */
-    onInputFocused: () -> Unit = {},
-) {
-    val hasText = value.isNotBlank() || forceSend
-    // A blinking microphone shared by the recording strip and the held button.
-    val blink = rememberInfiniteTransition(label = "rec")
-    val micAlpha by blink.animateFloat(
-        initialValue = 0.35f, targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(650), RepeatMode.Reverse),
-        label = "mic",
-    )
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(colors.bgSecondary)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-      // Keep the text field composed while recording so it keeps IME focus and
-      // the keyboard stays up; the recording strip overlays it (no jump).
-      Box(modifier = Modifier.weight(1f)) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(22.dp))
-                .background(colors.bgTertiary)
-                .padding(horizontal = 4.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onEmoji, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    if (emojiOpen) AlphaIcons.Outlined.Keyboard else AlphaIcons.Outlined.SentimentSatisfied,
-                    contentDescription = if (emojiOpen) stringResource(R.string.preview_keyboard) else stringResource(R.string.chat_emoji),
-                    tint = colors.textMuted,
-                    modifier = Modifier.size(22.dp),
-                )
-            }
-            // BasicTextField with `maxLines` caps the visible row count;
-            // once you hit the cap the field stops growing and the cursor
-            // keeps writing as the content scrolls internally.
-            // We further wrap the inner area in a scrollable column so the
-            // user can drag through old lines too.
-            val scrollState = rememberScrollState()
-            // Use TextFieldValue so a programmatic prefill (editing a caption)
-            // lands the cursor at the END, not at position 0. We mirror the
-            // external String `value`; when it changes from the outside we
-            // re-seed the cursor to the text end.
-            var tfv by remember { mutableStateOf(TextFieldValue(value, TextRange(value.length))) }
-            LaunchedEffect(value) {
-                if (value != tfv.text) tfv = TextFieldValue(value, TextRange(value.length))
-            }
-            BasicTextField(
-                value = tfv,
-                onValueChange = {
-                    // Allow typing/pasting OVER the limit (no silent truncation /
-                    // data loss). The counter turns red and the send button is
- // disabled until the user trims it — as messengers usually do.
-                    tfv = it
-                    if (it.text != value) onValueChange(it.text)
-                },
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 40.dp, max = 140.dp)
-                    .verticalScroll(scrollState)
-                    .padding(vertical = 8.dp, horizontal = 4.dp)
-                    .then(if (inputFocusRequester != null) Modifier.focusRequester(inputFocusRequester) else Modifier)
-                    .onFocusChanged {
-                        if (it.isFocused) onInputFocused()
-                    },
-                textStyle = LocalTextStyle.current.copy(
-                    color = colors.textPrimary,
-                    fontSize = 15.sp,
-                    lineHeight = 20.sp,
-                ),
-                cursorBrush = SolidColor(colors.accent),
-                // Auto-capitalize the first letter of each sentence.
-                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                maxLines = 6,
-                decorationBox = { inner ->
-                    Box(contentAlignment = Alignment.CenterStart) {
-                        if (value.isEmpty()) {
-                            Text(
-                                stringResource(R.string.msg_fallback_title),
-                                color = colors.textMuted,
-                                fontSize = 15.sp,
-                            )
-                        }
-                        inner()
-                    }
-                },
-            )
- // Char counter near the cap — shows how many left.
-            val remaining = MAX_MESSAGE_CHARS - value.length
-            if (remaining <= 200) {
-                Text(
-                    text = "$remaining",
-                    color = if (remaining <= 0) Color(0xFFEB5757) else colors.textMuted,
-                    fontSize = 11.sp,
-                    modifier = Modifier.padding(end = 4.dp),
-                )
-            }
-            IconButton(onClick = onAttach, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    AlphaIcons.Outlined.AttachFile,
-                    contentDescription = stringResource(R.string.chat_attach_a11y),
-                    tint = colors.textMuted,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-            // Camera only when the field is empty (hide once user is typing).
-            if (!hasText) {
-                IconButton(
-                    onClick = onCamera,
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(
-                        AlphaIcons.Outlined.PhotoCamera,
-                        contentDescription = stringResource(R.string.perm_camera),
-                        tint = colors.textMuted,
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
-            }
-        }
-        if (isRecording) {
-            Row(
-                modifier = Modifier
-                    .matchParentSize()
-                    .background(colors.bgSecondary)
-                    .padding(start = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    AlphaIcons.Outlined.Mic,
-                    contentDescription = null,
-                    tint = Color(0xFFEB5757).copy(alpha = micAlpha),
-                    modifier = Modifier.size(22.dp),
-                )
-                Spacer(Modifier.width(10.dp))
-                Text(fmtMs(recordingSeconds * 1000), color = colors.textPrimary, fontSize = 16.sp)
-                Spacer(Modifier.weight(1f))
-                Text(stringResource(R.string.chat_swipe_to_cancel), color = colors.textMuted, fontSize = 13.sp)
-            }
-        }
-      }
-        Spacer(Modifier.width(8.dp))
-        // Send button when there's text; otherwise a hold-to-record mic
-        // (press = start, release = send, swipe left past threshold = cancel).
-        // The button stays mounted while recording (so the gesture isn't lost)
-        // and grows + turns red with a blinking mic.
-        val recScale by androidx.compose.animation.core.animateFloatAsState(
-            targetValue = if (isRecording) 1.4f else 1f, label = "micScale",
-        )
-        val overLimit = value.length > MAX_MESSAGE_CHARS
-        val micModifier = if (hasText) Modifier else Modifier.pointerInput(Unit) {
-            awaitPointerEventScope {
-                while (true) {
-                    val down = awaitFirstDown()
-                    val downTime = System.currentTimeMillis()
-                    onStartRecord()
-                    var cancelled = false
-                    var locked = false
-                    while (true) {
-                        val ev = awaitPointerEvent()
-                        val ch = ev.changes.firstOrNull { it.id == down.id }
-                        if (ch == null || !ch.pressed) break
- // Slide LEFT → cancel; slide UP → lock hands-free.
-                        if (ch.position.x - down.position.x < -130f) cancelled = true
-                        if (ch.position.y - down.position.y < -120f) locked = true
-                    }
-                    val heldMs = System.currentTimeMillis() - downTime
-                    when {
-                        cancelled -> onCancelRecord()
-                        // Slide-up lock OR a quick tap → hands-free locked panel
-                        // (recording keeps going; send/cancel via the buttons).
-                        locked || heldMs < 350 -> onTapLockRecord()
-                        else -> onFinishRecord()
-                    }
-                }
-            }
-        }
-        Box(
-            modifier = micModifier
-                .size(48.dp)
-                .graphicsLayer(scaleX = recScale, scaleY = recScale)
-                .clip(CircleShape)
-                .background(
-                    when {
-                        isRecording -> Color(0xFFEB5757)
-                        // Over the char limit → greyed-out (send disabled).
-                        hasText && overLimit -> colors.textMuted
-                        // Send + mic share the same green background.
-                        else -> Color(0xFF34C759)
-                    }
-                )
-                .then(if (hasText) Modifier.clickable(enabled = !isSending && !overLimit) { onSend() } else Modifier),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = if (hasText) AlphaIcons.AutoMirrored.Outlined.Send else AlphaIcons.Outlined.Mic,
-                contentDescription = if (hasText) stringResource(R.string.common_send) else stringResource(R.string.voice_note_label),
-                tint = when {
-                    isRecording -> Color.White.copy(alpha = micAlpha)
-                    else -> Color.White // white icon on green bg (send + mic)
-                },
-                modifier = Modifier.size(22.dp),
-            )
-        }
-    }
-}
 
 // --- Avatar palette — flat single-colour circles as messengers usually do ---
 
@@ -7481,77 +6475,6 @@ private fun CompactBubbleLayout(
             }
             textPlaceable?.placeRelative(0, currentY)
             statusPlaceable?.placeRelative(statusX, statusY)
-        }
-    }
-}
-
-private val EmojiCodes = listOf(
-    0x1F600, 0x1F601, 0x1F602, 0x1F923, 0x1F60A, 0x1F607, 0x1F642, 0x1F643,
-    0x1F609, 0x1F60C, 0x1F60D, 0x1F970, 0x1F618, 0x1F617, 0x1F619, 0x1F61A,
-    0x1F60B, 0x1F61B, 0x1F61D, 0x1F61C, 0x1F92A, 0x1F928, 0x1F9D0, 0x1F913,
-    0x1F60E, 0x1F973, 0x1F929, 0x1F97A, 0x1F60F, 0x1F612, 0x1F61E, 0x1F614,
-    0x1F61F, 0x1F615, 0x1F623, 0x1F616, 0x1F62B, 0x1F629, 0x1F624, 0x1F620,
-    0x1F621, 0x1F92C, 0x1F633, 0x1F631, 0x1F628, 0x1F630, 0x1F625, 0x1F622,
-    0x1F62D, 0x1F613, 0x1F917, 0x1F914, 0x1F92D, 0x1F92B, 0x1F925, 0x1F62C,
-    0x1F644, 0x1F62F, 0x1F634, 0x1F924, 0x1F62A, 0x1F635, 0x1F910, 0x1F974,
-    0x1F922, 0x1F92E, 0x1F927, 0x1F637, 0x1F912, 0x1F915, 0x1F44D, 0x1F44E,
-    0x1F44C, 0x1F44F, 0x1F64C, 0x1F64F, 0x1F4AA, 0x1F525, 0x2764, 0x1F9E1,
-    0x1F49B, 0x1F49A, 0x1F499, 0x1F49C, 0x1F5A4, 0x1F90D, 0x1F389, 0x1F38A,
-    0x2728, 0x1F4AF,
-)
-
-/** Inline emoji panel: slides up under the input bar, pushing
- *  it up like a keyboard would. Height is host-controlled and drag-resizable
- *  via the top grabber. Tapping an emoji inserts it into the message field. */
-@Composable
-private fun EmojiPanel(
-    modifier: Modifier,
-    colors: AlphaColorScheme,
-    onPick: (String) -> Unit,
-    onDrag: (Float) -> Unit,
-    onDragRelease: () -> Unit,
-) {
-    val emojis = remember { EmojiCodes.map { String(Character.toChars(it)) } }
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
- // Flush with the input bar (same bg, no rounded notch) — other messengers
-            // shows the emoji panel as a seamless keyboard replacement.
-            .background(colors.bgSecondary),
-    ) {
-        // Drag grabber.
-        Box(
-            modifier = Modifier.fillMaxWidth()
-                .pointerInput(Unit) {
-                    detectVerticalDragGestures(
-                        onVerticalDrag = { _, delta -> onDrag(delta) },
-                        onDragEnd = { onDragRelease() },
-                        onDragCancel = { onDragRelease() },
-                    )
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(
-                modifier = Modifier
-                    .padding(top = 8.dp, bottom = 6.dp)
-                    .width(36.dp).height(4.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(colors.textMuted.copy(alpha = 0.35f)),
-            )
-        }
-        androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
-            columns = androidx.compose.foundation.lazy.grid.GridCells.Fixed(8),
-            modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 6.dp),
-        ) {
-            emojis.forEach { e ->
-                item {
-                    Text(
-                        e, fontSize = 26.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                        modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { onPick(e) }
-                            .padding(vertical = 8.dp),
-                    )
-                }
-            }
         }
     }
 }
@@ -7771,7 +6694,7 @@ internal fun fmtMs(ms: Int): String {
 }
 
 /** classic voice waveform that doubles as a seek bar. Bars up to the
- *  played `fraction` are accent-coloured; tapping seeks to that position. */
+ *  played `fraction` are accent-coloured; a tap or a drag seeks. */
 @Composable
 private fun WaveformSeek(
     fraction: Float,
@@ -7785,9 +6708,7 @@ private fun WaveformSeek(
         modifier = modifier
             .fillMaxWidth()
             .height(24.dp)
-            .pointerInput(Unit) {
-                detectTapGestures { offset -> onSeek((offset.x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f)) }
-            },
+            .seekGesture(onSeek),
     ) {
         val gap = 2.dp.toPx()
         val n = ((size.width + gap) / (2.5.dp.toPx() + gap)).toInt().coerceAtLeast(1)
@@ -8167,14 +7088,7 @@ private fun LineSeek(
         modifier = modifier
             .fillMaxWidth()
             .height(22.dp)
-            .pointerInput(Unit) {
-                detectTapGestures { o -> onSeek((o.x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f)) }
-            }
-            .pointerInput(Unit) {
-                detectHorizontalDragGestures { ch, _ ->
-                    onSeek((ch.position.x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f))
-                }
-            },
+            .seekGesture(onSeek),
     ) {
         Canvas(Modifier.fillMaxSize()) {
             val cy = size.height / 2f
@@ -8541,12 +7455,13 @@ private fun MessageActionSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     // "+" swaps the action list for the full emoji grid (any emoji as a reaction).
     var pickAnyEmoji by remember { mutableStateOf(startWithPicker) }
- // Hide keyboard so the menu slides up from the bottom.
     val imeController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     androidx.compose.runtime.LaunchedEffect(Unit) {
         haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
-        imeController?.hide()
+        // The bottom panel rises from the bottom edge, so the keyboard makes way; the
+        // menu beside the message opens over the chat and leaves the keyboard up.
+        if (!(anchor != null && haze != null && MessageMenuPrefs.popup)) imeController?.hide()
     }
     val hasReactions = reactionPolicy.enabled || message.myReactions.isNotEmpty()
     val notSentYet = onCancelSend != null || onRetrySend != null

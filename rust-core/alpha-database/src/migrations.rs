@@ -29,37 +29,37 @@ fn migrations() -> Vec<Migration> {
         },
         Migration {
             version: 3,
-            description: "MLS persistent storage (Этап 2)",
+            description: "MLS persistent storage",
             sql: include_str!("migrations/003_mls_storage.sql"),
         },
         Migration {
             version: 4,
-            description: "Chat-list flags: pin/mute/archive/unread (Этап 8.4)",
+            description: "Chat-list flags: pin/mute/archive/unread",
             sql: include_str!("migrations/004_chat_flags.sql"),
         },
         Migration {
             version: 5,
-            description: "Contact profile fields: bio/avatar/version (Этап 8.8 v2)",
+            description: "Contact profile fields: bio/avatar/version",
             sql: include_str!("migrations/005_contact_profile.sql"),
         },
         Migration {
             version: 6,
-            description: "Group metadata: avatar/description/version (Этап 8.8 v3)",
+            description: "Group metadata: avatar/description/version",
             sql: include_str!("migrations/006_group_metadata.sql"),
         },
         Migration {
             version: 7,
-            description: "Outbox: guaranteed-delivery retry queue (Этап 7.8)",
+            description: "Outbox: guaranteed-delivery retry queue",
             sql: include_str!("migrations/007_outbox.sql"),
         },
         Migration {
             version: 8,
-            description: "Pending sends: defer-encryption outgoing queue (Этап 7.8 v2)",
+            description: "Pending sends: defer-encryption outgoing queue",
             sql: include_str!("migrations/008_pending_sends.sql"),
         },
         Migration {
             version: 10,
-            description: "Pending media: offline media send queue (Этап 7.10)",
+            description: "Pending media: offline media send queue",
             sql: include_str!("migrations/010_pending_media.sql"),
         },
         Migration {
@@ -94,27 +94,27 @@ fn migrations() -> Vec<Migration> {
         },
         Migration {
             version: 17,
-            description: "T3: media_send_keys — ключи для повторного получения того же шифротекста",
+            description: "T3: media_send_keys — keys to reproduce the same ciphertext",
             sql: include_str!("migrations/017_media_send_keys.sql"),
         },
         Migration {
             version: 18,
-            description: "T3: media_send_objects — доверенные путь и ожидаемая идентичность",
+            description: "T3: media_send_objects — trusted path and expected identity",
             sql: include_str!("migrations/018_media_send_objects.sql"),
         },
         Migration {
             version: 19,
-            description: "T4: контрольная точка — какие куски подтверждены хранилищем",
+            description: "T4: checkpoint of the chunks the storage confirmed",
             sql: include_str!("migrations/019_media_send_checkpoint.sql"),
         },
         Migration {
             version: 20,
-            description: "T4: одна строка очереди на сообщение и один владелец отправки",
+            description: "T4: one queue row per message and one send owner",
             sql: include_str!("migrations/020_pending_media_single_owner.sql"),
         },
         Migration {
             version: 21,
-            description: "P1: состояние доставки по каждому получателю (конверты NIP-59)",
+            description: "P1: delivery state per recipient (NIP-59 envelopes)",
             sql: include_str!("migrations/021_delivery_fanout.sql"),
         },
         Migration {

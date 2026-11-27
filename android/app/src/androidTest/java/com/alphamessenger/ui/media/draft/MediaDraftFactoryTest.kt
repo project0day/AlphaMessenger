@@ -17,8 +17,8 @@ import org.junit.runner.RunWith
 import java.io.File
 
 /**
- * C3 — приём URI. Проверяется поведение фабрики на настоящих URI: тип, имя,
- * размер, EXIF, права и локальная копия.
+ * C3: taking in a URI. The factory is checked on real URIs: type, name, size, EXIF,
+ * grants and the local copy.
  */
 @RunWith(AndroidJUnit4::class)
 class MediaDraftFactoryTest {
@@ -37,7 +37,7 @@ class MediaDraftFactoryTest {
         File(context.cacheDir, "draft").deleteRecursively()
     }
 
-    // ── Хелперы ───────────────────────────────────────────────────────────
+    // ── Helpers ─────────────────────────────────────────────────────────
 
     private fun file(name: String, bytes: ByteArray = ByteArray(64) { it.toByte() }): File {
         val f = File(context.cacheDir, name)
@@ -66,7 +66,7 @@ class MediaDraftFactoryTest {
 
     private fun uri(case: String, f: File) = DraftTestProvider.uriFor(case, f)
 
-    // ── T1..T5: тип по MIME провайдера ────────────────────────────────────
+    // ── T1..T5: type from the provider MIME ─────────────────────────────
 
     @Test
     fun t1_jpegIsImage() {
@@ -104,7 +104,7 @@ class MediaDraftFactoryTest {
         assertEquals("application/pdf", item.mimeType)
     }
 
-    // ── T6, T7: общий MIME → тип по расширению ────────────────────────────
+    // ── T6, T7: generic MIME → type from the extension ─────────────────
 
     @Test
     fun t6_genericMimeWithJpgExtensionIsImage() {
@@ -120,15 +120,15 @@ class MediaDraftFactoryTest {
         assertEquals("video/mp4", item.mimeType)
     }
 
-    // ── T8, T9: провайдер молчит про имя и размер ─────────────────────────
+    // ── T8, T9: the provider withholds name and size ────────────────────
 
     @Test
     fun t8_noDisplayNameFallsBackToSafeName() {
         val item = ingest(uri(DraftTestProvider.CASE_NO_NAME, file("t8.pdf"))).getOrThrow()
         val name = item.filename
         assertNotNull(name)
-        assertTrue("имя не должно быть пустым: $name", !name.isNullOrBlank())
-        assertFalse("в имени не должно быть разделителей пути: $name", name!!.contains('/'))
+        assertTrue("the name must not be empty: $name", !name.isNullOrBlank())
+        assertFalse("the name must hold no path separators: $name", name!!.contains('/'))
     }
 
     @Test
@@ -136,7 +136,7 @@ class MediaDraftFactoryTest {
         val f = file("t9.pdf", ByteArray(4096))
         val item = ingest(uri(DraftTestProvider.CASE_NO_SIZE, f)).getOrThrow()
         assertTrue(
-            "размер неизвестен → SIZE_UNKNOWN или размер из дескриптора, но не 0",
+            "size unknown → SIZE_UNKNOWN or the descriptor size, never 0",
             item.sizeBytes == MediaDraftItem.SIZE_UNKNOWN || item.sizeBytes == 4096L,
         )
     }
@@ -148,19 +148,19 @@ class MediaDraftFactoryTest {
         val rotated = jpeg("t10.jpg", android.media.ExifInterface.ORIENTATION_ROTATE_90)
         val item = ingest(uri(DraftTestProvider.CASE_FULL, rotated)).getOrThrow()
         assertEquals(90, item.exifRotationDegrees)
-        // Правка пользователя отдельно и по умолчанию пуста.
+        // The user edit is separate and empty by default.
         assertEquals(0, item.rotationDegrees)
         assertEquals(90, item.effectiveRotation)
     }
 
-    // ── T11, T12: права и копия ───────────────────────────────────────────
+    // ── T11, T12: grants and the copy ───────────────────────────────────
 
     @Test
     fun t11_inAppSourceIsNotCopied() {
         val f = jpeg("t11.jpg")
         val src = uri(DraftTestProvider.CASE_FULL, f)
         val item = ingest(src, MediaDraftItem.Source.GALLERY).getOrThrow()
-        assertEquals("свой источник копировать не нужно", src, item.uri)
+        assertEquals("an own source needs no copy", src, item.uri)
         assertFalse(item.deleteAfterUse)
     }
 
@@ -168,20 +168,20 @@ class MediaDraftFactoryTest {
     fun t12_shareWithoutPersistablePermissionIsCopied() {
         val f = jpeg("t12.jpg")
         val item = ingest(uri(DraftTestProvider.CASE_FULL, f), MediaDraftItem.Source.SHARE).getOrThrow()
-        assertTrue("копия должна быть помечена на удаление", item.deleteAfterUse)
+        assertTrue("the copy must be marked for deletion", item.deleteAfterUse)
         assertEquals("file", item.uri.scheme)
         val copy = File(requireNotNull(item.uri.path))
-        assertTrue("копия должна существовать", copy.exists())
-        assertTrue("копия должна быть непустой", copy.length() > 0)
-        assertNotNull("исходный URI должен сохраниться", item.originalUri)
+        assertTrue("the copy must exist", copy.exists())
+        assertTrue("the copy must not be empty", copy.length() > 0)
+        assertNotNull("the original URI must be kept", item.originalUri)
     }
 
     // ── T13, T14 ──────────────────────────────────────────────────────────
 
     @Test
     fun t13_missingUriFailsWithoutCrash() {
-        val result = ingest(uri(DraftTestProvider.CASE_GONE, File(context.cacheDir, "нет.pdf")))
-        assertTrue("ожидается Result.failure", result.isFailure)
+        val result = ingest(uri(DraftTestProvider.CASE_GONE, File(context.cacheDir, "missing.pdf")))
+        assertTrue("expected Result.failure", result.isFailure)
         assertTrue(result.exceptionOrNull() is MediaDraftFactory.Failure.Unreadable)
     }
 
@@ -200,7 +200,7 @@ class MediaDraftFactoryTest {
         assertTrue(results[2].isSuccess)
         assertEquals(MediaDraftItem.Kind.IMAGE, results[0].getOrThrow().kind)
         assertEquals(MediaDraftItem.Kind.FILE, results[2].getOrThrow().kind)
-        // Идентификаторы независимы — набор можно переставлять и удалять по ним.
+        // Ids are independent: the set can be reordered and pruned by them.
         assertFalse(results[0].getOrThrow().id == results[2].getOrThrow().id)
     }
 }

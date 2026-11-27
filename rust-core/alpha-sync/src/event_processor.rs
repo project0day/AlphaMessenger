@@ -745,7 +745,36 @@ impl EventProcessor {
             "DB_WRITE_START chat_id={} sender_id={} t_ms={}",
             chat_id, sender_id, t_db_start_ms
         );
+        // A send retried after its confirmation was lost is a new event with the same
+        // message id: the message is already here, and nothing about it is new.
+        let stable_id = match &alpha_msg {
+            AlphaMessage::Edit { id, edited_at, .. } => format!("{}#edit#{}", id, edited_at),
+            m => m.id().to_string(),
+        };
+        if !stable_id.is_empty() && MessageRepo::get(&self.db.connection(), &stable_id).ok().flatten().is_some() {
+            return Ok(ProcessedEvent::DuplicateReceived { chat_id: chat_id.to_string() });
+        }
+        // Relays hand stored events back newest first: a delete or an edit can come
+        // before its message. It is held, and applied when the message arrives.
+        if let Some((kind, target)) = names_message(&alpha_msg) {
+            let conn = self.db.connection();
+            if MessageRepo::get(&conn, target).ok().flatten().is_none() {
+                let held = alpha_database::early::Held {
+                    sender_id: sender_id.to_string(),
+                    author: author.to_string(),
+                    at: event_ts,
+                    payload: plaintext.to_vec(),
+                    held_at: chrono::Utc::now().timestamp(),
+                };
+                alpha_database::early::hold(&conn, kind, chat_id, target, &held);
+                return Ok(ProcessedEvent::DuplicateReceived { chat_id: chat_id.to_string() });
+            }
+        }
         self.persist_alpha_message(chat_id, &alpha_msg, author, event_ts)?;
+        // Deleted before it got here: stored as deleted, and nothing about it is shown.
+        if self.apply_held(chat_id, alpha_msg.id()) {
+            return Ok(ProcessedEvent::DuplicateReceived { chat_id: chat_id.to_string() });
+        }
         if alpha_msg.silent() {
             let _ = MessageRepo::mark_silent(&self.db.connection(), alpha_msg.id());
         }
@@ -764,6 +793,27 @@ impl EventProcessor {
             message: alpha_msg,
             own_device,
         })
+    }
+
+    /// Applies the deletes and edits held for [target_id], now that it is here, by the
+    /// same rights as any other. True when the message was deleted by one of them.
+    fn apply_held(&self, chat_id: &str, target_id: &str) -> bool {
+        if target_id.is_empty() {
+            return false;
+        }
+        let held = alpha_database::early::take(&self.db.connection(), chat_id, target_id);
+        let mut deleted = false;
+        for h in held {
+            let Ok(msg) = deserialize(&h.payload) else { continue };
+            if !self.write_allowed(chat_id, &msg, &h.sender_id, h.at as i64) {
+                tracing::warn!("held change dropped in {}: sender may not change the message", chat_id);
+                continue;
+            }
+            if self.persist_alpha_message(chat_id, &msg, &h.author, h.at).is_ok() && matches!(msg, AlphaMessage::Delete { .. }) {
+                deleted = true;
+            }
+        }
+        deleted
     }
 
     /// A comment from a channel's history, under its real author. The history's
@@ -1430,13 +1480,14 @@ impl EventProcessor {
         // its author or the group's admins (moderators in a group) may delete it.
         // Everywhere — a modified client must not erase or rewrite others' words.
         match msg {
+            // A message not here yet is judged when it comes: the edit or delete waits for it.
             AlphaMessage::Edit { id, .. } => {
                 let conn = self.db.connection();
-                return MessageRepo::get(&conn, id).ok().flatten().map(|m| m.sender_id == sender_id).unwrap_or(false);
+                return MessageRepo::get(&conn, id).ok().flatten().map(|m| m.sender_id == sender_id).unwrap_or(true);
             }
             AlphaMessage::Delete { target_id, .. } => {
                 let conn = self.db.connection();
-                let Some(target) = MessageRepo::get(&conn, target_id).ok().flatten() else { return false };
+                let Some(target) = MessageRepo::get(&conn, target_id).ok().flatten() else { return true };
                 if target.chat_id != chat_id { return false; }
                 if target.sender_id == sender_id { return true; }
                 if group_roles::owner_of(&conn, chat_id).is_none() { return false; }
@@ -1988,6 +2039,15 @@ pub fn adopt_legacy_comments(conn: &alpha_database::Connection) -> usize {
         }
     }
     n
+}
+
+/// The message a delete or an edit changes, with which of the two it is.
+fn names_message(msg: &AlphaMessage) -> Option<(&'static str, &str)> {
+    match msg {
+        AlphaMessage::Delete { target_id, .. } => Some(("delete", target_id.as_str())),
+        AlphaMessage::Edit { id, .. } => Some(("edit", id.as_str())),
+        _ => None,
+    }
 }
 
 fn strip_legacy_header(conn: &alpha_database::Connection, message_id: &str) {

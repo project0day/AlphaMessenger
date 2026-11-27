@@ -198,7 +198,7 @@ class MediaDraftStore {
 class MediaDraftViewModel @javax.inject.Inject constructor(
     private val savedState: androidx.lifecycle.SavedStateHandle,
     @dagger.hilt.android.qualifiers.ApplicationContext private val appContext: Context,
-    private val preUploads: com.alphamessenger.ui.media.send.MediaPreUpload,
+    private val sendQueue: com.alphamessenger.ui.media.send.MediaSendQueue,
 ) : ViewModel() {
 
     val store = MediaDraftStore().also { it.restoreFrom(savedState) }
@@ -223,7 +223,7 @@ class MediaDraftViewModel @javax.inject.Inject constructor(
                 )
             }
                 .debounce(PRE_UPLOAD_SETTLE_MS)
-                .collect { (items, _, _) -> preUploads.offer(chatId, items) }
+                .collect { (items, _, _) -> sendQueue.compose(chatId, items) }
         }
     }
 
@@ -283,13 +283,13 @@ class MediaDraftViewModel @javax.inject.Inject constructor(
      * bubble shows instantly instead of waiting for re-encoding.
      */
     fun consume(): List<MediaDraftItem> = store.consume().also {
-        preUploads.reserve(it)
+        sendQueue.reserve(it)
         persist()
     }
 
     /** Cancel: the set is dropped, our temp copies are deleted, its uploads leave the servers. */
     fun discard() {
-        preUploads.discard(store.items.toList())
+        sendQueue.discardComposed(store.items.toList())
         store.discard(appContext)
         persist()
     }
@@ -299,7 +299,7 @@ class MediaDraftViewModel @javax.inject.Inject constructor(
 
     override fun onCleared() {
         persist()
-        preUploads.discard(store.items.toList())
+        sendQueue.discardComposed(store.items.toList())
         super.onCleared()
     }
 

@@ -53,14 +53,14 @@ object VideoTrimmer {
         durationMs: Long,
         onProgress: (Int) -> Unit = {},
     ): File? {
-        require(plan.route != ExportRoute.REUSE) { "REUSE выполняется копированием, не экспортом" }
+        require(plan.route != ExportRoute.REUSE) { "REUSE is a copy, not an export" }
         val handler = android.os.Handler(android.os.Looper.getMainLooper())
         dest.parentFile?.mkdirs()
         // Leftover of an earlier interrupted attempt: the library does not write over.
         if (dest.exists()) runCatching { dest.delete() }
 
-        logTracks(context, source, "ИСХОДНИК")
-        android.util.Log.i(TAG, "план → ${plan.describe()}")
+        logTracks(context, source, "SOURCE")
+        android.util.Log.i(TAG, "plan → ${plan.describe()}")
         val startedAt = android.os.SystemClock.elapsedRealtime()
 
         // Transformer lives on a thread with a message queue — start it on
@@ -146,7 +146,7 @@ object VideoTrimmer {
                         override fun onCompleted(composition: Composition, result: ExportResult) {
                             android.util.Log.i(
                                 TAG,
-                                "готово: ${dest.length()} байт, длительность ${result.durationMs} мс",
+                                "done: ${dest.length()} bytes, duration ${result.durationMs} ms",
                             )
                             stopTicker()
                             if (continuation.isActive) continuation.resume(true)
@@ -158,7 +158,7 @@ object VideoTrimmer {
                             exception: ExportException,
                         ) {
                             stopTicker()
-                            android.util.Log.w(TAG, "подготовка не удалась", exception)
+                            android.util.Log.w(TAG, "preparation failed", exception)
                             if (continuation.isActive) continuation.resume(false)
                         }
                     })
@@ -183,14 +183,14 @@ object VideoTrimmer {
                 }
                 runCatching { transformer.start(composition, dest.absolutePath) }
                     .onFailure {
-                        android.util.Log.w(TAG, "не удалось запустить подготовку", it)
+                        android.util.Log.w(TAG, "could not start the preparation", it)
                         if (continuation.isActive) continuation.resume(false)
                     }
             }
         }
 
         val exportMs = android.os.SystemClock.elapsedRealtime() - startedAt
-        android.util.Log.i(TAG, "экспорт ${plan.route} занял $exportMs мс, ok=$ok, вес ${dest.length()} Б")
+        android.util.Log.i(TAG, "export ${plan.route} took $exportMs ms, ok=$ok, size ${dest.length()} B")
 
         if (!ok || !dest.exists() || dest.length() <= 0L) {
             runCatching { dest.delete() }
@@ -198,7 +198,7 @@ object VideoTrimmer {
         }
         // Check the RESULT, not the source: track count, colour, first
         // packet timestamp. Otherwise "done" is just another word.
-        logTracks(context, Uri.fromFile(dest), "РЕЗУЛЬТАТ")
+        logTracks(context, Uri.fromFile(dest), "RESULT")
         return dest
     }
 
@@ -348,7 +348,7 @@ object VideoTrimmer {
                     context.contentResolver.openFileDescriptor(uri, "r").use { fd ->
                         if (fd == null) return@runCatching
                         extractor.setDataSource(fd.fileDescriptor)
-                        android.util.Log.i(TAG, "$label: дорожек=${extractor.trackCount}")
+                        android.util.Log.i(TAG, "$label: tracks=${extractor.trackCount}")
                         for (i in 0 until extractor.trackCount) {
                             val f = extractor.getTrackFormat(i)
                             val mime = f.getString(android.media.MediaFormat.KEY_MIME).orEmpty()
@@ -364,7 +364,7 @@ object VideoTrimmer {
                             )
                             if (mime.startsWith("video/")) {
                                 extractor.selectTrack(i)
-                                android.util.Log.i(TAG, "$label[$i] первый штамп=${extractor.sampleTime} мкс")
+                                android.util.Log.i(TAG, "$label[$i] first pts=${extractor.sampleTime} us")
                                 extractor.unselectTrack(i)
                             }
                         }

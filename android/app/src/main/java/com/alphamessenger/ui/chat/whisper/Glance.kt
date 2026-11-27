@@ -80,7 +80,7 @@ val GLANCE_SECS = listOf(1, 3, 5, 10, 0)
 
 private val GlanceAccent = Color(0xFFA78BFA)
 
-/** Label of a timer choice: "5 с" or "∞". */
+/** Label of a timer choice: "5 s" or "∞". */
 @Composable
 fun glanceLabel(secs: Int): String =
     if (secs == 0) "∞" else stringResource(R.string.whisper_secs, secs)

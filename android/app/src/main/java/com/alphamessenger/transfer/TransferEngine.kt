@@ -4,6 +4,7 @@ import com.alphamessenger.BuildConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
@@ -369,7 +370,18 @@ class TransferEngine(
      * was still on disk. */
     fun resolve(key: TransferKey, senderLocalPath: String?) {
         val cur = live[key.value]?.state
-        // Never clobber an in-flight or terminal state.
+        // Never clobber an in-flight or terminal state; an evicted file may only turn
+        // ready, when something (the viewer) brought its bytes back.
+        if (cur == TransferState.CacheEvicted) {
+            when (val avail = repo.mediaAvailability(key.ref, senderLocalPath)) {
+                is FileSource.Original, is FileSource.Cache -> {
+                    repo.unmarkCacheEvicted(key.ref)
+                    put(key, TransferState.Completed(if (avail is FileSource.Cache) avail.path else (avail as FileSource.Original).path))
+                }
+                else -> Unit
+            }
+            return
+        }
         if (cur != null && cur != TransferState.Idle) return
 
         // THE Repository is the ONLY source of disk truth (no File.exists() in the
@@ -521,6 +533,7 @@ class TransferEngine(
 
     /** Downloads waiting for the album item before them; a direct start lets one go at once. */
     private val waitingTurn = ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<Unit>>()
+    private val autoTurns = kotlinx.coroutines.sync.Semaphore(AUTO_DOWNLOADS_AT_ONCE)
 
     private fun previousInGroup(key: TransferKey): TransferKey? {
         val members = groupMembers.values.firstOrNull { key in it } ?: return null
@@ -587,10 +600,35 @@ class TransferEngine(
         // An album downloads in its own order, one item at a time: the first item is
         // ready to view soonest, and one file's parallel chunks already fill the line.
         // Anything else starts at once; load is bounded at the CHUNK level in Rust.
-        launchDownload(key, opId, if (inOrder) previousInGroup(key) else null)
+        launchDownload(key, opId, if (inOrder) previousInGroup(key) else null, auto = inOrder)
     }
 
-    private fun launchDownload(key: TransferKey, opId: String, after: TransferKey? = null) {
+    /**
+     * Automatic downloads take turns, a few at a time, so a backlog (a phone back online
+     * after a night, a chat full of media) cannot hold every slot while avatars,
+     * previews and what the user opens wait. A tap never waits: it goes past the queue.
+     * False when the tap let it go without a turn.
+     */
+    private suspend fun takeAutoTurn(key: TransferKey): Boolean = kotlinx.coroutines.coroutineScope {
+        val tapped = kotlinx.coroutines.CompletableDeferred<Unit>()
+        waitingTurn[key.value] = tapped
+        val turn = async { autoTurns.acquire() }
+        try {
+            kotlinx.coroutines.selects.select {
+                turn.onAwait { true }
+                tapped.onAwait { false }
+            }.also { granted ->
+                if (!granted) {
+                    turn.cancelAndJoin()
+                    if (turn.isCompleted && !turn.isCancelled) autoTurns.release()
+                }
+            }
+        } finally {
+            waitingTurn.remove(key.value, tapped)
+        }
+    }
+
+    private fun launchDownload(key: TransferKey, opId: String, after: TransferKey? = null, auto: Boolean = false) {
         // Resuming a paused download: the ring starts where it stood.
         val from = (live[key.value]?.state as? TransferState.Paused)?.progress ?: TransferProgress.NONE
         paused.remove(key.value)
@@ -603,7 +641,12 @@ class TransferEngine(
                 waitingTurn[key.value] = go
                 try { awaitTurn(after, go) } finally { waitingTurn.remove(key.value, go) }
             }
-            var path = runCatching { repo.downloadTracked(key.ref, opId) }.getOrNull()
+            val turn = auto && takeAutoTurn(key)
+            var path = try {
+                runCatching { repo.downloadTracked(key.ref, opId) }.getOrNull()
+            } finally {
+                if (turn) autoTurns.release()
+            }
             // A fresh file may still be on its way to the servers this network reaches:
             // a few quiet retries, each resuming from `.part`, before ↻ is offered.
             for ((i, pause) in AUTO_RETRY_MS.withIndex()) {
@@ -702,6 +745,17 @@ class TransferEngine(
      */
     fun deleteCacheOf(keys: Collection<TransferKey>, deleteLocalCopy: Boolean): Long =
         keys.sumOf { deleteCache(it, deleteLocalCopy) }
+
+    /**
+     * A finished send's file moved into the cache: a bubble that resolved to the
+     * outbox copy now points at the one copy left.
+     */
+    fun onSentFileAdopted(ref: String) {
+        val key = TransferKey.download(ref)
+        if (live[key.value]?.state !is TransferState.Completed) return
+        val avail = repo.mediaAvailability(key.ref, null)
+        if (avail is FileSource.Cache) put(key, TransferState.Completed(avail.path))
+    }
 
     private fun deleteCache(key: TransferKey, deleteLocalCopy: Boolean): Long {
         sessions.remove(key.value)?.job?.cancel()
@@ -844,7 +898,7 @@ class TransferEngine(
         speed.remove(key.value)
         decile.remove(key.value)
         put(key, TransferState.WaitingNetwork(kept), immediate = true)
-        logEvent(key.value, TransferEvent.Kind.Paused, "ожидание сети")
+        logEvent(key.value, TransferEvent.Kind.Paused, "waiting for network")
     }
 
     /**
@@ -863,7 +917,7 @@ class TransferEngine(
             TransferSnapshot(key = key, state = TransferState.Uploading(cur.progress), progress = cur.progress),
             immediate = true,
         )
-        logEvent(key.value, TransferEvent.Kind.Resumed, "сеть вернулась")
+        logEvent(key.value, TransferEvent.Kind.Resumed, "network back")
     }
 
     fun onUploadFailed(msgId: String, reason: String = "") {
@@ -1046,19 +1100,22 @@ class TransferEngine(
         // The signal also arrives for messages that never had a transfer (plain
         // text, a peer's delivery). Inventing a state for them out of thin air is
         // forbidden: the bubble would get a completed transfer that never existed.
-        val hadTransfer = groupMembers.containsKey(messageId) ||
-            live.containsKey(TransferKey.upload(messageId).value)
+        // The message's group slot holds the send's group or, once it is published, the
+        // album's download group. This ends the send only: a download group registered
+        // after publication stays, or a later "delivered" would take the album's ↓ away.
+        val sendGroup = groupMembers[messageId]?.takeIf { members -> members.any { it.isUpload } }
+        val hadTransfer = sendGroup != null || live.containsKey(TransferKey.upload(messageId).value)
         if (!hadTransfer) return
         // The group's members (set items) end with it: the group is removed below,
         // but their own entries outlive it.
-        groupMembers[messageId]?.forEach { key ->
+        sendGroup?.forEach { key ->
             if (key.isUpload) {
                 cancelled.remove(key.value)
                 put(key, TransferState.Completed(null))
             }
         }
         onUploadSent(messageId)
-        removeGroup(messageId)
+        if (sendGroup != null) removeGroup(messageId)
     }
 
     fun removeGroup(groupId: String) {
@@ -1241,6 +1298,8 @@ class TransferEngine(
 
         /** Pauses before each automatic download retry. */
         val AUTO_RETRY_MS = longArrayOf(3_000L, 8_000L, 20_000L, 45_000L)
+        /** Automatic downloads at once; a tap goes past them. */
+        const val AUTO_DOWNLOADS_AT_ONCE = 4
 
         /** Higher = smoother but laggier. 0.7 tracks real changes within a second
          *  while killing per-chunk jitter. */

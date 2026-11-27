@@ -62,7 +62,7 @@ data class SourceMetadata(
     fun describe(): String =
         "$kind $videoMime ${width}x$height@$frameRate rot=$rotationDegrees hdr=$hdr " +
             "transfer=$transfer standard=$standard range=$range " +
-            "audio=${if (hasAudio) audioMime else "нет"} ${durationMs}ms ${fileBytes}B"
+            "audio=${if (hasAudio) audioMime else "none"} ${durationMs}ms ${fileBytes}B"
 
     companion object {
         const val FALLBACK_AUDIO_BPS = 128_000

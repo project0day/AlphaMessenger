@@ -161,10 +161,83 @@ const KV_NO_STORE_DEFAULT: &str = "no_store_default";
 const KV_OWN_MEDIA_SERVERS: &str = "own_media_servers";
 /// Prefix: media scheduled for deletion from storage servers.
 const KV_PURGE_PREFIX: &str = alpha_database::whispers::MEDIA_PURGE_PREFIX;
+/// Prefix: media copies that wait for the phone's bytes on a free, unmetered link.
+const KV_MEDIA_COPY_PREFIX: &str = "media_copy:";
+/// Prefix: our own deleted-for-everyone media whose blobs are still to leave the servers.
+const KV_DELETED_MEDIA_PREFIX: &str = "deleted_media:";
+/// A delete or edit that never finds its message is forgotten after this long.
+const EARLY_CHANGE_MAX_AGE_SECS: i64 = 30 * 24 * 3600;
+
+/// Keeps the media copies that wait for an unmetered link in the database, so they
+/// outlive the process that queued them.
+struct KvCopyLedger {
+    db: Arc<DatabasePool>,
+}
+
+impl KvCopyLedger {
+    fn key(sha256: &str, target: &str) -> String {
+        format!("{KV_MEDIA_COPY_PREFIX}{sha256}|{target}")
+    }
+}
+
+impl alpha_media::CopyLedger for KvCopyLedger {
+    fn waiting(&self, copy: &alpha_media::WaitingCopy) {
+        let json = serde_json::json!({ "source": copy.source, "type": copy.content_type, "tor": copy.tor }).to_string();
+        let _ = KeyValueRepo::set(&self.db.connection(), &Self::key(&copy.sha256, &copy.target), &json);
+    }
+
+    fn settled(&self, sha256: &str, target: &str) {
+        let _ = KeyValueRepo::delete(&self.db.connection(), &Self::key(sha256, target));
+    }
+}
+
+/// The copies an earlier run left waiting.
+fn waiting_copies(conn: &rusqlite::Connection) -> Vec<alpha_media::WaitingCopy> {
+    KeyValueRepo::list(conn).unwrap_or_default().into_iter()
+        .filter_map(|e| {
+            let (sha256, target) = e.key.strip_prefix(KV_MEDIA_COPY_PREFIX)?.split_once('|')?;
+            let v: serde_json::Value = serde_json::from_str(&e.value).ok()?;
+            Some(alpha_media::WaitingCopy {
+                sha256: sha256.to_string(),
+                source: v.get("source")?.as_str()?.to_string(),
+                content_type: v.get("type")?.as_str()?.to_string(),
+                target: target.to_string(),
+                tor: v.get("tor").and_then(|t| t.as_bool()).unwrap_or(false),
+            })
+        })
+        .collect()
+}
 /// Keep media this long after every recipient got the message (time to download).
 const PURGE_AFTER_DELIVERY_SECS: i64 = 6 * 3600;
 /// Upper bound when a recipient never confirms delivery.
 const PURGE_MAX_AGE_SECS: i64 = 7 * 24 * 3600;
+/// A deletion being made is not taken again by the next sweep within this time.
+const PURGE_LEASE_SECS: i64 = 10 * 60;
+/// Attempts at a deletion some server could not answer for, before it is tried daily.
+const PURGE_MAX_TRIES: u64 = 12;
+
+/// When a deletion that some server could not answer for is tried again: 5 min,
+/// doubling, at most 6 h apart; after [PURGE_MAX_TRIES], once a day. It is never
+/// dropped while a configured server may still hold the blob.
+fn purge_retry_in(tries: u64) -> i64 {
+    if tries > PURGE_MAX_TRIES {
+        return 24 * 3600;
+    }
+    (300_i64 << (tries.saturating_sub(1)).min(7)).min(6 * 3600)
+}
+
+/// What a purge record still has to delete: every server for `ids`, the named ones for
+/// `left` (blob → servers that did not answer for it yet).
+fn purge_work(v: &serde_json::Value) -> (Vec<String>, std::collections::BTreeMap<String, Vec<String>>) {
+    let strings = |a: &serde_json::Value| -> Vec<String> {
+        a.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
+    };
+    let ids = v.get("ids").map(strings).unwrap_or_default();
+    let left = v.get("left").and_then(|l| l.as_object())
+        .map(|o| o.iter().map(|(k, s)| (k.clone(), strings(s))).collect())
+        .unwrap_or_default();
+    (ids, left)
+}
 /// AAD of the encrypted backup-locator content.
 const BACKUP_LOCATOR_AAD: alpha_transport::sealed::Tag16 = *b"alpha-backup-v2!";
 const STICKER_PACK_AAD: alpha_transport::sealed::Tag16 = *b"alpha-stickers-1";
@@ -722,7 +795,7 @@ impl UploadClaim {
         let head = op_id.split('#').next().unwrap_or(op_id).to_string();
         let mut g = uploads_in_flight().lock().ok()?;
         if !g.insert(op_id.to_string()) {
-            tracing::info!(target: "alpha_ffi", "UPLOAD занято op={op_id} — второй отправитель отступает");
+            tracing::info!(target: "alpha_ffi", "UPLOAD_BUSY op={op_id}: another sender holds it, backing off");
             return None;
         }
         let _ = head;
@@ -818,7 +891,7 @@ impl alpha_media::resume::ChunkCheckpoint for DbCheckpoint<'_> {
         ) {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!(target: "alpha_ffi", "RESUME читать нечего: {e}");
+                tracing::warn!(target: "alpha_ffi", "RESUME nothing to read: {e}");
                 return Vec::new();
             }
         };
@@ -1034,10 +1107,13 @@ impl SyncGauge {
             let relays = statuses.iter().filter(|s| s.enabled).count() as u32;
             let connected = statuses.iter().filter(|s| s.enabled && s.connected).count() as u32;
             let catching_up = g.running.load(std::sync::atomic::Ordering::SeqCst) > 0;
-            // What the user must know about their relays: "reserve" (we sit on
-            // ours), "none" (all deleted), "off" (all switched off), else "ok".
+            // What the user must know about their relays: "reserve" (only ours
+            // carries the traffic), "none" (all deleted), "off" (all switched off),
+            // else "ok". The reserve stays joined a while after the user's relays
+            // return, but the user is told the moment one of theirs works.
             let own: Vec<_> = statuses.iter().filter(|s| users_relay(&s.url)).collect();
-            let link = if alpha_transport::nostr_relay_client::reserve_active() {
+            let own_up = own.iter().any(|s| s.enabled && s.connected);
+            let link = if alpha_transport::nostr_relay_client::reserve_active() && !own_up {
                 "reserve"
             } else if own.is_empty() {
                 "none"
@@ -1091,6 +1167,11 @@ pub enum MessengerError {
     /// Every media server turned the upload down (rights, policy, format): retrying will not help.
     #[error("Media refused: {description}")]
     MediaRefused { description: String },
+    /// The invite link was used on this device already, or withdrawn.
+    #[error("The invite link is no longer valid")]
+    InviteInvalid,
+    #[error("Already a member of this group")]
+    AlreadyMember,
 }
 
 /// A failed download, with "the copies are gone" kept apart from network faults.
@@ -2217,6 +2298,7 @@ impl AlphaMessengerCore {
         if let Some(list) = KeyValueRepo::get(&db.connection(), KV_OWN_MEDIA_SERVERS).ok().flatten() {
             alpha_media::set_own_servers(list.lines().map(str::to_string).collect());
         }
+        alpha_media::set_copy_ledger(Arc::new(KvCopyLedger { db: db.clone() }));
 
         // Create the media pipeline. Blossom is HTTP blob storage — it is a
         // SEPARATE service from the Nostr relays (which are wss://). Passing a
@@ -4335,8 +4417,9 @@ impl AlphaMessengerCore {
     /// Where a backup's locator lives besides our own relays: the built-in ones and
     /// the project's relay, the places a clean install can always reach.
     fn backup_lookup_relays(mut urls: Vec<String>) -> Vec<String> {
+        use alpha_transport::nostr_relay_client::{PROJECT_SERVERS_ON, RESERVE_RELAY};
         let known = alpha_transport::DEFAULT_RELAYS.iter().map(|u| u.to_string())
-            .chain(std::iter::once(alpha_transport::nostr_relay_client::RESERVE_RELAY.to_string()));
+            .chain(PROJECT_SERVERS_ON.then(|| RESERVE_RELAY.to_string()));
         for u in known {
             let k = u.trim_end_matches('/').to_ascii_lowercase();
             if !urls.iter().any(|x| x.trim_end_matches('/').to_ascii_lowercase() == k) { urls.push(u); }
@@ -5337,7 +5420,7 @@ impl AlphaMessengerCore {
         // cannot address everyone, and the send would falsely look successful.
         if entries.len() != members.len() {
             tracing::warn!(
-                "DIR не разослан: известно {} адресов из {} участников",
+                "DIR not sent: {} addresses known of {} members",
                 entries.len(), members.len(),
             );
             return;
@@ -5359,8 +5442,8 @@ impl AlphaMessengerCore {
         // epoch's route tag. Never one wrap per member — N `#p` tags sent at
         // once would hand the relay the group's full membership.
         match self.publish_application_message(group_id, epoch, ciphertext) {
-            Ok(()) => tracing::info!("DIR разослан: эпоха={epoch} участников={}", members.len()),
-            Err(e) => tracing::warn!("DIR разослан не всем: {e}"),
+            Ok(()) => tracing::info!("DIR sent: epoch={epoch} members={}", members.len()),
+            Err(e) => tracing::warn!("DIR not sent to everyone: {e}"),
         }
     }
 
@@ -5374,7 +5457,7 @@ impl AlphaMessengerCore {
         let conn = self.db.connection();
         let _ = KeyValueRepo::delete(&conn, &Self::dir_key(&chat_id, sig_hex));
         let _ = KeyValueRepo::delete(&conn, &Self::dir_auth_key(&chat_id, sig_hex));
-        tracing::info!("DIR: привязка и полномочие участника сняты");
+        tracing::info!("DIR: member binding and authority removed");
     }
 
     /// Signing keys of all group members, hex-encoded.
@@ -5412,7 +5495,7 @@ impl AlphaMessengerCore {
             // The ROUTING record is per-group, stored with the epoch.
             match KeyValueRepo::set(&conn, &Self::dir_key(&chat_id, sig), npub_hex) {
                 Ok(_) => bound += 1,
-                Err(e) => tracing::warn!("BIND: не удалось записать привязку: {e}"),
+                Err(e) => tracing::warn!("BIND: could not store the binding: {e}"),
             }
             // The shared map is only a display representation for names/avatars.
             let _ = KeyValueRepo::set(&conn, &format!("member_npub:{sig}"), npub_hex);
@@ -5432,7 +5515,7 @@ impl AlphaMessengerCore {
         // A short key tail keeps log entries distinguishable without exposing
         // a member's full transport address.
         tracing::info!(
-            "BIND участников={bound} адрес=…{}",
+            "BIND members={bound} address=…{}",
             &npub_hex[npub_hex.len().saturating_sub(6)..],
         );
     }
@@ -5741,6 +5824,12 @@ impl AlphaMessengerCore {
         self.broadcast_my_profile(&p.display_name, &p.bio, &p.avatar_path)
     }
 
+    /// Our cover's file ("" = none).
+    pub fn my_cover(&self) -> String {
+        let conn = self.db.connection();
+        KeyValueRepo::get(&conn, PROFILE_KV_COVER).ok().flatten().unwrap_or_default()
+    }
+
     /// A peer's cover/banner local path ("" = none). Keyed by their MLS
     /// `sender_id` (same id used for `get_peer_profile`).
     pub fn get_peer_cover_path(&self, sender_id: String) -> Result<String, MessengerError> {
@@ -5787,7 +5876,7 @@ impl AlphaMessengerCore {
                 let (_, _, who_can_edit) = alpha_database::group_roles::permissions(&conn, &chat_id);
                 if !alpha_messages::can_manage_group(&role) && who_can_edit != "all" {
                     return Err(MessengerError::InvalidArgument {
-                        description: "у вас нет прав менять данные группы".to_string(),
+                        description: "no right to change the group details".to_string(),
                     });
                 }
             }
@@ -6272,7 +6361,7 @@ impl AlphaMessengerCore {
         let mut chat = new_chat(
             SAVED_MESSAGES_CHAT_ID.to_string(),
             alpha_database::models::ChatType::Direct,
-            Some("Избранное".to_string()),
+            Some("Saved Messages".to_string()),
             0,
         );
         chat.pinned_at = Some(chrono::Utc::now().timestamp());
@@ -6786,10 +6875,36 @@ impl AlphaMessengerCore {
     /// effective status CHANGED as JSON `[{"user":"<hex>","status":"online"}…]`
     /// (empty `[]` if nothing changed). Kotlin calls this on a background loop.
     /// Fully isolated + best-effort — never affects chat/MLS.
+    /// A typing or recording signal arrived in [chat_id]: in a dialog its peer is in the
+    /// app right now, whatever their beats managed to say. Our own signals are ignored.
+    /// Returns the presence changes, as [presence_tick] does, without touching the network.
+    pub fn note_peer_activity(&self, chat_id: String, sender_id: String) -> String {
+        if self.own_keys_in(&chat_id).0 == sender_id {
+            return "[]".to_string();
+        }
+        let hex = self.peer_hex_for_chat(chat_id).unwrap_or_default();
+        if hex.is_empty() {
+            return "[]".to_string();
+        }
+        let now = chrono::Utc::now().timestamp();
+        let changes = match self.presence.lock() {
+            Ok(mut p) => {
+                p.note_activity(&hex, now);
+                p.poll_changes(now)
+            }
+            Err(_) => return "[]".to_string(),
+        };
+        let arr: Vec<serde_json::Value> = changes.into_iter()
+            .map(|(u, st)| serde_json::json!({ "user": u, "status": st.as_str() }))
+            .collect();
+        serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string())
+    }
+
     pub fn presence_tick(&self) -> String {
         use alpha_transport::sealed::{current_hour, presence_key, presence_tag};
         let now = chrono::Utc::now().timestamp();
         self.sweep_media_purges(now);
+        self.resume_media_copies_once();
         let _ = self.release_due_held();
         self.retry_story_posts(now);
         let hour = current_hour();
@@ -7021,36 +7136,80 @@ impl AlphaMessengerCore {
         let _ = KeyValueRepo::set(&conn, &key, &v.to_string());
     }
 
+    /// Copies an earlier run left waiting go back into the queue, once per process.
+    fn resume_media_copies_once(&self) {
+        static RESUMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if RESUMED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        alpha_database::early::prune(&self.db.connection(), chrono::Utc::now().timestamp(), EARLY_CHANGE_MAX_AGE_SECS);
+        let copies = waiting_copies(&self.db.connection());
+        if copies.is_empty() {
+            return;
+        }
+        let signer = self.media_signer();
+        let _rt = runtime().enter();
+        alpha_media::resume_copies(&self.blossom, &signer, copies.clone());
+        alpha_media::resume_copies(&self.secret_blossom, &signer, copies);
+    }
+
+    /// Deletes what is due from every server. A record stays until each server has
+    /// answered for each of its blobs, and survives a restart meanwhile.
     fn sweep_media_purges(&self, now: i64) {
-        let due: Vec<(String, Vec<String>, bool)> = {
+        let due: Vec<(String, serde_json::Value)> = {
             let conn = self.db.connection();
             KeyValueRepo::list(&conn).unwrap_or_default().into_iter()
                 .filter(|e| e.key.starts_with(KV_PURGE_PREFIX))
                 .filter_map(|e| {
                     let v: serde_json::Value = serde_json::from_str(&e.value).ok()?;
-                    (v.get("due")?.as_i64()? <= now).then(|| {
-                        let ids = v.get("ids").and_then(|a| a.as_array()).map(|a| {
-                            a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
-                        }).unwrap_or_default();
-                        (e.key, ids, v.get("tor").and_then(|t| t.as_bool()).unwrap_or(false))
-                    })
+                    (v.get("due")?.as_i64()? <= now).then_some((e.key, v))
                 })
                 .collect()
         };
         if due.is_empty() { return; }
         {
             let conn = self.db.connection();
-            for (key, _, _) in &due { let _ = KeyValueRepo::delete(&conn, key); }
+            for (key, v) in &due {
+                let mut leased = v.clone();
+                leased["due"] = serde_json::json!(now + PURGE_LEASE_SECS);
+                let _ = KeyValueRepo::set(&conn, key, &leased.to_string());
+            }
         }
         let open = (*self.blossom).clone();
         let tor = (*self.secret_blossom).clone();
         let signer = self.media_signer();
+        let db = self.db.clone();
         runtime().spawn(async move {
-            for (_, ids, via_tor) in due {
-                let blossom = if via_tor { &tor } else { &open };
+            for (key, mut v) in due {
+                let blossom = if v.get("tor").and_then(|t| t.as_bool()).unwrap_or(false) { &tor } else { &open };
+                let (ids, earlier) = purge_work(&v);
+                let mut left: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+                let mut unanswered = |id: String, r: alpha_media::MediaResult<Vec<String>>, asked: Vec<String>| match r {
+                    Ok(servers) if servers.is_empty() => {}
+                    Ok(servers) => { left.insert(id, servers); }
+                    Err(_) => { left.insert(id, asked); }
+                };
                 for id in ids {
-                    // Best-effort on every configured server (primary + replicas).
-                    let _ = blossom.delete(&id, &signer).await;
+                    let r = blossom.delete_everywhere(&id, &signer).await;
+                    unanswered(id, r, blossom.all_servers());
+                }
+                for (id, servers) in earlier {
+                    let r = blossom.delete_on(&id, &signer, &servers).await;
+                    unanswered(id, r, servers);
+                }
+                let conn = db.connection();
+                let tries = v.get("tries").and_then(|t| t.as_u64()).unwrap_or(0) + 1;
+                if left.is_empty() {
+                    let _ = KeyValueRepo::delete(&conn, &key);
+                } else {
+                    if tries > PURGE_MAX_TRIES {
+                        tracing::warn!(target: "alpha_ffi", "MEDIA_PURGE unfinished blobs={} tries={tries}", left.len());
+                    }
+                    v["ids"] = serde_json::json!([]);
+                    v["left"] = serde_json::json!(left);
+                    v["tries"] = serde_json::json!(tries);
+                    v["due"] = serde_json::json!(chrono::Utc::now().timestamp() + purge_retry_in(tries));
+                    let _ = KeyValueRepo::set(&conn, &key, &v.to_string());
                 }
             }
         });
@@ -7410,7 +7569,7 @@ impl AlphaMessengerCore {
         {
             let conn = self.db.connection();
             if !alpha_database::group_roles::may_pin(&conn, &chat_id, &own_hex) {
-                return Err(MessengerError::InvalidArgument { description: "нет права закреплять в этой группе".to_string() });
+                return Err(MessengerError::InvalidArgument { description: "no right to pin in this group".to_string() });
             }
             alpha_database::group_roles::set_pinned(&conn, &chat_id, &target_id, pin);
         }
@@ -7465,7 +7624,7 @@ impl AlphaMessengerCore {
                     drop(mls);
                     self.publish_application_message_confirmed(&group_id, epoch, ct)
                 })();
-                if r.is_ok() { self.clear_send_state(&msg_id, "опубликовано"); }
+                if r.is_ok() { self.clear_send_state(&msg_id, "published"); }
                 else { self.held_put(&msg_id, &v); }
                 r.is_ok()
             } else {
@@ -8018,7 +8177,7 @@ impl AlphaMessengerCore {
         if !remove {
             let conn = self.db.connection();
             if !alpha_database::group_roles::reaction_allowed(&conn, &chat_id, &emoji) {
-                return Err(MessengerError::InvalidArgument { description: "реакция запрещена в этой группе".to_string() });
+                return Err(MessengerError::InvalidArgument { description: "reactions are not allowed in this group".to_string() });
             }
         }
         let msg = AlphaMessage::Reaction {
@@ -8040,7 +8199,21 @@ impl AlphaMessengerCore {
     }
 
     /// Send a delete (tombstone).
+    ///
+    /// Our own message that has not gone out yet never goes; our own media leaves
+    /// the servers ([Self::purge_deleted_media]). Someone else's blobs are not ours
+    /// to delete: a moderator removes the message, its uploader the files.
     pub fn send_delete(&self, chat_id: String, target_id: String) -> Result<String, MessengerError> {
+        {
+            let conn = self.db.connection();
+            if let Some(target) = MessageRepo::get(&conn, &target_id).ok().flatten().filter(|t| t.sender_id == "self") {
+                let _ = PendingSendRepo::delete_by_msg(&conn, &target_id);
+                let _ = PendingMediaRepo::delete_by_msg(&conn, &target_id);
+                if let Some(media) = target.media_ref.filter(|m| !m.is_empty()) {
+                    let _ = KeyValueRepo::set(&conn, &format!("{KV_DELETED_MEDIA_PREFIX}{target_id}"), &media);
+                }
+            }
+        }
         let msg = AlphaMessage::Delete {
             id: uuid::Uuid::new_v4().to_string(),
             target_id: target_id.clone(),
@@ -8055,6 +8228,59 @@ impl AlphaMessengerCore {
         self.queue_and_send(&chat_id, &payload_bytes, &msg_id)?;
 
         Ok(msg_id)
+    }
+
+    /// Media refs of messages deleted since the last call: the app deletes their files
+    /// from the phone.
+    pub fn take_gone_media(&self) -> Vec<String> {
+        alpha_database::take_gone_media(&self.db.connection()).unwrap_or_default()
+    }
+
+    /// Our deleted-for-everyone media leaves the servers: each ref (an album's items,
+    /// a big file's manifest) is opened to every blob it names, and their deletion is
+    /// recorded, so it is made and retried like any other. Network: call off the UI.
+    pub fn purge_deleted_media(&self) {
+        let pending: Vec<(String, String)> = KeyValueRepo::list(&self.db.connection()).unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| e.key.strip_prefix(KV_DELETED_MEDIA_PREFIX).map(|id| (id.to_string(), e.value)))
+            .collect();
+        for (message_id, media) in pending {
+            let Some(ids) = self.blob_ids_behind(&media) else { continue };
+            let conn = self.db.connection();
+            if !ids.is_empty() {
+                let json = serde_json::json!({
+                    "ids": ids, "due": chrono::Utc::now().timestamp(), "tor": media.contains("\"tor\":true"),
+                }).to_string();
+                let _ = KeyValueRepo::set(&conn, &format!("{KV_PURGE_PREFIX}del-{message_id}"), &json);
+            }
+            let _ = KeyValueRepo::delete(&conn, &format!("{KV_DELETED_MEDIA_PREFIX}{message_id}"));
+        }
+        self.sweep_media_purges(chrono::Utc::now().timestamp());
+    }
+
+    /// Every blob a stored media ref stands for, its manifests opened. None while a
+    /// manifest cannot be reached yet: the caller tries again later.
+    fn blob_ids_behind(&self, media: &str) -> Option<Vec<String>> {
+        let v: serde_json::Value = serde_json::from_str(media).ok()?;
+        let items: Vec<serde_json::Value> = match v.get("items").and_then(|i| i.as_array()) {
+            Some(items) => items.clone(),
+            None => vec![v],
+        };
+        let mut ids = Vec::new();
+        for item in items {
+            ids.extend(alpha_media::pipeline::blob_ids_in_ref(&item.to_string()));
+            let Ok(r) = serde_json::from_value::<MediaRef>(item) else { continue };
+            if r.is_external_manifest() {
+                match self.resolve_manifest(&r) {
+                    Ok(full) => ids.extend(alpha_media::pipeline::blob_ids_in_ref(&serde_json::to_string(&full).ok()?)),
+                    Err(MessengerError::MediaGone) => {}
+                    Err(_) => return None,
+                }
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        Some(ids)
     }
 
     /// Delete a message **locally only** ("Delete for me") — marks the row
@@ -8443,7 +8669,7 @@ impl AlphaMessengerCore {
             let conn = self.db.connection();
             let _ = MessageRepo::update_media_ref(&conn, &msg_id, &local_ref);
             drop(conn);
-            self.clear_send_state(&msg_id, "сохранено у себя");
+            self.clear_send_state(&msg_id, "saved locally");
             return Ok(());
         }
 
@@ -8532,7 +8758,7 @@ impl AlphaMessengerCore {
             let _ = MessageRepo::update_media_ref(&conn, &msg_id, &local_ref);
         }
         if published.is_ok() {
-            self.clear_send_state(&msg_id, "опубликовано");
+            self.clear_send_state(&msg_id, "published");
         }
         published
     }
@@ -8584,7 +8810,7 @@ impl AlphaMessengerCore {
             None => {
                 tracing::info!(
                     target: "alpha_ffi",
-                    "MEDIA_KEY ревизия не определена по имени файла — ключ разовый",
+                    "MEDIA_KEY no revision in the file name: one-time key",
                 );
                 return (*alpha_media::generate_key(), false);
             }
@@ -8681,7 +8907,7 @@ impl AlphaMessengerCore {
         if objects > 0 || keys > 0 {
             tracing::info!(
                 target: "alpha_ffi",
-                "SEND_STATE очищено op={op_id} причина={why} кусков={objects} ключей={keys}",
+                "SEND_STATE cleared op={op_id} why={why} chunks={objects} keys={keys}",
             );
         }
     }
@@ -8698,7 +8924,7 @@ impl AlphaMessengerCore {
     ) -> Result<u64, MessengerError> {
         let Some(revision) = output_revision(&final_path) else { return Ok(0) };
         let _claim = UploadClaim::take(&op_id).ok_or_else(|| MessengerError::NetworkError {
-            description: "эта отправка уже идёт".into(),
+            description: "this send is already running".into(),
         })?;
         let key: [u8; 32] = *alpha_media::generate_key();
         {
@@ -8760,7 +8986,7 @@ impl AlphaMessengerCore {
         // One sender per upload. The second gets an error instead of
         // starting a parallel upload — see UploadClaim.
         let _claim = UploadClaim::take(&op_id).ok_or_else(|| MessengerError::NetworkError {
-            description: "эта отправка уже идёт".into(),
+            description: "this send is already running".into(),
         })?;
         let t_prep = std::time::Instant::now();
         if let Some(local) = self.local_upload_ref(&op_id, &file_path, &media_type, &poster_b64, &meta_json) {
@@ -8963,7 +9189,7 @@ impl AlphaMessengerCore {
             let _ = MessageRepo::update_media_ref(&conn, &msg_id, &stored_json);
         }
         if is_local_chat(&chat_id) {
-            self.clear_send_state(&msg_id, "сохранено у себя");
+            self.clear_send_state(&msg_id, "saved locally");
             return Ok(());
         }
         let mut builder = match single {
@@ -9011,7 +9237,7 @@ impl AlphaMessengerCore {
         if published.is_ok() {
             // One statement removes the album and all its elements: their
             // identifiers are `<message>#<index>`.
-            self.clear_send_state(&msg_id, "опубликовано");
+            self.clear_send_state(&msg_id, "published");
         }
         published
     }
@@ -9052,7 +9278,7 @@ impl AlphaMessengerCore {
         if r.is_ok() {
             // The intent is recorded and survives process death. No key, ref or
             // addresses here — only whose message it is and of what kind.
-            tracing::info!(target: "alpha_ffi", "JOB_CREATE msg={msg_id} род=single");
+            tracing::info!(target: "alpha_ffi", "JOB_CREATE msg={msg_id} kind=single");
         }
         r
     }
@@ -9138,7 +9364,7 @@ impl AlphaMessengerCore {
         // A cancelled send never resumes — keeping its checkpoint and key is
         // pointless. This is the only outcome where state is deleted on
         // non-success: failure keeps it, because a retry follows.
-        self.clear_send_state(&msg_id, "отмена");
+        self.clear_send_state(&msg_id, "cancelled");
         let conn = self.db.connection();
         let _ = PendingMediaRepo::delete_by_msg(&conn, &msg_id);
     }
@@ -9237,7 +9463,7 @@ impl AlphaMessengerCore {
             // arrives twelve seconds later and sees the same row — that is how
             // two uploaders and a duplicate event for one message happen.
             if upload_is_in_flight(&e.msg_id) {
-                tracing::info!(target: "alpha_ffi", "pending media {}: уже отправляется — пропуск", e.msg_id);
+                tracing::info!(target: "alpha_ffi", "pending media {}: already sending, skipped", e.msg_id);
                 continue;
             }
             // Claim the row FIRST — only then do anything.
@@ -9253,11 +9479,11 @@ impl AlphaMessengerCore {
             if !claimed {
                 tracing::info!(
                     target: "alpha_ffi",
-                    "CLAIM_SKIP msg={}: строка занята или уже отправлена", e.msg_id,
+                    "CLAIM_SKIP msg={}: row taken or already sent", e.msg_id,
                 );
                 continue;
             }
-            tracing::info!(target: "alpha_ffi", "CLAIM msg={} попыток={}", e.msg_id, e.attempts);
+            tracing::info!(target: "alpha_ffi", "CLAIM msg={} attempts={}", e.msg_id, e.attempts);
             // Work resumed — the network wait is over. The screen learns this
             // from the same status as a normal send.
             clear_waiting_network(&e.msg_id);
@@ -9291,6 +9517,7 @@ impl AlphaMessengerCore {
                 Ok(()) => {
                     let c = self.db.connection();
                     let _ = PendingMediaRepo::delete(&c, e.id);
+                    let _ = MessageRepo::start_own_countdown(&c, &e.msg_id);
                     self.callback.on_delivery_update(&e.msg_id, "sent");
                     sent += 1;
                 }
@@ -9365,7 +9592,7 @@ impl AlphaMessengerCore {
     ) -> Result<(), MessengerError> {
         if key_material.is_empty() || key_material.len() > 64 {
             return Err(MessengerError::InvalidArgument {
-                description: "media send key: недопустимая длина".into(),
+                description: "media send key: invalid length".into(),
             });
         }
         let conn = self.db.connection();
@@ -9422,7 +9649,7 @@ impl AlphaMessengerCore {
         // for them is a permanent failure with a retry offer, not a silent
         // success or an eternal spinner.
         if file_path.is_empty() || !std::path::Path::new(&file_path).exists() {
-            return Err("source_missing: исходный файл отправки недоступен".to_string());
+            return Err("source_missing: the source file of the send is not available".to_string());
         }
         let media_type = v.get("media_type").and_then(|x| x.as_str()).unwrap_or("file").to_string();
         let caption = v.get("caption").and_then(|x| x.as_str()).map(|s| s.to_string());
@@ -9688,6 +9915,11 @@ impl AlphaMessengerCore {
             }
         })
         .map_err(|e| MessengerError::InternalError { description: format!("sweep error: {}", e) })
+    }
+
+    /// When the next timed message disappears, in unix milliseconds; 0 when none waits.
+    pub fn next_message_expiry_ms(&self) -> i64 {
+        MessageRepo::next_expiry_ms(&self.db.connection()).ok().flatten().unwrap_or(0)
     }
 
     /// Media refs of messages that expired since the last call: the app deletes
@@ -10045,6 +10277,10 @@ impl AlphaMessengerCore {
     /// every relay and the wake channel reconnect at once, and this returns as
     /// soon as one relay is up (at most a few seconds) so the caller's catch-up
     /// runs on live sockets.
+    pub fn set_network_metered(&self, metered: bool) {
+        alpha_media::set_metered(metered);
+    }
+
     pub fn set_network_available(&self, available: bool) -> Result<(), MessengerError> {
         let rt = runtime();
         alpha_media::network_changed();
@@ -10928,8 +11164,8 @@ impl AlphaMessengerCore {
                         .collect();
                     tracing::info!(target: "TRANSPORT", "RELAY_STATS {}", up.join(" "));
                 }
-                // The reserve relay joins or leaves: listen there at once, tell
-                // contacts (the app follows up with a KeyPackage and our profile).
+                // The reserve relay joins or leaves: listen there at once and catch up.
+                // Contacts are not told: a switch must not send the profile to everyone.
                 if let Ok(Some(joined)) = tokio::time::timeout(HB_STEP, hb_transport.reserve_tick()).await {
                     if joined {
                         let _ = tokio::time::timeout(HB_STEP, hb_transport.wait_until_connected(std::time::Duration::from_secs(8))).await;
@@ -12908,7 +13144,7 @@ impl AlphaMessengerCore {
             let target_role = alpha_database::group_roles::role_of(&conn, &chat_id, &target_hex);
             if !alpha_messages::can_remove(&actor_role, &target_role) {
                 return Err(MessengerError::InvalidArgument {
-                    description: format!("ваша роль ({}) не может заглушить этого участника", actor_role),
+                    description: format!("role {} cannot mute this member", actor_role),
                 });
             }
             let v = alpha_database::group_roles::mutes_version(&conn, &chat_id) + 1;
@@ -13053,7 +13289,7 @@ impl AlphaMessengerCore {
             let role = alpha_database::group_roles::role_of(&conn, &chat_id, &own_hex);
             if !alpha_messages::can_manage_group(&role) {
                 return Err(MessengerError::InvalidArgument {
-                    description: "только владелец или администратор может закрывать чат".to_string(),
+                    description: "only the owner or an admin can close the chat".to_string(),
                 });
             }
             let (w, i, e) = alpha_database::group_roles::permissions(&conn, &chat_id);
@@ -13142,7 +13378,7 @@ impl AlphaMessengerCore {
             // Only the owner may set group permissions.
             if alpha_database::group_roles::owner_of(&conn, &chat_id).as_deref() != Some(own_hex.as_str()) {
                 return Err(MessengerError::InvalidArgument {
-                    description: "только владелец может менять права группы".to_string(),
+                    description: "only the owner can change the group permissions".to_string(),
                 });
             }
             let v = alpha_database::group_roles::perms_version(&conn, &chat_id) + 1;
@@ -13186,7 +13422,7 @@ impl AlphaMessengerCore {
             let conn = self.db.connection();
             if alpha_database::group_roles::owner_of(&conn, &chat_id).as_deref() != Some(own_hex.as_str()) {
                 return Err(MessengerError::InvalidArgument {
-                    description: "только владелец может менять реакции группы".to_string(),
+                    description: "only the owner can change the group reactions".to_string(),
                 });
             }
             alpha_database::group_roles::set_reactions(&conn, &chat_id, &mode, &list);
@@ -13523,7 +13759,7 @@ impl AlphaMessengerCore {
                 let (_, who_can_invite, _) = alpha_database::group_roles::permissions(&conn, &chat_id);
                 if !alpha_messages::can_manage_group(&role) && who_can_invite != "all" {
                     return Err(MessengerError::InvalidArgument {
-                        description: "у вас нет прав создавать ссылки".to_string(),
+                        description: "no right to create links".to_string(),
                     });
                 }
             }
@@ -13638,12 +13874,12 @@ impl AlphaMessengerCore {
         use nostr::nips::nip19::FromBech32;
 
         let inv = crate::invite_link::decode(&link)
-            .ok_or_else(|| MessengerError::InvalidArgument { description: "не похоже на ссылку-приглашение".to_string() })?;
+            .ok_or_else(|| MessengerError::InvalidArgument { description: "not an invite link".to_string() })?;
         let group_hex = inv.group_hex;
         let token = inv.token;
         let inviter = inv.inviter_hex;
         if group_hex.is_empty() || token.is_empty() || inviter.is_empty() {
-            return Err(MessengerError::InvalidArgument { description: "неполная ссылка".to_string() });
+            return Err(MessengerError::InvalidArgument { description: "incomplete link".to_string() });
         }
         // One-time enforcement (per device): if we already sent a request for this
         // invite token, refuse — an invite link can't be reused to spam requests.
@@ -13652,25 +13888,21 @@ impl AlphaMessengerCore {
             if alpha_database::KeyValueRepo::get(&conn, &format!("join_sent:{}", token))
                 .ok().flatten().is_some()
             {
-                return Err(MessengerError::InvalidArgument {
-                    description: "Эта ссылка-приглашение больше недействительна".to_string(),
-                });
+                return Err(MessengerError::InviteInvalid);
             }
         }
         let group_id = hex::decode(&group_hex)
-            .map_err(|_| MessengerError::InvalidArgument { description: "битый group_id".to_string() })?;
+            .map_err(|_| MessengerError::InvalidArgument { description: "malformed group_id".to_string() })?;
         // Already a member (e.g. the owner tapping the link they generated) — you
         // can't request to join a group you're already in. Applies to everyone.
         if let Ok(mls) = self.mls_session.lock() {
             if mls.group_epoch(&group_id).is_some() {
-                return Err(MessengerError::InvalidArgument {
-                    description: "Вы уже участник этой группы".to_string(),
-                });
+                return Err(MessengerError::AlreadyMember);
             }
         }
         let inviter_pk = nostr::PublicKey::from_bech32(&inviter)
             .or_else(|_| nostr::PublicKey::from_hex(&inviter))
-            .map_err(|_| MessengerError::InvalidArgument { description: "битый npub в ссылке".to_string() })?;
+            .map_err(|_| MessengerError::InvalidArgument { description: "malformed npub in the link".to_string() })?;
 
         let own_npub = {
             use nostr::nips::nip19::ToBech32;
@@ -14669,6 +14901,7 @@ impl AlphaMessengerCore {
                         {
                             let conn = db.connection();
                             let _ = PendingSendRepo::delete(&conn, pending_id);
+                            let _ = MessageRepo::start_own_countdown(&conn, &mid);
                         }
                         // SENDING → SENT (one tick) now that a relay accepted it.
                         cb.on_delivery_update(&mid, "sent");
@@ -14757,6 +14990,7 @@ impl AlphaMessengerCore {
                 Ok(_) => {
                     let conn = self.db.connection();
                     let _ = PendingSendRepo::delete(&conn, e.id);
+                    let _ = MessageRepo::start_own_countdown(&conn, &e.msg_id);
                     self.callback.on_delivery_update(&e.msg_id, "sent"); // SENDING → SENT
                     sent += 1;
                 }
@@ -15348,10 +15582,6 @@ impl AlphaMessengerCore {
 
     /// The reserve relay joined or left (the app hears it as `on_sync_state`):
     /// our KeyPackage goes there, so whoever only reaches us there can add us.
-    pub fn reserve_relay_changed(&self) {
-        self.relays_changed();
-    }
-
     /// The relay set grew: subscribe on it now (not after a restart) and put
     /// our KeyPackage there, so people who only know this relay can reach us.
     fn relays_changed(&self) {
@@ -15526,13 +15756,13 @@ fn summarize_dump(sql: &str) -> String {
         }
     }
     if names.is_empty() {
-        return "Пустой бэкап (нет данных)".to_string();
+        return "Empty backup (no data)".to_string();
     }
     // The UI just needs to confirm the backup is non-empty and well-formed —
     // a table presence list is sufficient (precise row counts would require a
     // full SQL parse, not worth it here).
     let list: Vec<String> = names.into_iter().collect();
-    format!("Бэкап содержит таблицы: {}", list.join(", "))
+    format!("Backup tables: {}", list.join(", "))
 }
 
 /// Pull-based role sync: publish a full `GroupRoleSnapshot` reply, but ONLY
@@ -16512,27 +16742,27 @@ mod t4_identity {
     /// Prepared output: the revision comes from the fingerprint computed by
     /// the app. No second "same job?" formula appears here.
     #[test]
-    fn авторитетная_ревизия_имеет_приоритет() {
+    fn the_authoritative_revision_wins() {
         assert_eq!(output_revision("/data/0.r1294751840514572310.mp4"), Some(1294751840514572310));
     }
 
     /// Document: same copy — same identity on every attempt. Without this,
     /// document resume is impossible in principle.
     #[test]
-    fn снимок_документа_даёт_ту_же_личность() {
+    fn a_document_snapshot_gives_the_same_identity() {
         let p = std::env::temp_dir().join(format!("t4id_{}.bin", uuid::Uuid::new_v4()));
         std::fs::write(&p, vec![7u8; 4096]).unwrap();
         let path = p.to_string_lossy().to_string();
-        let a = output_revision(&path).expect("личность обязана определиться");
-        let b = output_revision(&path).expect("личность обязана определиться");
-        assert_eq!(a, b, "повторная попытка обязана дать ту же личность");
+        let a = output_revision(&path).expect("the identity must resolve");
+        let b = output_revision(&path).expect("the identity must resolve");
+        assert_eq!(a, b, "a retry must give the same identity");
         let _ = std::fs::remove_file(&p);
     }
 
     /// A different copy is a different identity: one send's confirmations must
     /// not apply to another.
     #[test]
-    fn разные_снимки_не_делят_личность() {
+    fn different_snapshots_do_not_share_an_identity() {
         let dir = std::env::temp_dir();
         let p1 = dir.join(format!("t4id_a_{}.bin", uuid::Uuid::new_v4()));
         let p2 = dir.join(format!("t4id_b_{}.bin", uuid::Uuid::new_v4()));
@@ -16548,7 +16778,7 @@ mod t4_identity {
 
     /// The size changed — a different file; old confirmations are not trusted.
     #[test]
-    fn изменившийся_размер_меняет_личность() {
+    fn a_changed_size_changes_the_identity() {
         let p = std::env::temp_dir().join(format!("t4id_{}.bin", uuid::Uuid::new_v4()));
         std::fs::write(&p, vec![7u8; 4096]).unwrap();
         let path = p.to_string_lossy().to_string();
@@ -16561,7 +16791,7 @@ mod t4_identity {
     /// An empty or missing file has no identity — the send goes whole, as
     /// before, instead of applying foreign state.
     #[test]
-    fn без_файла_личности_нет() {
+    fn no_file_no_identity() {
         assert_eq!(output_revision("/nope/missing.bin"), None);
     }
 }
@@ -16573,16 +16803,16 @@ mod t4_one_owner {
     /// A second claim on the same send is never granted. That is the guard
     /// against two uploaders sending one message to the relay twice.
     #[test]
-    fn вторая_заявка_на_ту_же_отправку_отклоняется() {
-        let a = UploadClaim::take("msg-1").expect("первая заявка обязана пройти");
-        assert!(UploadClaim::take("msg-1").is_none(), "вторая заявка обязана быть отклонена");
+    fn a_second_claim_on_the_same_send_is_refused() {
+        let a = UploadClaim::take("msg-1").expect("the first claim must pass");
+        assert!(UploadClaim::take("msg-1").is_none(), "the second claim must be refused");
         drop(a);
-        assert!(UploadClaim::take("msg-1").is_some(), "после освобождения отправка снова доступна");
+        assert!(UploadClaim::take("msg-1").is_some(), "after release the send is free again");
     }
 
     /// Different sends do not interfere.
     #[test]
-    fn разные_отправки_идут_одновременно() {
+    fn different_sends_run_at_once() {
         let _a = UploadClaim::take("msg-2").unwrap();
         assert!(UploadClaim::take("msg-3").is_some());
     }
@@ -16590,22 +16820,22 @@ mod t4_one_owner {
     /// Busy-ness is visible per whole message, including set elements: the
     /// core queue holds one row per message, elements go as `<message>#<n>`.
     #[test]
-    fn занятость_элемента_видна_по_сообщению() {
+    fn a_busy_item_marks_its_message_busy() {
         let _a = UploadClaim::take("msg-4#2").unwrap();
-        assert!(upload_is_in_flight("msg-4"), "занятый элемент обязан закрывать всё сообщение");
+        assert!(upload_is_in_flight("msg-4"), "a busy item must mark the whole message busy");
         assert!(!upload_is_in_flight("msg-5"));
     }
 
     /// Release happens on early error returns too: the claim is dropped by
     /// destroying the value, not by a call someone could forget.
     #[test]
-    fn ошибка_не_оставляет_отправку_занятой() {
-        fn падает() -> Result<(), ()> {
+    fn an_error_does_not_leave_the_send_busy() {
+        fn fails() -> Result<(), ()> {
             let _claim = UploadClaim::take("msg-6").ok_or(())?;
             Err(())
         }
-        assert!(падает().is_err());
-        assert!(!upload_is_in_flight("msg-6"), "после ошибки отправка обязана освободиться");
+        assert!(fails().is_err());
+        assert!(!upload_is_in_flight("msg-6"), "after an error the send must be free");
     }
 }
 
@@ -16626,7 +16856,7 @@ fn apply_group_directory_raw(
     entries: &[alpha_messages::message_type::GroupDirectoryEntry],
 ) {
         if version == 0 || version > DIRECTORY_VERSION {
-            tracing::warn!("DIR отклонён: версия {version} не поддерживается");
+            tracing::warn!("DIR refused: version {version} not supported");
             return;
         }
         let chat_id = hex::encode(group_id);
@@ -16635,7 +16865,7 @@ fn apply_group_directory_raw(
 
         // Authorization: the sender must themselves be in the group.
         if !members.iter().any(|m| m == sender_sig_hex) {
-            tracing::warn!("DIR отклонён: отправитель не состоит в группе");
+            tracing::warn!("DIR refused: the sender is not in the group");
             return;
         }
 
@@ -16644,14 +16874,14 @@ fn apply_group_directory_raw(
         // caught below, when rewriting an established binding).
         let known = directory_epoch_of(db, &chat_id);
         if revision < known {
-            tracing::warn!("DIR отклонён: ревизия {revision} старше принятой {known}");
+            tracing::warn!("DIR refused: revision {revision} older than the accepted {known}");
             return;
         }
         // The revision must equal the group's current epoch: a directory from a
         // foreign epoch describes a different membership.
         let epoch_now = mls_epoch_of(mls_session, group_id);
         if revision != epoch_now {
-            tracing::warn!("DIR отклонён: ревизия {revision} не совпала с эпохой {epoch_now}");
+            tracing::warn!("DIR refused: revision {revision} does not match epoch {epoch_now}");
             return;
         }
 
@@ -16687,14 +16917,14 @@ fn apply_group_directory_raw(
         let mut pending: Vec<(String, String)> = Vec::new();
         for e in entries {
             if !members.iter().any(|m| *m == e.sig_key) {
-                tracing::warn!("DIR: запись про не-участника отброшена");
+                tracing::warn!("DIR: entry for a non-member dropped");
                 continue; // only MLS changes membership
             }
             // A leaf that proves its owner needs no provenance, and no
             // directory may name anyone else for it.
             if let Some((_, owner)) = proven.iter().find(|(sig, _)| *sig == e.sig_key) {
                 if *owner != e.npub_hex {
-                    tracing::warn!("DIR отклонён целиком: запись противоречит подписи участника");
+                    tracing::warn!("DIR refused whole: an entry contradicts the member's signature");
                     return;
                 }
                 continue;
@@ -16703,7 +16933,7 @@ fn apply_group_directory_raw(
                 .ok().flatten().unwrap_or_default();
             if !existing.is_empty() {
                 if existing != e.npub_hex {
-                    tracing::warn!("DIR отклонён целиком: попытка переписать готовую привязку");
+                    tracing::warn!("DIR refused whole: attempt to rewrite an existing binding");
                     return;
                 }
                 continue; // already checked above; a repeat is harmless
@@ -16719,7 +16949,7 @@ fn apply_group_directory_raw(
             let by_adder = !authority.is_empty() && authority == sender_sig_hex;
             if !by_adder && !sender_is_inviter {
                 tracing::warn!(
-                    "DIR отклонён целиком: первая привязка без подтверждённого происхождения",
+                    "DIR refused whole: a first binding without proven origin",
                 );
                 return;
             }
@@ -16732,7 +16962,7 @@ fn apply_group_directory_raw(
         }
         let _ = KeyValueRepo::set(&conn, &dir_epoch_key_of(&chat_id), &revision.to_string());
         alpha_database::policy::record_proven(&conn, &chat_id, &proven);
-    tracing::info!("DIR принят: эпоха={revision} записей={} новых={}", entries.len(), pending.len());
+    tracing::info!("DIR accepted: epoch={revision} entries={} new={}", entries.len(), pending.len());
 }
 
 // --- Directory free helpers ---
@@ -16836,6 +17066,54 @@ mod safety_number {
         let want = "19301 32491 95452 42789 48952 69674 27681 24068 69629 44228 80776 35599";
         assert_eq!(safety_number_of("npub1aaa", "npub1bbb"), want);
         assert_eq!(safety_number_of("npub1bbb", "npub1aaa"), want);
+    }
+}
+
+#[cfg(test)]
+mod media_purge_retry {
+    use super::purge_retry_in;
+
+    #[test]
+    fn an_unanswered_deletion_comes_back_sooner_first_then_daily_and_is_never_dropped() {
+        assert_eq!(purge_retry_in(1), 300);
+        assert_eq!(purge_retry_in(2), 600);
+        assert_eq!(purge_retry_in(12), 6 * 3600);
+        assert_eq!(purge_retry_in(40), 24 * 3600);
+    }
+
+    #[test]
+    fn a_purge_record_keeps_which_server_still_owes_which_blob() {
+        let v = serde_json::json!({ "ids": ["a"], "left": { "b": ["https://s.example"] }, "due": 0 });
+        let (ids, left) = super::purge_work(&v);
+        assert_eq!(ids, ["a"]);
+        assert_eq!(left.get("b").map(Vec::as_slice), Some(&["https://s.example".to_string()][..]));
+    }
+}
+
+#[cfg(test)]
+mod media_copy_ledger {
+    use super::*;
+    use alpha_media::CopyLedger;
+
+    #[test]
+    fn a_waiting_copy_outlives_the_process_until_it_is_made() {
+        let dir = std::env::temp_dir().join(format!("copy-ledger-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(DatabasePool::open(&dir.join("t.db"), "").unwrap());
+        let copy = alpha_media::WaitingCopy {
+            sha256: "ab".repeat(32),
+            source: "https://a.example/blob".into(),
+            content_type: "application/octet-stream".into(),
+            target: "https://b.example".into(),
+            tor: true,
+        };
+        KvCopyLedger { db: db.clone() }.waiting(&copy);
+
+        let next_run = KvCopyLedger { db: db.clone() };
+        assert_eq!(waiting_copies(&db.connection()), [copy.clone()]);
+        next_run.settled(&copy.sha256, &copy.target);
+        assert!(waiting_copies(&db.connection()).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -15,29 +15,28 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ── КОНТРАКТ СОСТОЯНИЙ ПЕРЕДАЧИ: ожидание сети ───────────────────────────────
+ * Transfer state contract: waiting for the network.
  *
- * Три РАЗНЫХ исхода, а не два. Дефект, ради которого писан этот файл, выглядел
- * так: при выключенном Wi-Fi отправка большого файла показывала ↻, нажатие на
- * него возвращало тот же значок через полсекунды, а ✕ не было вовсе — отменить
- * зависшую отправку было нечем. Ядро при этом за одну минуту доложило о неудаче
- * двадцать три раза, хотя никакой неудачи не происходило: ждали транспорт.
+ * Three DIFFERENT outcomes, not two. The defect behind this file: with Wi-Fi off a
+ * large send showed ↻, a tap brought the same icon back half a second later, and
+ * there was no ✕ to cancel the stuck send. Meanwhile the core reported a failure 23
+ * times a minute, though nothing failed: it was waiting for the transport.
  *
- * Проверяется ЖИВАЯ цепочка, ту же самую, что рисует пузырь:
+ * The LIVE chain is checked, the same one the bubble draws:
  *
- *   ядро (on_delivery_update "waiting_network")
+ *   core (on_delivery_update "waiting_network")
  *     → TransferEngine.onUploadWaitingNetwork
  *     → TransferState.WaitingNetwork
  *     → MediaState.stage
  *     → toOverlayState
  *     → FileUiState
  *
- * Второй модели состояния здесь нет и быть не должно — см. записи на местах
- * удалённых `TransferGlyph` и `MediaControl`.
+ * There is no second state model here and there must not be one: see the notes
+ * where `TransferGlyph` and `MediaControl` were removed.
  */
 class WaitingNetworkStateTest {
 
-    // ── тестовые заглушки: движок не должен трогать диск и сеть ──────────────
+    // ── test stubs: the engine must touch neither disk nor network ─────────
 
     private class FakeRepo : TransferRepository {
         override fun cacheEntry(ref: String) = CacheEntry.ABSENT
@@ -59,7 +58,7 @@ class WaitingNetworkStateTest {
     private val msg = "msg-1"
     private val key = TransferKey.upload(msg)
 
-    /** Довести отправку до подтверждённого рубежа в 40 из 100 байт. */
+    /** Bring the send to a confirmed mark of 40 of 100 bytes. */
     private fun TransferEngine.uploadedTo(bytes: Long, total: Long = 100L) {
         onUploadEncrypting(msg)
         onUploadBytes(msg, bytes, total)
@@ -73,18 +72,18 @@ class WaitingNetworkStateTest {
             albumItems = null, albumDone = 0, albumTotal = 0,
         ).toOverlayState(isOutgoing = true)
 
-    // ── 1. QUEUED — это не ожидание сети ────────────────────────────────────
+    // ── 1. QUEUED is not waiting for the network ───────────────────────────
 
     @Test
     fun QUEUED_IS_NOT_WAITING_NETWORK() {
         val e = engine()
         e.onUploadQueued(msg)
         val s = e.stateOf(key)
-        assertTrue("очередь остаётся очередью", s is TransferState.Queued)
-        assertFalse("очередь не должна выдавать себя за ожидание сети", s is TransferState.WaitingNetwork)
+        assertTrue("a queue stays a queue", s is TransferState.Queued)
+        assertFalse("a queue must not pose as waiting for the network", s is TransferState.WaitingNetwork)
     }
 
-    // ── 2. Ожидание сети — не неудача ───────────────────────────────────────
+    // ── 2. Waiting for the network is not a failure ────────────────────────
 
     @Test
     fun WAITING_NETWORK_NOT_FAILED() {
@@ -93,22 +92,22 @@ class WaitingNetworkStateTest {
         e.onUploadWaitingNetwork(msg)
         val snap = e.snapshotOf(key)
         assertTrue(snap.isWaitingNetwork)
-        assertFalse("ожидание не является неудачей", snap.isFailed)
-        assertFalse("ожидание не терминально — работа продолжится сама", snap.isTerminal)
+        assertFalse("waiting is not a failure", snap.isFailed)
+        assertFalse("waiting is not terminal: the work goes on by itself", snap.isTerminal)
     }
 
-    // ── 3. Ядро объявляет ожидание — движок его принимает ───────────────────
+    // ── 3. The core announces waiting, the engine takes it ─────────────────
 
     @Test
     fun OFFLINE_EMITS_WAITING_NETWORK() {
         val e = engine()
         e.uploadedTo(40L)
-        // именно то, что делает мост доставки при статусе "waiting_network"
+        // exactly what the delivery bridge does on status "waiting_network"
         e.onUploadWaitingNetwork(msg)
         assertTrue(e.stateOf(key) is TransferState.WaitingNetwork)
     }
 
-    // ── 4. Рубеж докачки переживает потерю связи ────────────────────────────
+    // ── 4. The resume mark survives a lost connection ──────────────────────
 
     @Test
     fun WAITING_NETWORK_PRESERVES_PROGRESS() {
@@ -116,54 +115,54 @@ class WaitingNetworkStateTest {
         e.uploadedTo(40L, total = 100L)
         e.onUploadWaitingNetwork(msg)
         val p = e.snapshotOf(key).progress
-        assertEquals("подтверждённые байты не обнуляются", 40L, p.bytes)
+        assertEquals("confirmed bytes are not reset", 40L, p.bytes)
         assertEquals(100L, p.total)
     }
 
-    // ── 5. Показывается ✕ ───────────────────────────────────────────────────
+    // ── 5. ✕ is shown ──────────────────────────────────────────────────────
 
     @Test
     fun WAITING_NETWORK_SHOWS_CANCEL() {
         val e = engine()
         e.uploadedTo(40L)
         e.onUploadWaitingNetwork(msg)
-        assertTrue("✕ обязан быть на каждом занятом состоянии", e.snapshotOf(key).canCancel)
+        assertTrue("✕ must be on every busy state", e.snapshotOf(key).canCancel)
 
-        // и то же самое на самом конце цепочки, где рисуется значок
+        // and the same at the very end of the chain, where the icon is drawn
         val ui = overlayOf(TransferStage.WaitingNetwork, 40L, 100L)
         assertTrue(ui is FileUiState.WaitingNetwork)
-        assertTrue("оверлей занят → центральный значок ✕", ui.isActive)
+        assertTrue("a busy overlay → the centre icon is ✕", ui.isActive)
     }
 
-    // ── 6. ↻ НЕ показывается ────────────────────────────────────────────────
+    // ── 6. ↻ is NOT shown ──────────────────────────────────────────────────
 
     @Test
     fun WAITING_NETWORK_NO_RETRY() {
         val e = engine()
         e.uploadedTo(40L)
         e.onUploadWaitingNetwork(msg)
-        assertFalse("повторять нечего — работа продолжится сама", e.snapshotOf(key).canRetry)
+        assertFalse("nothing to retry: the work goes on by itself", e.snapshotOf(key).canRetry)
 
-        // ↻ в оверлее рисуется РОВНО по одной ветке — Failed. Её быть не должно.
+        // The overlay draws ↻ on exactly one branch, Failed. It must not be here.
         val ui = overlayOf(TransferStage.WaitingNetwork, 40L, 100L)
-        assertFalse("ожидание не должно попадать в ветку ↻", ui is FileUiState.Failed)
+        assertFalse("waiting must not reach the ↻ branch", ui is FileUiState.Failed)
     }
 
-    // ── 7. Связь вернулась — докачка, а не начало заново ────────────────────
+    // ── 7. The connection is back: resume, not restart ─────────────────────
 
     @Test
     fun NETWORK_RETURN_RESUMES() {
         val e = engine()
         e.uploadedTo(40L, total = 100L)
         e.onUploadWaitingNetwork(msg)
-        // ядро захватило строку и объявило «отправляю»
+        // the core claimed the row and announced "sending"
         e.onUploadResumed(msg)
         val s = e.stateOf(key)
-        assertTrue("ожидание переходит в загрузку", s is TransferState.Uploading)
-        assertEquals("докачка идёт с рубежа, а не с нуля", 40L, e.snapshotOf(key).progress.bytes)
+        assertTrue("waiting turns into uploading", s is TransferState.Uploading)
+        assertEquals("the resume starts at the mark, not at zero", 40L, e.snapshotOf(key).progress.bytes)
     }
 
-    // ── 8. Отмена по ожиданию не воскресает ─────────────────────────────────
+    // ── 8. A cancel is not revived by a waiting report ─────────────────────
 
     @Test
     fun CANCEL_WAITING_NO_RESURRECTION() {
@@ -173,69 +172,68 @@ class WaitingNetworkStateTest {
         e.dispatch(key, TransferAction.Cancel)
         assertTrue(e.stateOf(key) is TransferState.Cancelled)
 
-        // Доклад об ожидании мог быть уже в пути к моменту нажатия ✕ — он не
-        // имеет права оживить отменённое.
+        // A waiting report may already be on its way when ✕ is tapped; it must not
+        // revive what was cancelled.
         e.onUploadWaitingNetwork(msg)
-        assertTrue("отменённое остаётся отменённым", e.stateOf(key) is TransferState.Cancelled)
+        assertTrue("cancelled stays cancelled", e.stateOf(key) is TransferState.Cancelled)
     }
 
-    // ── 9. Настоящая неудача по-прежнему даёт ↻ ─────────────────────────────
+    // ── 9. A real failure still gives ↻ ────────────────────────────────────
 
     @Test
     fun FAILED_SHOWS_RETRY() {
         val e = engine()
         e.uploadedTo(40L)
-        e.onUploadFailed(msg, "сервер отказал")
+        e.onUploadFailed(msg, "server refused")
         val snap = e.snapshotOf(key)
         assertTrue(snap.isFailed)
-        assertTrue("настоящая ошибка требует ↻", snap.canRetry)
+        assertTrue("a real error needs ↻", snap.canRetry)
 
         val ui = overlayOf(TransferStage.Failed)
-        assertTrue("↻ рисуется по ветке Failed", ui is FileUiState.Failed)
+        assertTrue("↻ is drawn on the Failed branch", ui is FileUiState.Failed)
     }
 
-    // ── 10. Повтор без сети даёт ожидание, а не круг неудач ────────────────
+    // ── 10. A retry without network waits, no failure loop ─────────────────
 
     @Test
     fun RETRY_OFFLINE_WAITING() {
         val e = engine()
         e.uploadedTo(40L)
-        e.onUploadFailed(msg, "обрыв")
+        e.onUploadFailed(msg, "cut")
         assertTrue(e.snapshotOf(key).isFailed)
 
-        // Пользователь жмёт ↻. Ядро ставит строку обратно в очередь, шлюз связи
-        // не пропускает и докладывает ожидание.
+        // The user taps ↻. The core queues the row again, the connection gate does
+        // not let it through and reports waiting.
         e.onUploadEncrypting(msg)
         e.onUploadWaitingNetwork(msg)
-        assertTrue("повтор без сети — ожидание", e.stateOf(key) is TransferState.WaitingNetwork)
+        assertTrue("a retry without network waits", e.stateOf(key) is TransferState.WaitingNetwork)
 
-        // И пессимистичный ответ отправителя «не получилось» НЕ имеет права
-        // затереть точный ответ ядра — иначе возвращается тот самый круг ↻.
+        // And the sender's pessimistic "it failed" must not overwrite the core's exact
+        // answer, or the ↻ loop comes back.
         e.onUploadFailed(msg)
         assertTrue(
-            "общее «нет» не перебивает точное «ждём транспорт»",
+            "a general 'no' does not override the exact 'waiting for transport'",
             e.stateOf(key) is TransferState.WaitingNetwork,
         )
     }
 
-    // ── 11. У повтора один владелец ─────────────────────────────────────────
+    // ── 11. A retry has one owner ──────────────────────────────────────────
 
     @Test
     fun RETRY_SINGLE_OWNER() {
         val e = engine()
         e.uploadedTo(40L)
         e.onUploadWaitingNetwork(msg)
-        // Отправка — дело конвейера отправки, а не нажатия. Повтор загрузки из
-        // интерфейса не может завести ВТОРОГО отправителя: движок отказывает
-        // любому Start по ключу отправки.
+        // Sending belongs to the send pipeline, not to a tap. A retry from the UI
+        // cannot start a SECOND sender: the engine refuses any Start on a send key.
         e.dispatch(key, TransferAction.Start)
         assertTrue(
-            "нажатие не заводит второго отправителя",
+            "a tap does not start a second sender",
             e.stateOf(key) is TransferState.WaitingNetwork,
         )
     }
 
-    // ── 12. Публикация ровно одна ───────────────────────────────────────────
+    // ── 12. Exactly one publish ────────────────────────────────────────────
 
     @Test
     fun PUBLISH_ONCE() {
@@ -247,38 +245,38 @@ class WaitingNetworkStateTest {
         e.onUploadSent(msg)
         assertTrue(e.stateOf(key) is TransferState.Completed)
 
-        // Опоздавший доклад об ожидании (шлюз связи успел объявить его до
-        // подтверждения публикации) не откатывает завершённое обратно в работу.
+        // A late waiting report (the gate announced it before the publish was
+        // confirmed) does not roll a finished send back into work.
         e.onUploadWaitingNetwork(msg)
-        assertTrue("завершённое не возвращается в ожидание", e.stateOf(key) is TransferState.Completed)
+        assertTrue("a finished send does not go back to waiting", e.stateOf(key) is TransferState.Completed)
     }
 
-    // ── T4: регрессия докачки ───────────────────────────────────────────────
+    // ── T4: resume regression ──────────────────────────────────────────────
 
     @Test
     fun T4_RESUME_REGRESSION() {
         val e = engine()
-        // 40 % ушло, связь пропала
+        // 40 % sent, the connection is lost
         e.uploadedTo(40L, total = 100L)
         e.onUploadWaitingNetwork(msg)
         assertEquals(40L, e.snapshotOf(key).progress.bytes)
 
-        // связь вернулась, ядро продолжает С РУБЕЖА (абсолютные числа от ядра)
+        // the connection is back, the core goes on FROM THE MARK (absolute numbers from the core)
         e.onUploadResumed(msg)
         e.onUploadBytes(msg, 41L, 100L)
         assertTrue(e.stateOf(key) is TransferState.Uploading)
         assertTrue(
-            "докачка не начинается с нуля",
+            "the resume does not start at zero",
             e.snapshotOf(key).progress.bytes >= 40L,
         )
 
         e.onUploadBytes(msg, 100L, 100L)
         e.onUploadSent(msg)
         assertTrue(e.stateOf(key) is TransferState.Completed)
-        assertNull("у отправки нет локального файла назначения", e.snapshotOf(key).localPath)
+        assertNull("a send has no local destination file", e.snapshotOf(key).localPath)
     }
 
-    // ── карта состояний оверлея целиком (ничего не потерялось) ─────────────
+    // ── the overlay state map in full (nothing lost) ───────────────────────
 
     @Test
     fun ALBUM_AND_STAGE_MAPPING() {
@@ -294,53 +292,53 @@ class WaitingNetworkStateTest {
         assertTrue(overlayOf(TransferStage.Canceled) is FileUiState.Hidden)
     }
 
-    // ── восстановление после гибели процесса ───────────────────────────────
+    // ── recovery after the process dies ────────────────────────────────────
 
     /**
-     * Строка очереди пережила процесс — экран обязан это увидеть.
+     * A queue row survived the process: the screen must show it.
      *
-     * Наблюдалось на устройстве: приложение убито посреди отправки, после
-     * запуска ядро продолжило докачку с рубежа (`RESUME 192 из 241`, одна
-     * публикация), а на пузыре были только часы — ни ✕, ни кольца.
+     * Seen on a device: the app was killed mid-send, after start the core resumed from
+     * the mark (`RESUME 192 of 241`, one publish), and the bubble showed only a clock,
+     * no ✕ and no ring.
      */
     @Test
     fun SEED_RESTORES_QUEUED_AFTER_RESTART() {
-        val e = engine()  // свежий движок = состояние после перезапуска
-        assertTrue("движок ничего не помнит", e.stateOf(key) is TransferState.Idle)
+        val e = engine()  // a fresh engine = the state after a restart
+        assertTrue("the engine remembers nothing", e.stateOf(key) is TransferState.Idle)
 
         e.seedQueuedIfUnknown(msg)
         val snap = e.snapshotOf(key)
         assertTrue(snap.state is TransferState.Queued)
-        assertTrue("✕ обязан появиться сразу", snap.canCancel)
-        assertFalse("это не неудача — ↻ не предлагается", snap.canRetry)
+        assertTrue("✕ must appear at once", snap.canCancel)
+        assertFalse("not a failure: no ↻ offered", snap.canRetry)
     }
 
-    /** Живое состояние сильнее восстановленного: обновление списка не сбрасывает работу. */
+    /** A live state beats a restored one: a list refresh does not reset the work. */
     @Test
     fun SEED_NEVER_CLOBBERS_LIVE() {
         val e = engine()
         e.uploadedTo(40L, total = 100L)
         e.seedQueuedIfUnknown(msg)
-        assertTrue("идущая загрузка не откатывается в очередь", e.stateOf(key) is TransferState.Uploading)
+        assertTrue("a running upload does not fall back to the queue", e.stateOf(key) is TransferState.Uploading)
 
         e.onUploadWaitingNetwork(msg)
         e.seedQueuedIfUnknown(msg)
-        assertTrue("ожидание сети не подменяется очередью", e.stateOf(key) is TransferState.WaitingNetwork)
+        assertTrue("waiting for the network is not replaced by the queue", e.stateOf(key) is TransferState.WaitingNetwork)
 
         e.dispatch(key, TransferAction.Cancel)
         e.seedQueuedIfUnknown(msg)
-        assertTrue("отменённое не воскресает из очереди", e.stateOf(key) is TransferState.Cancelled)
+        assertTrue("cancelled is not revived from the queue", e.stateOf(key) is TransferState.Cancelled)
     }
 
-    /** Публикация не рисует кольцо байтов: байты уже ушли. */
+    /** Publishing draws no byte ring: the bytes are already gone. */
     @Test
     fun PUBLISHING_NO_BYTE_PROGRESS() {
         val e = engine()
         e.uploadedTo(100L, total = 100L)
         e.onUploadPublishing(msg)
         assertTrue(e.stateOf(key) is TransferState.Publishing)
-        assertNull("у публикации нет собственного прогресса", e.stateOf(key).progressOrNull)
-        // и на конце цепочки кольца тоже нет
+        assertNull("publishing has no progress of its own", e.stateOf(key).progressOrNull)
+        // and no ring at the end of the chain either
         assertFalse(overlayOf(TransferStage.Uploaded, 100L, 100L).isActive)
     }
 }

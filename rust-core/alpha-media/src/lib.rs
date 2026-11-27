@@ -96,7 +96,10 @@ pub fn with_socks_proxy(builder: reqwest::ClientBuilder, addr: Option<std::net::
     }
 }
 
-pub use blossom::{own_servers, set_own_servers, set_map_down, BlobDescriptor, BlossomClient, MediaSigner, DEFAULT_BLOSSOM_SERVERS};
+pub use blossom::{
+    own_servers, resume_copies, set_copy_ledger, set_own_servers, set_map_down, BlobDescriptor, BlossomClient, CopyLedger,
+    MediaSigner, WaitingCopy, DEFAULT_BLOSSOM_SERVERS,
+};
 pub use blob_transport::{
     active_codec, unwrap_blob, BlobEnvelope, BlobEnvelopeCodec, BlobMetrics, BlobMetricsSnapshot,
     JsonCodec, BLOB_ENVELOPE_VERSION,
@@ -105,7 +108,7 @@ pub use chunker::{Chunk, EncryptedChunker, CHUNK_SIZE};
 pub use crypto::{blake3_hash, generate_key, EncryptedMedia, EncryptedStreamChunk, MediaCrypto, StreamCrypto, STREAM_CHUNK_SIZE};
 pub use error::{MediaError, MediaResult};
 pub use media_ref::{MediaRef, StreamChunkInfo, StreamChunkUploadInfo, UploadResult};
-pub use link::network_changed;
+pub use link::{network_changed, set_metered};
 pub use pipeline::MediaPipeline;
 pub use resume::{ChunkCheckpoint, ConfirmedChunk};
 pub use thumbnail::{MediaType, Thumbnail, ThumbnailGenerator};

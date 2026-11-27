@@ -49,11 +49,8 @@ class MediaSendStore(private val context: Context) {
     }
 
     /**
-     * Delivered: drop only the job record.
-     *
-     * Files stay: the sender's bubble is drawn from them. [sweep] removes them
-     * later under its "older than a day" rule; after that the sender's own
-     * attachment is downloaded from storage like any other.
+     * Delivered: drop only the job record. The files move into the media cache
+     * right after (the queue adopts them); [sweep] takes whatever was left.
      */
     @Synchronized
     fun deleteRecord(job: MediaSendJob) {
@@ -69,7 +66,7 @@ class MediaSendStore(private val context: Context) {
                     ?: run {
                         // A corrupt job cannot be restored; keeping it forever
                         // would retry garbage on every launch.
-                        android.util.Log.w(TAG, "битое задание ${f.name} — удалено")
+                        android.util.Log.w(TAG, "corrupt job ${f.name} deleted")
                         f.delete(); null
                     }
             }
@@ -98,12 +95,16 @@ class MediaSendStore(private val context: Context) {
      */
     @Synchronized
     fun sweep(maxAgeMs: Long = 24L * 60 * 60 * 1000) {
-        val cutoff = System.currentTimeMillis() - maxAgeMs
+        val now = System.currentTimeMillis()
+        val cutoff = now - maxAgeMs
         val jobs = all()
         val alive = jobs.map { it.sendId }.toSet()
+        // A finished send's files live in the cache; a work dir without a job is a
+        // leftover. Only a just-created one may still be waiting for its job record.
+        val settled = now - WORK_DIR_GRACE_MS
         File(root, "work").listFiles()?.forEach { dir ->
-            val stale = (dir.listFiles()?.maxOfOrNull { it.lastModified() } ?: dir.lastModified()) < cutoff
-            if (dir.name !in alive && stale) runCatching { dir.deleteRecursively() }
+            val touched = dir.listFiles()?.maxOfOrNull { it.lastModified() } ?: dir.lastModified()
+            if (dir.name !in alive && touched < settled) runCatching { dir.deleteRecursively() }
         }
         jobs.filter { it.createdAt < cutoff }.forEach { delete(it) }
     }
@@ -111,5 +112,6 @@ class MediaSendStore(private val context: Context) {
     companion object {
         private const val TAG = "AlphaSendQueue"
         private const val OUTBOX_DIR = "outbox"
+        private const val WORK_DIR_GRACE_MS = 10L * 60 * 1000
     }
 }

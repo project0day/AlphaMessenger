@@ -3,6 +3,7 @@ package com.alphamessenger.ui.theme
 import android.content.Context
 import android.os.Build
 import android.util.Base64
+import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -28,6 +29,7 @@ import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import com.alphamessenger.R
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -370,7 +372,7 @@ object PatternLayout {
 
 /** A brand pattern: which figures, how they lie, and its colour pairs (light bg, ink, dark bg, ink). */
 class PatternRecipe(
-    val key: String, val name: String, val tile: Float, val set: List<String>,
+    val key: String, @StringRes val title: Int, val tile: Float, val set: List<String>,
     val size: ClosedFloatingPointRange<Float>, val palettes: List<List<Long>>,
     val fill: Float = PatternLayout.Density.NORMAL.fill, val rotate: Float = 30f, val mesh: Boolean = false,
     /** Columns of glyphs ([columns] of them), each a streak whose head is bright and whose tail fades. */
@@ -382,7 +384,7 @@ class PatternRecipe(
     /** The same seed always gives the same pattern. */
     fun spec(palette: Int = 0, seed: Long = defaultSeed): PatternSpec {
         val p = palettes[palette.coerceIn(0, palettes.size - 1)]
-        fun made(items: List<PatternItem>, stroke: Float) = PatternSpec(name, tile, listOf(Color(p[0])), Color(p[1]), listOf(Color(p[2])), Color(p[3]),
+        fun made(items: List<PatternItem>, stroke: Float) = PatternSpec(key, tile, listOf(Color(p[0])), Color(p[1]), listOf(Color(p[2])), Color(p[3]),
             180f, opacity, 1f, stroke, 0f, items.take(PatternSpec.MAX_ITEMS))
         if (rain) {
             var s = seed and 0xFFFFFFFFL
@@ -435,54 +437,54 @@ class PatternRecipe(
 private fun pal(vararg p: Long): List<List<Long>> = p.toList().chunked(4)
 
 val PATTERN_RECIPES: List<PatternRecipe> = listOf(
-    PatternRecipe("drawn", "Рисунки Альфы", 300f, listOf("d_ghost", "d_ghostwave", "d_onion", "d_bubbleheart", "d_locksmile", "d_keyheart", "d_wingmail", "d_tower", "d_planet", "d_rocket", "d_cat", "d_coffee", "d_headphones", "d_camera", "d_crown", "d_bolt", "d_rain", "d_moonstars", "d_plant", "d_cactus", "d_icecream", "d_pizza", "d_donut", "d_notes", "d_gamepad", "d_cool", "d_sparkle2", "d_shieldok"), 0.95f..1.35f,
+    PatternRecipe("drawn", R.string.pattern_drawn, 300f, listOf("d_ghost", "d_ghostwave", "d_onion", "d_bubbleheart", "d_locksmile", "d_keyheart", "d_wingmail", "d_tower", "d_planet", "d_rocket", "d_cat", "d_coffee", "d_headphones", "d_camera", "d_crown", "d_bolt", "d_rain", "d_moonstars", "d_plant", "d_cactus", "d_icecream", "d_pizza", "d_donut", "d_notes", "d_gamepad", "d_cool", "d_sparkle2", "d_shieldok"), 0.95f..1.35f,
         pal(0xFFECE7FB, 0xFF6D4FD6, 0xFF121019, 0xFFA78BFA, 0xFFE8F1EC, 0xFF2F7A5A, 0xFF0E1612, 0xFF8FD6B4, 0xFFF6ECE4, 0xFFA35A2C, 0xFF1B130E, 0xFFEAB08A),
         fill = 0.3f),
-    PatternRecipe("matrix", "Матрица", 192f, listOf("g0", "g1", "g2", "g3", "g4", "g5", "g6", "g7", "alpha"), 0.62f..0.78f,
+    PatternRecipe("matrix", R.string.pattern_matrix, 192f, listOf("g0", "g1", "g2", "g3", "g4", "g5", "g6", "g7", "alpha"), 0.62f..0.78f,
         pal(0xFFE7F5EA, 0xFF138A36, 0xFF030A05, 0xFF3DFF7A, 0xFFE6F3F7, 0xFF0E7490, 0xFF02090C, 0xFF5EEBFF, 0xFFF1EAFB, 0xFF7C3AED, 0xFF07030D, 0xFFC084FC),
         rain = true, opacity = 0.42f),
-    PatternRecipe("alpha", "Альфа", 240f, listOf("alpha", "alpha", "sparkles", "star", "message-circle", "lock", "shield", "key-round", "send", "smile"), 0.8f..1.4f,
+    PatternRecipe("alpha", R.string.pattern_alpha, 240f, listOf("alpha", "alpha", "sparkles", "star", "message-circle", "lock", "shield", "key-round", "send", "smile"), 0.8f..1.4f,
         pal(0xFFECE7FB, 0xFF6D4FD6, 0xFF121019, 0xFFA78BFA, 0xFFFBE9F4, 0xFFC0267A, 0xFF1A0F1A, 0xFFF0ABFC, 0xFFE9F1FB, 0xFF3B5BD6, 0xFF0E1420, 0xFF93B4FF)),
-    PatternRecipe("net", "Связь", 260f, listOf("ring", "ring", "ring", "dot", "signal", "radio-tower", "satellite-dish", "wifi", "globe"), 0.75f..1.2f,
+    PatternRecipe("net", R.string.pattern_net, 260f, listOf("ring", "ring", "ring", "dot", "signal", "radio-tower", "satellite-dish", "wifi", "globe"), 0.75f..1.2f,
         pal(0xFFE6F2F1, 0xFF2F8A84, 0xFF0F1B1D, 0xFF6FD3C6, 0xFFEEF0FB, 0xFF5560D0, 0xFF10121E, 0xFF9AA5FF, 0xFFF3EFE6, 0xFF9A6B23, 0xFF1B160E, 0xFFE2B56A),
         fill = 0.2f, mesh = true),
-    PatternRecipe("doodle", "Каракули", 300f, listOf("smile", "heart", "leaf", "bubble", "star", "music", "coffee", "camera", "cat", "sun", "cloud", "gift",
+    PatternRecipe("doodle", R.string.pattern_doodle, 300f, listOf("smile", "heart", "leaf", "bubble", "star", "music", "coffee", "camera", "cat", "sun", "cloud", "gift",
         "plane", "rocket", "flower", "ghost", "headphones", "umbrella", "anchor", "paw-print", "gamepad-2", "lightbulb", "glasses", "crown", "moon"), 0.75f..1.15f,
         pal(0xFFEEE9DC, 0xFF568D8C, 0xFF172A31, 0xFF75AAA5, 0xFFF4EAD9, 0xFFB0663A, 0xFF21160F, 0xFFE0A37A, 0xFFE9ECF1, 0xFF5A6270, 0xFF14171C, 0xFFA9B1BF),
         fill = 0.32f),
-    PatternRecipe("space", "Космос", 300f, listOf("rocket", "orbit", "satellite", "moon", "moon-star", "sparkles", "sparkle", "sun", "telescope", "earth", "star", "cloud-moon", "dot", "plus"), 0.6f..1.3f,
+    PatternRecipe("space", R.string.pattern_space, 300f, listOf("rocket", "orbit", "satellite", "moon", "moon-star", "sparkles", "sparkle", "sun", "telescope", "earth", "star", "cloud-moon", "dot", "plus"), 0.6f..1.3f,
         pal(0xFFE8EBF7, 0xFF3F4AA8, 0xFF0B0D1C, 0xFFC7CDFA, 0xFFF3EAFA, 0xFF8B3FB8, 0xFF120A1A, 0xFFE3B5FF, 0xFFE6F0F5, 0xFF22708F, 0xFF08141A, 0xFF9FE0F7),
         fill = 0.28f, rotate = 40f),
-    PatternRecipe("cafe", "Кофейня", 300f, listOf("coffee", "cup-soda", "croissant", "cookie", "cake-slice", "donut", "ice-cream-cone", "sandwich", "popcorn",
+    PatternRecipe("cafe", R.string.pattern_cafe, 300f, listOf("coffee", "cup-soda", "croissant", "cookie", "cake-slice", "donut", "ice-cream-cone", "sandwich", "popcorn",
         "candy", "cherry", "apple", "citrus", "grape", "banana", "dessert", "milk", "wine"), 0.75f..1.15f,
         pal(0xFFF4ECE1, 0xFF8A5A34, 0xFF1C1611, 0xFFD9A774, 0xFFFCEFF1, 0xFFB4446A, 0xFF1E1015, 0xFFF0A3BC, 0xFFEFF5EA, 0xFF4F7F3A, 0xFF121A0E, 0xFFA9D68F),
         fill = 0.32f),
-    PatternRecipe("nature", "Природа", 300f, listOf("leaf", "trees", "tree-pine", "tree-deciduous", "flower", "flower-2", "sprout", "mountain", "sun", "cloud",
+    PatternRecipe("nature", R.string.pattern_nature, 300f, listOf("leaf", "trees", "tree-pine", "tree-deciduous", "flower", "flower-2", "sprout", "mountain", "sun", "cloud",
         "bird", "fish", "bug", "snail", "rabbit", "squirrel", "feather", "clover", "shell", "rainbow", "snowflake", "droplet"), 0.7f..1.2f,
         pal(0xFFEAF3E6, 0xFF3F7D3A, 0xFF0F1A0F, 0xFF8FD18A, 0xFFE8F1F5, 0xFF2C6E8A, 0xFF0B151A, 0xFF8CCBE6, 0xFFF6F0E2, 0xFF8A6A1F, 0xFF1A160B, 0xFFE0C36A),
         fill = 0.3f),
-    PatternRecipe("pets", "Котики", 280f, listOf("cat", "dog", "paw-print", "paw-print", "fish", "bone", "heart", "rabbit", "bird", "turtle", "squirrel", "rat", "egg"), 0.75f..1.25f,
+    PatternRecipe("pets", R.string.pattern_pets, 280f, listOf("cat", "dog", "paw-print", "paw-print", "fish", "bone", "heart", "rabbit", "bird", "turtle", "squirrel", "rat", "egg"), 0.75f..1.25f,
         pal(0xFFF6EEE6, 0xFFA0603A, 0xFF1E140F, 0xFFE8AE85, 0xFFF0ECF8, 0xFF6A4FB5, 0xFF130F1D, 0xFFB9A4F2, 0xFFEAF2EE, 0xFF3D7A63, 0xFF0F1915, 0xFF8ED4B8),
         fill = 0.3f),
-    PatternRecipe("music", "Музыка", 280f, listOf("music", "music-2", "music-3", "music-4", "headphones", "guitar", "mic", "disc", "disc-3", "radio", "drum", "speaker", "audio-lines"), 0.75f..1.25f,
+    PatternRecipe("music", R.string.pattern_music, 280f, listOf("music", "music-2", "music-3", "music-4", "headphones", "guitar", "mic", "disc", "disc-3", "radio", "drum", "speaker", "audio-lines"), 0.75f..1.25f,
         pal(0xFFF1ECFA, 0xFF6B3FC0, 0xFF120D1C, 0xFFC4A8FF, 0xFFFBEDEA, 0xFFC0452D, 0xFF1E100D, 0xFFF4A28F, 0xFFE8F2F4, 0xFF20707E, 0xFF0A1517, 0xFF84D6E4),
         fill = 0.28f),
-    PatternRecipe("travel", "Путешествия", 300f, listOf("plane", "map", "compass", "tent", "mountain-snow", "camera", "luggage", "ship", "train-front", "car",
+    PatternRecipe("travel", R.string.pattern_travel, 300f, listOf("plane", "map", "compass", "tent", "mountain-snow", "camera", "luggage", "ship", "train-front", "car",
         "map-pin", "ticket", "bike", "sailboat", "anchor", "caravan", "sun", "tree-palm"), 0.75f..1.2f,
         pal(0xFFE6F0F7, 0xFF2D6A9A, 0xFF0B141B, 0xFF8EC2EA, 0xFFF7EFE3, 0xFFA3662A, 0xFF1C150D, 0xFFEAB878, 0xFFEAF4EC, 0xFF3A7D52, 0xFF0E1911, 0xFF92D7A8),
         fill = 0.3f),
-    PatternRecipe("party", "Праздник", 280f, listOf("gift", "party-popper", "cake", "candy", "sparkles", "star", "heart", "crown", "wine", "music", "cake-slice", "lollipop"), 0.75f..1.25f,
+    PatternRecipe("party", R.string.pattern_party, 280f, listOf("gift", "party-popper", "cake", "candy", "sparkles", "star", "heart", "crown", "wine", "music", "cake-slice", "lollipop"), 0.75f..1.25f,
         pal(0xFFFBEEF4, 0xFFC0267A, 0xFF1C0F16, 0xFFF39AC7, 0xFFFFF4E0, 0xFFB7791F, 0xFF1D160A, 0xFFF2C66B, 0xFFEEF0FC, 0xFF4F5BD5, 0xFF0F1120, 0xFFA5ADFF),
         fill = 0.3f, rotate = 35f),
-    PatternRecipe("tech", "Техника", 300f, listOf("cpu", "wifi", "smartphone", "laptop", "gamepad-2", "headphones", "satellite-dish", "battery", "bluetooth", "code",
+    PatternRecipe("tech", R.string.pattern_tech, 300f, listOf("cpu", "wifi", "smartphone", "laptop", "gamepad-2", "headphones", "satellite-dish", "battery", "bluetooth", "code",
         "terminal", "rocket", "bot", "keyboard", "mouse", "joystick", "radio-tower", "router"), 0.75f..1.2f,
         pal(0xFFE9EEF4, 0xFF3E5C7E, 0xFF0C1118, 0xFF93B6DD, 0xFFE7F5EA, 0xFF178A45, 0xFF06120A, 0xFF5EE59A, 0xFFF0EAFB, 0xFF7240D0, 0xFF0F0A19, 0xFFC1A3FF),
         fill = 0.28f, rotate = 20f),
-    PatternRecipe("winter", "Зима", 300f, listOf("snowflake", "snowflake", "snowman", "christmas-tree", "gift", "candle", "bell", "star", "sparkles", "sleigh",
+    PatternRecipe("winter", R.string.pattern_winter, 300f, listOf("snowflake", "snowflake", "snowman", "christmas-tree", "gift", "candle", "bell", "star", "sparkles", "sleigh",
         "snowboarding", "mug", "cookie", "candy-cane", "deer", "ice-skating", "cloud-snow", "tree-pine"), 0.7f..1.25f,
         pal(0xFFE8F1F8, 0xFF2F6E9E, 0xFF0A1219, 0xFF9CCBF0, 0xFFF7ECEC, 0xFFB03A3A, 0xFF1C0E0E, 0xFFF0A0A0, 0xFFEAF4EE, 0xFF2E7550, 0xFF0C1710, 0xFF8FD6AE),
         fill = 0.3f),
-    PatternRecipe("keys", "Ключи", 260f, listOf("lock", "key", "shield", "key-round", "fingerprint", "eye", "dot", "plus"), 0.8f..1.3f,
+    PatternRecipe("keys", R.string.pattern_keys, 260f, listOf("lock", "key", "shield", "key-round", "fingerprint", "eye", "dot", "plus"), 0.8f..1.3f,
         pal(0xFFEEF0F3, 0xFF4A5568, 0xFF111318, 0xFFA0AEC0, 0xFFEFE9FB, 0xFF7C3AED, 0xFF130F1D, 0xFFC4B5FD, 0xFFFBF1E6, 0xFFB45309, 0xFF1C140C, 0xFFFBBF6A)),
 )
 

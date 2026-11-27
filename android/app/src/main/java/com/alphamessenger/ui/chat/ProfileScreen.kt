@@ -93,16 +93,29 @@ fun profileStatusOf(raw: String): ProfileStatus = when (raw.lowercase()) {
     else -> ProfileStatus.Offline
 }
 
+/** How long the peer's own status and their presence each stay before the other shows. */
+private const val STATUS_TURN_MS = 15_000L
+
 /**
- * The line under a contact's name: "online", their own status text,
+ * The line under a contact's name: "online" taking turns with their own status text,
  * "last seen 5 min ago", or "last seen recently" when the time is unknown.
  */
 @Composable
 fun presenceSubtitle(status: String, statusText: String, lastSeen: Long): String {
     val st = profileStatusOf(status)
     return when (st) {
-        ProfileStatus.Online, ProfileStatus.Away, ProfileStatus.Dnd ->
-            statusText.ifBlank { stringResource(st.labelRes).lowercase() }
+        ProfileStatus.Online, ProfileStatus.Away, ProfileStatus.Dnd -> {
+            val label = stringResource(st.labelRes).lowercase()
+            // Their own status and "online" take turns, so neither hides the other.
+            var ownTurn by androidx.compose.runtime.remember(statusText) { androidx.compose.runtime.mutableStateOf(false) }
+            androidx.compose.runtime.LaunchedEffect(statusText) {
+                while (statusText.isNotBlank()) {
+                    kotlinx.coroutines.delay(STATUS_TURN_MS)
+                    ownTurn = !ownTurn
+                }
+            }
+            if (ownTurn && statusText.isNotBlank()) statusText else label
+        }
         ProfileStatus.Offline -> {
             val seen = lastSeenLabel(lastSeen)
             if (seen.isBlank()) stringResource(R.string.presence_seen_recently)

@@ -47,8 +47,8 @@ object AttachmentCache {
 
     /**
      * File name without what breaks a file system (separators, reserved and
-     * control characters). Letters of any language stay: "Отчёт.pdf" is sent as
-     * "Отчёт.pdf", not "_____.pdf".
+     * control characters). Letters of any language stay: "Résumé.pdf" is sent as
+     * "Résumé.pdf", not "_____.pdf".
      */
     fun safeName(name: String): String {
         val cleaned = name.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_").trim().trimStart('.')

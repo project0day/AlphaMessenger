@@ -60,7 +60,7 @@ import com.alphamessenger.ui.theme.AlphaColorScheme
 import com.alphamessenger.ui.theme.AlphaTheme
 
 /*
- * Onboarding kit — the new design (docs: "AlphaMessenger — новый дизайн").
+ * Onboarding kit — the new design (docs: "AlphaMessenger — new design").
  *
  * Solid surfaces, no glass: depth comes from a step of background brightness,
  * never from blur or shadow. One primary action per screen, at the bottom

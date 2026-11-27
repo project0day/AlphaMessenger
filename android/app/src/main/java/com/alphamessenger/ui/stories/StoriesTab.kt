@@ -63,7 +63,7 @@ fun StoriesTab(
                 else pluralStringResource(R.plurals.stories_count, mine.size, mine.size) + " · " +
                     pluralStringResource(R.plurals.stories_views, mine.flatMap { it.viewers }.distinctBy { it.sid }.size,
                         mine.flatMap { it.viewers }.distinctBy { it.sid }.size),
-                avatarPath = st.myAvatar, seed = "me", initial = st.myName.takeIf { it.isNotBlank() }?.let { com.alphamessenger.ui.components.avatarInitial(it) } ?: "Я",
+                avatarPath = st.myAvatar, seed = "me", initial = st.myName.takeIf { it.isNotBlank() }?.let { com.alphamessenger.ui.components.avatarInitial(it) } ?: stringResource(R.string.self_avatar_initial),
                 ring = if (mine.isEmpty()) null else StoryRing(mine.size, false),
                 colors = colors,
                 onClick = { if (mine.isEmpty()) onCreate() else onOpen(KEY_MINE) },
